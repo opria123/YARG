@@ -246,7 +246,10 @@
             "EmptyMyLobbies": "You have not hosted any lobbies yet",
             "EmptyRecents": "No recent lobbies",
             "EmptyDiscovered": "No LAN lobbies detected",
-            "Back": "Back"
+            "Back": "Back",
+            "StatusHosting": "Hosting Lobby",
+            "StatusConnected": "Connected to Lobby",
+            "StatusNotConnected": "Not Connected"
         },
         "MusicLibrary": {
             "Name": "Music Library",

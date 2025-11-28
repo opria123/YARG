@@ -18,6 +18,8 @@ using YARG.Localization;
 using YARG.Menu.Data;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
+using YARG.Net.Handlers.Client;
+using YARG.Networking.NewNet;
 using YARG.Player;
 using YARG.Song;
 
@@ -77,6 +79,8 @@ namespace YARG.Menu.DifficultySelect
         private GameObject _songQueueEntryPrefab;
 
         private bool _pendingGameplayStart;
+        private int _countdownSeconds;
+        private bool _inCountdown;
 
         [Space]
         [SerializeField]
@@ -175,6 +179,12 @@ namespace YARG.Menu.DifficultySelect
             
             // Start coroutine to update ready status periodically
             StartCoroutine(UpdateReadyStatusPeriodically());
+            
+            // Subscribe to LiteNet countdown events
+            if (ClientNetworkingService.HasInstance)
+            {
+                ClientNetworkingService.Instance.CountdownReceived += OnCountdownReceived;
+            }
             
             string subHeaderKey = GlobalVariables.State.IsPractice ? "Practice" : "Quickplay";
             _subHeader.text = Localize.Key("Menu.Main.Options", subHeaderKey);
@@ -941,6 +951,12 @@ namespace YARG.Menu.DifficultySelect
                 _multiplayerSync.OnWaitingForPlayers -= ShowWaitingForPlayersMessage;
             }
             
+            // Unsubscribe from LiteNet countdown events
+            if (ClientNetworkingService.HasInstance)
+            {
+                ClientNetworkingService.Instance.CountdownReceived -= OnCountdownReceived;
+            }
+            
             // Unsubscribe from network player events
             UnsubscribeFromNetworkPlayerEvents();
             
@@ -999,7 +1015,16 @@ namespace YARG.Menu.DifficultySelect
 
         private void SetLocalPlayerReadyState(int playerIndex, bool ready)
         {
-            // Send ready state to network
+            // LiteNet mode: use ClientNetworkingService
+            if (ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.IsConnected)
+            {
+                ClientNetworkingService.Instance.SendReadyState(ready);
+                Debug.Log($"[DifficultySelect] Sent LiteNet ready state: {ready}");
+                UpdateReadyStatus();
+                return;
+            }
+
+            // Mirror mode: Send ready state to network
             if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
             {
                 var localNetworkPlayer = GetLocalNetworkPlayer(playerIndex);
@@ -1121,7 +1146,15 @@ namespace YARG.Menu.DifficultySelect
         private void UpdateReadyStatus()
         {
             if (_readyStatusText == null) return;
-            // Check if in multiplayer
+
+            // Check for LiteNet mode first
+            if (ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.IsConnected)
+            {
+                UpdateLiteNetReadyStatus();
+                return;
+            }
+
+            // Check if in Mirror multiplayer
             if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
             {
                 _readyStatusText.gameObject.SetActive(false);
@@ -1178,6 +1211,61 @@ namespace YARG.Menu.DifficultySelect
                 _readyStatusText.color = new Color(1f, 0.8f, 0f); // Orange/yellow
             }
             
+            _readyStatusText.gameObject.SetActive(true);
+        }
+
+        private void UpdateLiteNetReadyStatus()
+        {
+            var snapshot = ClientNetworkingService.Instance.LatestSnapshot;
+            if (snapshot == null)
+            {
+                _readyStatusText.gameObject.SetActive(false);
+                return;
+            }
+
+            var players = snapshot.Players;
+            var localSessionId = ClientNetworkingService.Instance.SessionContext?.SessionId;
+
+            int readyCount = 0;
+            int totalCount = 0;
+            bool localIsReady = false;
+
+            foreach (var player in players)
+            {
+                if (player.Role == YARG.Net.Packets.LobbyRole.Spectator)
+                    continue;
+
+                totalCount++;
+                if (player.IsReady)
+                {
+                    readyCount++;
+                }
+
+                if (localSessionId.HasValue && player.PlayerId == localSessionId.Value)
+                {
+                    localIsReady = player.IsReady;
+                }
+            }
+
+            if (localIsReady)
+            {
+                if (readyCount >= totalCount && totalCount > 0)
+                {
+                    _readyStatusText.text = "✓ All players ready! Starting game...";
+                    _readyStatusText.color = Color.green;
+                }
+                else
+                {
+                    _readyStatusText.text = $"✓ You are ready! Waiting for other players... ({readyCount}/{totalCount})";
+                    _readyStatusText.color = new Color(0f, 1f, 0.5f);
+                }
+            }
+            else
+            {
+                _readyStatusText.text = $"Players Ready: {readyCount}/{totalCount}";
+                _readyStatusText.color = new Color(1f, 0.8f, 0f);
+            }
+
             _readyStatusText.gameObject.SetActive(true);
         }
         
@@ -1375,6 +1463,14 @@ namespace YARG.Menu.DifficultySelect
         
         private void CheckAndAutoStart()
         {
+            // LiteNet mode check
+            if (ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.IsConnected)
+            {
+                CheckAndAutoStartLiteNet();
+                return;
+            }
+
+            // Mirror mode check
             if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
             {
                 return;
@@ -1405,6 +1501,115 @@ namespace YARG.Menu.DifficultySelect
             {
                 _pendingGameplayStart = false;
             }
+        }
+
+        private void CheckAndAutoStartLiteNet()
+        {
+            var snapshot = ClientNetworkingService.Instance.LatestSnapshot;
+            if (snapshot == null)
+            {
+                return;
+            }
+
+            // Handle InCountdown status - countdown already in progress
+            if (snapshot.Status == YARG.Net.Packets.LobbyStatus.InCountdown)
+            {
+                // Countdown started - will be handled by the countdown event
+                return;
+            }
+
+            // Check if status is ReadyToPlay (all players ready)
+            if (snapshot.Status == YARG.Net.Packets.LobbyStatus.ReadyToPlay)
+            {
+                if (_pendingGameplayStart)
+                {
+                    return;
+                }
+
+                Debug.Log("[DifficultySelect] LiteNet: All players ready");
+                
+                // Only the host should trigger the countdown
+                if (ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning)
+                {
+                    Debug.Log("[DifficultySelect] LiteNet: Host triggering countdown");
+                    _pendingGameplayStart = true;
+                    ServerNetworkingService.Instance.LobbyManager?.TryStartCountdown(3);
+                }
+            }
+            else
+            {
+                _pendingGameplayStart = false;
+            }
+        }
+
+        private void OnCountdownReceived(object sender, CountdownReceivedEventArgs e)
+        {
+            Debug.Log($"[DifficultySelect] LiteNet: Countdown received - {e.SecondsRemaining} seconds");
+            _countdownSeconds = e.SecondsRemaining;
+            _inCountdown = true;
+            _pendingGameplayStart = true;
+            StartCoroutine(RunCountdownLiteNet());
+        }
+
+        private System.Collections.IEnumerator RunCountdownLiteNet()
+        {
+            int remaining = _countdownSeconds;
+            
+            while (remaining > 0 && _inCountdown)
+            {
+                // Update UI to show countdown
+                if (_readyStatusText != null)
+                {
+                    _readyStatusText.text = $"Starting in {remaining}...";
+                    _readyStatusText.gameObject.SetActive(true);
+                }
+                
+                yield return new WaitForSeconds(1.0f);
+                remaining--;
+            }
+
+            if (!_inCountdown)
+            {
+                // Countdown was cancelled
+                _pendingGameplayStart = false;
+                UpdateReadyStatus();
+                yield break;
+            }
+
+            if (!ClientNetworkingService.HasInstance || !ClientNetworkingService.Instance.IsConnected)
+            {
+                _pendingGameplayStart = false;
+                _inCountdown = false;
+                yield break;
+            }
+
+            // Start gameplay!
+            Debug.Log("[DifficultySelect] LiteNet: Countdown complete - starting gameplay");
+            _inCountdown = false;
+            GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay);
+        }
+
+        private System.Collections.IEnumerator AutoStartGameplayAfterDelayLiteNet()
+        {
+            yield return new WaitForSeconds(1.0f);
+
+            if (!ClientNetworkingService.HasInstance || !ClientNetworkingService.Instance.IsConnected)
+            {
+                _pendingGameplayStart = false;
+                yield break;
+            }
+
+            var snapshot = ClientNetworkingService.Instance.LatestSnapshot;
+            if (snapshot == null || snapshot.Status != YARG.Net.Packets.LobbyStatus.ReadyToPlay)
+            {
+                _pendingGameplayStart = false;
+                yield break;
+            }
+
+            // All clients can start gameplay when ReadyToPlay status is received
+            // The song selection was already synced via the lobby state
+            Debug.Log("[DifficultySelect] LiteNet: Starting gameplay scene");
+            GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay);
         }
         
         private System.Collections.IEnumerator AutoStartGameplayAfterDelay()

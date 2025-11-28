@@ -3,7 +3,9 @@ using YARG.Core.Input;
 using YARG.Menu.Data;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
+using YARG.Net.Packets;
 using YARG.Networking;
+using YARG.Networking.NewNet;
 
 namespace YARG.Gameplay.HUD
 {
@@ -25,12 +27,31 @@ namespace YARG.Gameplay.HUD
         private GameObject _leaveLobbyButton;
         
         private bool _isHost;
+        private bool _isLiteNetMode;
 
         protected override void OnEnable()
         {
             // Don't call base.OnEnable() - we'll set up our own navigation scheme
             
-            _isHost = YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost();
+            // Check LiteNet mode first
+            _isLiteNetMode = ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning;
+            if (!_isLiteNetMode)
+            {
+                _isLiteNetMode = ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.IsConnected;
+            }
+            
+            // Determine host status based on network mode
+            if (_isLiteNetMode)
+            {
+                _isHost = ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning;
+            }
+            else
+            {
+                _isHost = YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost();
+            }
+            
+            // Try to auto-find buttons if not assigned in editor
+            TryFindButtons();
             
             // Show/hide buttons based on role
             UpdateButtonVisibility();
@@ -55,6 +76,64 @@ namespace YARG.Gameplay.HUD
             }
             
             Navigator.Instance.PushScheme(new NavigationScheme(entries, false));
+        }
+        
+        /// <summary>
+        /// Attempts to find button GameObjects by name if not assigned in editor.
+        /// This allows the component to work even without manual scene configuration.
+        /// </summary>
+        private void TryFindButtons()
+        {
+            // Search in children for button names
+            var buttons = GetComponentsInChildren<UnityEngine.UI.Button>(true);
+            var buttonDict = new System.Collections.Generic.Dictionary<string, GameObject>();
+            
+            foreach (var button in buttons)
+            {
+                string name = button.gameObject.name.ToLower();
+                buttonDict[name] = button.gameObject;
+            }
+            
+            // Try to match button references by common naming patterns
+            if (_restartButton == null)
+            {
+                TryGetButton(buttonDict, out _restartButton, "restart");
+            }
+            if (_togglePracticeButton == null)
+            {
+                TryGetButton(buttonDict, out _togglePracticeButton, "practice", "toggle");
+            }
+            if (_backToLibraryButton == null)
+            {
+                TryGetButton(buttonDict, out _backToLibraryButton, "library", "back");
+            }
+            if (_leaveLobbyButton == null)
+            {
+                TryGetButton(buttonDict, out _leaveLobbyButton, "leave", "lobby", "quit");
+            }
+            
+            // Log what we found/didn't find
+            Debug.Log($"[MultiplayerPause] Button discovery: Restart={_restartButton != null}, " +
+                $"Practice={_togglePracticeButton != null}, Library={_backToLibraryButton != null}, " +
+                $"Leave={_leaveLobbyButton != null}");
+        }
+        
+        private bool TryGetButton(System.Collections.Generic.Dictionary<string, GameObject> buttonDict, 
+            out GameObject button, params string[] namePatterns)
+        {
+            button = null;
+            foreach (var kvp in buttonDict)
+            {
+                foreach (var pattern in namePatterns)
+                {
+                    if (kvp.Key.Contains(pattern))
+                    {
+                        button = kvp.Value;
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private void OnDisable()
@@ -147,17 +226,30 @@ namespace YARG.Gameplay.HUD
             
             Debug.Log("[MultiplayerPause] Host returning all players to music library");
             
-            // Set the navigation target for everyone (host and clients)
-            // MenuManager will navigate to MusicLibrary after Menu scene loads
-            YargNetworkManager.SetMenuNavigationAfterSceneLoad(
-                Menu.MenuManager.Menu.OnlineMultiplayer,
-                Menu.MenuManager.Menu.LobbyRoom,
-                Menu.MenuManager.Menu.MusicLibrary);
-            
-            // Tell all clients to quit and return to Menu scene
-            if (YargNetworkManager.Instance != null)
+            if (_isLiteNetMode)
             {
-                YargNetworkManager.Instance.QuitMultiplayerGameplay();
+                // LiteNet mode: Broadcast gameplay end and reset lobby
+                if (ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning)
+                {
+                    ServerNetworkingService.Instance.GameplayHandler?.BroadcastGameplayEnd(GameplayEndReason.HostEnded);
+                    ServerNetworkingService.Instance.LobbyManager?.ResetAfterGameplay();
+                }
+            }
+            else
+            {
+                // Mirror mode: Use YargNetworkManager
+                // Set the navigation target for everyone (host and clients)
+                // MenuManager will navigate to MusicLibrary after Menu scene loads
+                YargNetworkManager.SetMenuNavigationAfterSceneLoad(
+                    Menu.MenuManager.Menu.OnlineMultiplayer,
+                    Menu.MenuManager.Menu.LobbyRoom,
+                    Menu.MenuManager.Menu.MusicLibrary);
+                
+                // Tell all clients to quit and return to Menu scene
+                if (YargNetworkManager.Instance != null)
+                {
+                    YargNetworkManager.Instance.QuitMultiplayerGameplay();
+                }
             }
             
             // Quit song for host - this will load Menu scene
@@ -211,18 +303,33 @@ namespace YARG.Gameplay.HUD
         {
             Debug.Log("[MultiplayerPause] Client leaving lobby - will disconnect all players");
             
-            // The disconnect will trigger OnClientDisconnectedDuringGameplay on the host,
-            // which will bring all players back to music library.
-            // For this client, OnLobbyLeftDuringGameplay will be triggered,
-            // which will bring them back to lobby browser.
-            if (YargNetworkManager.Instance != null)
+            if (_isLiteNetMode)
             {
-                YargNetworkManager.Instance.LeaveLobby();
+                // LiteNet mode: Disconnect from server
+                if (ClientNetworkingService.HasInstance)
+                {
+                    _ = ClientNetworkingService.Instance.DisconnectAsync("Player left lobby");
+                }
             }
             else
             {
-                Debug.LogError("[MultiplayerPause] YargNetworkManager.Instance is null!");
+                // Mirror mode: Use YargNetworkManager
+                // The disconnect will trigger OnClientDisconnectedDuringGameplay on the host,
+                // which will bring all players back to music library.
+                // For this client, OnLobbyLeftDuringGameplay will be triggered,
+                // which will bring them back to lobby browser.
+                if (YargNetworkManager.Instance != null)
+                {
+                    YargNetworkManager.Instance.LeaveLobby();
+                }
+                else
+                {
+                    Debug.LogError("[MultiplayerPause] YargNetworkManager.Instance is null!");
+                }
             }
+            
+            // For both modes, quit the game to go back to menu
+            PauseMenuManager.Quit();
         }
     }
 }

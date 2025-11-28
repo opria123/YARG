@@ -1,12 +1,18 @@
+using System.Linq;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using YARG.Core.Input;
 using YARG.Core.Logging;
 using YARG.Networking;
+using YARG.Networking.NewNet;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Localization;
+using YARG.Net.Handlers.Client;
+using YARG.Net.Packets;
+using YARG.Net.Runtime;
+using YARG.Net.Sessions;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -24,6 +30,10 @@ namespace YARG.Menu.Multiplayer
         [SerializeField] private GameObject createLobbyDialog;
         [SerializeField] private GameObject directConnectDialog;
 
+        private bool _liteNetEventsHooked;
+        private ClientSessionContext? _liteNetSessionContext;
+        private bool _liteNetStatusActive;
+
         private void Start()
         {
             // Subscribe to network events
@@ -35,6 +45,7 @@ namespace YARG.Menu.Multiplayer
                 YargNetworkManager.Instance.OnNetworkError += OnNetworkError;
             }
 
+            SubscribeToLiteNetEvents();
             UpdateConnectionStatus();
         }
 
@@ -42,6 +53,7 @@ namespace YARG.Menu.Multiplayer
         {
             // Reset join flag when menu is reopened
             _hasJoinedLobby = false;
+            _liteNetLobbyOpened = false;
             
             // Set up navigation scheme (following YARG's pattern)
             Navigator.Instance.PushScheme(new NavigationScheme(new()
@@ -51,6 +63,8 @@ namespace YARG.Menu.Multiplayer
                 NavigationScheme.Entry.NavigateDown,
                 new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", OnBackClicked),
             }, true));
+
+            UpdateConnectionStatus();
         }
 
         private void OnDisable()
@@ -68,6 +82,8 @@ namespace YARG.Menu.Multiplayer
                 YargNetworkManager.Instance.OnLobbyLeft -= OnLobbyLeft;
                 YargNetworkManager.Instance.OnNetworkError -= OnNetworkError;
             }
+
+            UnsubscribeFromLiteNetEvents();
         }
 
         // Button callbacks (to be connected in Unity Inspector via UI button prefabs)
@@ -119,6 +135,7 @@ namespace YARG.Menu.Multiplayer
         }
 
         private bool _hasJoinedLobby = false;
+        private bool _liteNetLobbyOpened;
 
         private void OnLobbyJoined(YargNetworkManager.LobbyInfo lobby)
         {
@@ -148,6 +165,7 @@ namespace YARG.Menu.Multiplayer
         {
             YargLogger.LogInfo("[OnlineMultiplayerMenu] Left lobby");
             _hasJoinedLobby = false;
+            _liteNetLobbyOpened = false;
             UpdateConnectionStatus();
         }
 
@@ -177,23 +195,209 @@ namespace YARG.Menu.Multiplayer
         {
             if (connectionStatusText == null) return;
 
+            if (!_liteNetEventsHooked)
+            {
+                SubscribeToLiteNetEvents();
+            }
+
+            if (TryUpdateLiteNetStatus())
+            {
+                return;
+            }
+
+            _liteNetStatusActive = false;
+
             var networkManager = YargNetworkManager.Instance;
 
-            if (networkManager != null && networkManager.LocalUserIsHost())
+            if (!_liteNetStatusActive && networkManager != null && networkManager.LocalUserIsHost())
             {
-                connectionStatusText.text = Localize.Key("Menu", "LobbyBrowser", "StatusHosting");
-                connectionStatusText.color = Color.green;
+                SetStatus("StatusHosting", Color.green);
             }
-            else if (networkManager != null && networkManager.CurrentLobby != null)
+            else if (!_liteNetStatusActive && networkManager != null && networkManager.CurrentLobby != null)
             {
-                // Check if we're connected by seeing if we have a current lobby
-                connectionStatusText.text = Localize.Key("Menu", "LobbyBrowser", "StatusConnected");
-                connectionStatusText.color = Color.green;
+                SetStatus("StatusConnected", Color.green);
             }
             else
             {
-                connectionStatusText.text = Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected");
-                connectionStatusText.color = Color.white;
+                SetStatus("StatusNotConnected", Color.white);
+            }
+        }
+
+        private bool TryUpdateLiteNetStatus()
+        {
+            if (!ClientNetworkingService.HasInstance)
+            {
+                return false;
+            }
+
+            var service = ClientNetworkingService.Instance;
+
+            if (!service.IsInitialized)
+            {
+                return false;
+            }
+
+            if (service.IsConnected)
+            {
+                if (service.LobbyHandler != null && service.LobbyHandler.TryGetSnapshot(out var snapshot) && snapshot != null)
+                {
+                    var sessionId = service.SessionContext?.SessionId;
+                    bool isHost = sessionId.HasValue && snapshot.Players.Any(p => p.PlayerId == sessionId.Value && p.Role == LobbyRole.Host);
+                    SetStatus(isHost ? "StatusHosting" : "StatusConnected", Color.green);
+                    _liteNetStatusActive = true;
+                    return true;
+                }
+
+                if (service.SessionContext != null && service.SessionContext.HasSession)
+                {
+                    SetStatus("StatusConnected", Color.green);
+                    _liteNetStatusActive = true;
+                    return true;
+                }
+
+                SetStatus("StatusConnected", Color.yellow);
+                _liteNetStatusActive = true;
+                return true;
+            }
+
+            return false;
+        }
+
+        private void SetStatus(string localizationKeySuffix, Color color)
+        {
+            if (connectionStatusText == null)
+            {
+                return;
+            }
+
+            connectionStatusText.text = Localize.Key("Menu", "LobbyBrowser", localizationKeySuffix);
+            connectionStatusText.color = color;
+        }
+
+        private void SubscribeToLiteNetEvents()
+        {
+            if (_liteNetEventsHooked)
+            {
+                return;
+            }
+
+            if (!ClientNetworkingService.HasInstance)
+            {
+                return;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            service.Initialize();
+            service.Connected += HandleLiteNetConnected;
+            service.Disconnected += HandleLiteNetDisconnected;
+            service.HandshakeCompleted += HandleLiteNetHandshakeCompleted;
+            service.LobbyStateChanged += HandleLiteNetLobbyStateChanged;
+
+            if (service.SessionContext != null)
+            {
+                _liteNetSessionContext = service.SessionContext;
+                _liteNetSessionContext.SessionChanged += HandleLiteNetSessionChanged;
+            }
+
+            _liteNetEventsHooked = true;
+        }
+
+        private void UnsubscribeFromLiteNetEvents()
+        {
+            if (!_liteNetEventsHooked)
+            {
+                return;
+            }
+
+            if (ClientNetworkingService.HasInstance)
+            {
+                var service = ClientNetworkingService.Instance;
+                service.Connected -= HandleLiteNetConnected;
+                service.Disconnected -= HandleLiteNetDisconnected;
+                service.HandshakeCompleted -= HandleLiteNetHandshakeCompleted;
+                service.LobbyStateChanged -= HandleLiteNetLobbyStateChanged;
+            }
+
+            if (_liteNetSessionContext != null)
+            {
+                _liteNetSessionContext.SessionChanged -= HandleLiteNetSessionChanged;
+                _liteNetSessionContext = null;
+            }
+
+            _liteNetEventsHooked = false;
+        }
+
+        private void HandleLiteNetConnected(object sender, ClientConnectedEventArgs e)
+        {
+            _liteNetLobbyOpened = false;
+            UpdateConnectionStatus();
+        }
+
+        private void HandleLiteNetDisconnected(object sender, ClientDisconnectedEventArgs e)
+        {
+            _liteNetLobbyOpened = false;
+            _hasJoinedLobby = false;
+            UpdateConnectionStatus();
+        }
+
+        private void HandleLiteNetHandshakeCompleted(object sender, ClientHandshakeCompletedEventArgs e)
+        {
+            if (!e.Accepted)
+            {
+                string reason = string.IsNullOrWhiteSpace(e.Reason)
+                    ? Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected")
+                    : e.Reason;
+
+                if (DialogManager.Instance == null || !DialogManager.Instance.IsDialogShowing)
+                {
+                    ClientNetworkingMenuUtility.ShowConnectionError(reason);
+                }
+                _liteNetLobbyOpened = false;
+                _hasJoinedLobby = false;
+                _ = ClientNetworkingService.Instance.DisconnectAsync(reason);
+            }
+            else
+            {
+                EnsureLiteNetLobbyOpened();
+            }
+
+            UpdateConnectionStatus();
+        }
+
+        private void HandleLiteNetLobbyStateChanged(object sender, ClientLobbyStateChangedEventArgs e)
+        {
+            EnsureLiteNetLobbyOpened();
+            UpdateConnectionStatus();
+        }
+
+        private void HandleLiteNetSessionChanged(object sender, ClientSessionChangedEventArgs e)
+        {
+            if (e.HasSession)
+            {
+                EnsureLiteNetLobbyOpened();
+            }
+
+            UpdateConnectionStatus();
+        }
+
+        private void EnsureLiteNetLobbyOpened()
+        {
+            if (_liteNetLobbyOpened)
+            {
+                return;
+            }
+
+            _liteNetLobbyOpened = true;
+            _hasJoinedLobby = true;
+
+            if (DialogManager.Instance != null && DialogManager.Instance.IsDialogShowing)
+            {
+                DialogManager.Instance.ClearDialog();
+            }
+
+            if (MenuManager.Instance != null && MenuManager.Instance.CurrentMenu != MenuManager.Menu.LobbyRoom)
+            {
+                MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
             }
         }
     }

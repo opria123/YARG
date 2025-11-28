@@ -23,6 +23,7 @@ using YARG.Integration;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Menu.ScoreScreen;
+using YARG.Networking.NewNet;
 using YARG.Playback;
 using YARG.Player;
 using YARG.Replays;
@@ -162,6 +163,7 @@ namespace YARG.Gameplay
 
         private BandComboType _bandComboType;
         private Menu.Multiplayer.MultiplayerGameplaySync _multiplayerSync;
+        private Menu.Multiplayer.LiteNetGameplaySync _liteNetSync;
 
         private void Awake()
         {
@@ -180,13 +182,26 @@ namespace YARG.Gameplay
             EngineManager = new EngineManager();
             YargLogger.LogFormatInfo("[GameManager] Created new EngineManager with hash: {0}", EngineManager.GetHashCode());
 
-            // Check if we're in multiplayer mode
-            bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                 Networking.YargNetworkManager.Instance.isNetworkActive;
+            // Check if we're in LiteNet multiplayer mode first
+            bool isLiteNetMultiplayer = MultiplayerModeUtility.IsLiteNetMultiplayer;
 
-            if (isMultiplayer)
+            // Check if we're in Mirror multiplayer mode
+            bool isMirrorMultiplayer = MultiplayerModeUtility.IsMirrorMultiplayer;
+
+            if (isLiteNetMultiplayer)
             {
-                // In multiplayer, mark that we need to create players in Start() after network objects spawn
+                // LiteNet multiplayer mode
+                _liteNetSync = gameObject.AddComponent<Menu.Multiplayer.LiteNetGameplaySync>();
+                _liteNetSync.OnGameplayEnded += OnLiteNetGameplayEnded;
+                _liteNetSync.OnReplaySyncRequested += OnReplaySyncRequested;
+                Debug.Log("[GameManager] LiteNet sync component added for multiplayer");
+                
+                // Use PlayerContainer for LiteNet mode (players are created locally)
+                YargPlayers = PlayerContainer.Players;
+            }
+            else if (isMirrorMultiplayer)
+            {
+                // Mirror multiplayer mode
                 // Initialize multiplayer sync component now
                 _multiplayerSync = gameObject.AddComponent<Menu.Multiplayer.MultiplayerGameplaySync>();
                 Debug.Log("[GameManager] Multiplayer sync component added - will create players in Start()");
@@ -239,15 +254,28 @@ namespace YARG.Gameplay
         {
             YargLogger.LogInfo("Exiting song");
 
+            if (_liteNetSync != null)
+            {
+                _liteNetSync.OnGameplayEnded -= OnLiteNetGameplayEnded;
+                _liteNetSync.OnReplaySyncRequested -= OnReplaySyncRequested;
+            }
+
             if (Navigator.Instance != null)
             {
                 Navigator.Instance.NavigationEvent -= OnNavigationEvent;
             }
 
+            // Unsubscribe from LiteNet gameplay end event
+            if (_liteNetSync != null)
+            {
+                _liteNetSync.OnGameplayEnded -= OnLiteNetGameplayEnded;
+                _liteNetSync.OnReplaySyncRequested -= OnReplaySyncRequested;
+            }
+
             // Unsubscribe from disconnect events
             if (Networking.YargNetworkManager.Instance != null)
             {
-                if (Networking.YargNetworkManager.Instance.isNetworkActive)
+                if (MultiplayerModeUtility.IsMirrorMultiplayer)
                 {
                     Networking.YargNetworkManager.Instance.ReportLocalGameplayReady(false);
                 }
@@ -379,13 +407,15 @@ namespace YARG.Gameplay
 
         private void SendMultiplayerSnapshot(bool forceSend = false)
         {
-            if (_multiplayerSync == null || _players == null || _players.Count == 0 || _songRunner == null)
+            // Skip if no sync component is active or no players
+            bool hasSync = _multiplayerSync != null || _liteNetSync != null;
+            if (!hasSync || _players == null || _players.Count == 0 || _songRunner == null)
             {
                 return;
             }
 
             double songTime = _songRunner.SongTime;
-            double clientNetworkTime = NetworkTime.time;
+            double clientNetworkTime = _liteNetSync != null ? Time.unscaledTimeAsDouble : NetworkTime.time;
 
             foreach (var player in _players)
             {
@@ -483,13 +513,27 @@ namespace YARG.Gameplay
                     soloTotalBonus = soloSnapshot.TotalBonus;
                 }
 
-                _multiplayerSync.SubmitLocalSnapshot(networkData, player.Score, player.Combo, baseStats.MaxCombo,
-                    baseStats.IsStarPowerActive, starPowerAmount, baseStats.StarPowerPhrasesHit,
-                    baseStats.TotalStarPowerPhrases, player.NotesHit, notesMissed, overstrums, hoposStrummed,
-                    overhits, ghostInputs, ghostsHit, accentsHit, dynamicsBonus, bandBonusScore, vocalsTicksHit,
-                    vocalsTicksMissed, vocalsPhraseTicksHit, vocalsPhraseTicksTotal, soloActive, soloSequence,
-                    soloNoteCount, soloNotesHit, soloLastBonus, soloTotalBonus, songTime, clientNetworkTime,
-                    forceSend);
+                // Submit to appropriate sync system
+                if (_liteNetSync != null)
+                {
+                    _liteNetSync.SubmitLocalSnapshot(player.Score, player.Combo, baseStats.MaxCombo,
+                        baseStats.IsStarPowerActive, starPowerAmount, baseStats.StarPowerPhrasesHit,
+                        baseStats.TotalStarPowerPhrases, player.NotesHit, notesMissed, overstrums, hoposStrummed,
+                        overhits, ghostInputs, ghostsHit, accentsHit, dynamicsBonus, bandBonusScore, vocalsTicksHit,
+                        vocalsTicksMissed, vocalsPhraseTicksHit, vocalsPhraseTicksTotal, soloActive, soloSequence,
+                        soloNoteCount, soloNotesHit, soloLastBonus, soloTotalBonus, songTime, clientNetworkTime,
+                        forceSend);
+                }
+                else if (_multiplayerSync != null && networkData != null)
+                {
+                    _multiplayerSync.SubmitLocalSnapshot(networkData, player.Score, player.Combo, baseStats.MaxCombo,
+                        baseStats.IsStarPowerActive, starPowerAmount, baseStats.StarPowerPhrasesHit,
+                        baseStats.TotalStarPowerPhrases, player.NotesHit, notesMissed, overstrums, hoposStrummed,
+                        overhits, ghostInputs, ghostsHit, accentsHit, dynamicsBonus, bandBonusScore, vocalsTicksHit,
+                        vocalsTicksMissed, vocalsPhraseTicksHit, vocalsPhraseTicksTotal, soloActive, soloSequence,
+                        soloNoteCount, soloNotesHit, soloLastBonus, soloTotalBonus, songTime, clientNetworkTime,
+                        forceSend);
+                }
             }
         }
 
@@ -549,8 +593,7 @@ namespace YARG.Gameplay
             if (showMenu)
             {
                 // Check if we're in multiplayer (check this first before other modes)
-                bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                     Networking.YargNetworkManager.Instance.isNetworkActive;
+                bool isMultiplayer = MultiplayerModeUtility.IsAnyMultiplayer;
                 
                 if (!GlobalVariables.State.PlayingWithReplay && ReplayInfo != null)
                 {
@@ -706,6 +749,33 @@ namespace YARG.Gameplay
         }
         
         /// <summary>
+        /// Called when a LiteNet gameplay end packet is received.
+        /// Handles early termination cases like host ending the game.
+        /// </summary>
+        private void OnLiteNetGameplayEnded(YARG.Net.Packets.GameplayEndReason reason)
+        {
+            // Only handle if we're actually in gameplay
+            if (GlobalVariables.Instance.CurrentScene != SceneIndex.Gameplay)
+            {
+                return;
+            }
+            
+            // SongComplete is handled naturally by the song reaching its end
+            if (reason == YARG.Net.Packets.GameplayEndReason.SongComplete)
+            {
+                return;
+            }
+            
+            YargLogger.LogInfo($"[GameManager] LiteNet gameplay ended with reason: {reason}");
+            
+            // Stop the song
+            SetPaused(true);
+            
+            // For HostEnded or other early termination, go back to menu
+            GlobalVariables.Instance.LoadScene(SceneIndex.Menu);
+        }
+
+        /// <summary>
         /// Called when the lobby is left during gameplay (client perspective when host disconnects).
         /// Brings client back to the lobby browser.
         /// </summary>
@@ -767,6 +837,22 @@ namespace YARG.Gameplay
             SendMultiplayerSnapshot(forceSend: true);
             ApplyAuthoritativeNetworkStats();
 
+            // Broadcast gameplay end for LiteNet multiplayer
+            if (ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning)
+            {
+                ServerNetworkingService.Instance.GameplayHandler?.BroadcastGameplayEnd(YARG.Net.Packets.GameplayEndReason.SongComplete);
+                ServerNetworkingService.Instance.LobbyManager?.ResetAfterGameplay();
+
+                // Trigger replay sync on server (LiteNet only)
+                if (replayInfo != null && MultiplayerModeUtility.IsLiteNetMultiplayer)
+                {
+                    TriggerMultiplayerReplaySync(replayInfo).Forget();
+                }
+            }
+            
+            // NOTE: Mirror multiplayer is deprecated. New lobbies use LiteNet.
+            // Mirror sessions will show replay verification failures due to lack of replay sync support.
+
             // Pass the score info to the stats screen
             GlobalVariables.State.ScoreScreenStats = new ScoreScreenStats
             {
@@ -793,7 +879,7 @@ namespace YARG.Gameplay
 
         private void ApplyAuthoritativeNetworkStats()
         {
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            if (!MultiplayerModeUtility.IsMirrorMultiplayer)
             {
                 return;
             }
@@ -1081,6 +1167,165 @@ namespace YARG.Gameplay
             return replayInfo;
         }
 
+        /// <summary>
+        /// Handles replay sync request from server (client-side).
+        /// </summary>
+        private void OnReplaySyncRequested()
+        {
+            SendLocalReplayData().Forget();
+        }
+
+        /// <summary>
+        /// Sends local player's replay data to the server.
+        /// </summary>
+        private async UniTask SendLocalReplayData()
+        {
+            if (_liteNetSync == null || !ClientNetworkingService.HasInstance)
+            {
+                YargLogger.LogWarning("[GameManager] Cannot send replay data - no LiteNet sync or client service");
+                return;
+            }
+
+            try
+            {
+                // Find the local player
+                var localPlayer = _players.FirstOrDefault(p => !p.Player.Profile.IsBot && p.Player is YargPlayer);
+                if (localPlayer == null)
+                {
+                    YargLogger.LogWarning("[GameManager] No local player found for replay sync");
+                    return;
+                }
+
+                // Construct replay data for local player
+                var (replayFrame, replayStats) = localPlayer.ConstructReplayData();
+
+                // Serialize ReplayFrame to byte array
+                byte[] serializedFrame;
+                using (var memStream = new System.IO.MemoryStream())
+                using (var writer = new System.IO.BinaryWriter(memStream))
+                {
+                    replayFrame.Serialize(writer);
+                    serializedFrame = memStream.ToArray();
+                }
+
+                // Serialize ReplayStats to byte array
+                byte[] serializedStats;
+                using (var memStream = new System.IO.MemoryStream())
+                using (var writer = new System.IO.BinaryWriter(memStream))
+                {
+                    replayStats.Serialize(writer);
+                    serializedStats = memStream.ToArray();
+                }
+
+                // Serialize ColorProfile and CameraPreset to JSON
+                var colorProfile = localPlayer.Player.ColorProfile;
+                var cameraPreset = localPlayer.Player.CameraPreset;
+
+                string colorProfileJson = Newtonsoft.Json.JsonConvert.SerializeObject(colorProfile);
+                string cameraPresetJson = Newtonsoft.Json.JsonConvert.SerializeObject(cameraPreset);
+
+                // Send to server
+                _liteNetSync.SendReplayData(
+                    serializedFrame,
+                    serializedStats,
+                    colorProfile.Id,
+                    colorProfileJson,
+                    cameraPreset.Id,
+                    cameraPresetJson,
+                    _frameTimes.ToArray()
+                );
+
+                YargLogger.LogInfo($"[GameManager] Sent replay data to server ({serializedFrame.Length} + {serializedStats.Length} bytes)");
+            }
+            catch (Exception e)
+            {
+                YargLogger.LogException(e, "Failed to send replay data to server");
+            }
+        }
+
+        /// <summary>
+        /// Triggers multiplayer replay sync on the server.
+        /// </summary>
+        private async UniTask TriggerMultiplayerReplaySync(ReplayInfo replayInfo)
+        {
+            if (!ServerNetworkingService.HasInstance || !ServerNetworkingService.Instance.IsRunning)
+            {
+                YargLogger.LogWarning("[GameManager] Cannot trigger replay sync - not running as server");
+                return;
+            }
+
+            if (MultiplayerReplaySync.Instance == null)
+            {
+                YargLogger.LogError("[GameManager] MultiplayerReplaySync instance not found!");
+                return;
+            }
+
+            try
+            {
+                YargLogger.LogInfo($"[GameManager] Starting replay sync for {replayInfo.ReplayName}");
+
+                // Subscribe to completion event
+                var gameplayHandler = ServerNetworkingService.Instance.GameplayHandler;
+                if (gameplayHandler == null)
+                {
+                    YargLogger.LogError("[GameManager] GameplayHandler is null!");
+                    return;
+                }
+
+                // Wait for sync completion
+                bool syncCompleted = false;
+                void OnSyncComplete(object sender, YARG.Net.Handlers.Server.ReplaySyncCompleteEventArgs e)
+                {
+                    syncCompleted = true;
+                }
+
+                gameplayHandler.ReplaySyncComplete += OnSyncComplete;
+
+                // Start the sync
+                MultiplayerReplaySync.Instance.StartReplaySync(replayInfo, ScoreContainer.ScoreReplayDirectory);
+
+                // Wait for completion (with timeout)
+                int timeoutMs = 10000; // 10 seconds
+                int elapsedMs = 0;
+                while (!syncCompleted && elapsedMs < timeoutMs)
+                {
+                    await UniTask.Delay(100);
+                    elapsedMs += 100;
+                }
+
+                gameplayHandler.ReplaySyncComplete -= OnSyncComplete;
+
+                if (!syncCompleted)
+                {
+                    YargLogger.LogWarning("[GameManager] Replay sync timed out after 10 seconds");
+                    return;
+                }
+
+                // Merge and save complete replay
+                var bandStars = StarAmountHelper.GetStarsFromInt((int)BandStars);
+                bool success = await MultiplayerReplaySync.Instance.MergeAndSaveReplay(
+                    Song,
+                    SongSpeed,
+                    _songRunner.InputTime,
+                    BandScore,
+                    bandStars
+                );
+
+                if (success)
+                {
+                    YargLogger.LogInfo("[GameManager] Multiplayer replay merged and saved successfully");
+                }
+                else
+                {
+                    YargLogger.LogWarning("[GameManager] Failed to merge and save multiplayer replay");
+                }
+            }
+            catch (Exception e)
+            {
+                YargLogger.LogException(e, "Failed to trigger replay sync");
+            }
+        }
+
         private void OnNavigationEvent(NavigationContext context)
         {
             switch (context.Action)
@@ -1089,8 +1334,7 @@ namespace YARG.Gameplay
                 case MenuAction.Start:
                     if ((!IsPractice || PracticeManager.HasSelectedSection) && !DialogManager.Instance.IsDialogShowing && !PlayerHasFailed)
                     {
-                        bool isMultiplayer = Networking.YargNetworkManager.Instance != null &&
-                                             Networking.YargNetworkManager.Instance.isNetworkActive;
+                        bool isMultiplayer = MultiplayerModeUtility.IsAnyMultiplayer;
 
                         if (isMultiplayer)
                         {
@@ -1117,8 +1361,7 @@ namespace YARG.Gameplay
             if (!hasFocus && !Paused && SettingsManager.Settings.PauseOnFocusLoss.Value)
             {
                 // Check if we're in multiplayer
-                bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                     Networking.YargNetworkManager.Instance.isNetworkActive;
+                bool isMultiplayer = MultiplayerModeUtility.IsAnyMultiplayer;
                 
                 if (isMultiplayer)
                 {
@@ -1172,13 +1415,26 @@ namespace YARG.Gameplay
 
         private bool IsMultiplayerActive()
         {
-            return _multiplayerSync != null &&
-                   Networking.YargNetworkManager.Instance != null &&
-                   Networking.YargNetworkManager.Instance.isNetworkActive;
+            return (_multiplayerSync != null && MultiplayerModeUtility.IsMirrorMultiplayer) ||
+                   (_liteNetSync != null && MultiplayerModeUtility.IsLiteNetMultiplayer);
         }
 
         private void HandleMultiplayerSongFailed()
         {
+            // Handle LiteNet multiplayer failure
+            if (_liteNetSync != null && MultiplayerModeUtility.IsLiteNetMultiplayer)
+            {
+                // For LiteNet, gameplay end is handled by server via GameplayHandler
+                // Just flag that we've reported and wait for server confirmation
+                if (!_multiplayerFailureReported)
+                {
+                    _multiplayerFailureReported = true;
+                    // Server will broadcast gameplay end to all clients
+                }
+                return;
+            }
+
+            // Handle Mirror multiplayer failure
             var networkManager = Networking.YargNetworkManager.Instance;
             if (networkManager == null || !networkManager.isNetworkActive)
             {

@@ -19,6 +19,7 @@ using YARG.Core.Replays.Analyzer;
 using YARG.Core.Song;
 using YARG.Localization;
 using YARG.Networking;
+using YARG.Networking.NewNet;
 using YARG.Menu.MusicLibrary;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
@@ -28,6 +29,7 @@ using YARG.Playlists;
 using YARG.Helpers.Extensions;
 using YARG.Core.Engine;
 using YARG.Playback;
+using YARG.Replays;
 using YARG.Settings;
 
 namespace YARG.Menu.ScoreScreen
@@ -80,7 +82,7 @@ namespace YARG.Menu.ScoreScreen
         private readonly List<NetworkPlayerData> _networkPlayers = new();
         private TextMeshProUGUI _readyStatusLabel;
 
-        private void OnEnable()
+        private async void OnEnable()
         {
             var song = GlobalVariables.State.CurrentSong;
 
@@ -100,7 +102,7 @@ namespace YARG.Menu.ScoreScreen
             // (kinda like a loading screen)
             try
             {
-                if (!AnalyzeReplay(song, scoreScreenStats.ReplayInfo))
+                if (!await AnalyzeReplay(song, scoreScreenStats.ReplayInfo))
                 {
                     DialogManager.Instance.ShowMessage("Inconsistent Replay Results!",
                         "The replay analysis for this run produced inconsistent results to the actual gameplay.\n" +
@@ -150,6 +152,8 @@ namespace YARG.Menu.ScoreScreen
             //set restarting state
             _restartingSong = false;
 
+            // Initialize multiplayer ready system BEFORE replay analysis completes
+            // This ensures players can ready up even if replay validation is ongoing
             InitializeMultiplayerReady();
         }
 
@@ -326,11 +330,19 @@ namespace YARG.Menu.ScoreScreen
         }
 
 #nullable enable
-        private bool AnalyzeReplay(SongEntry songEntry, ReplayInfo? replayEntry)
+        private async UniTask<bool> AnalyzeReplay(SongEntry songEntry, ReplayInfo? replayEntry)
 #nullable disable
         {
             _analyzingReplay = true;
 
+            // In multiplayer, skip replay analysis for remote players to prevent false failures
+            // Remote players don't have input data available locally
+            bool isMultiplayerSession = MultiplayerModeUtility.IsAnyMultiplayer;
+            
+#if UNITY_EDITOR || YARG_TEST_BUILD
+            YargLogger.LogInfo($"[AnalyzeReplay] isMultiplayerSession={isMultiplayerSession}, MultiplayerReplaySync.Instance={(MultiplayerReplaySync.Instance != null ? "EXISTS" : "NULL")}");
+#endif
+            
             var chart = songEntry.LoadChart();
             if (chart == null)
             {
@@ -357,6 +369,45 @@ namespace YARG.Menu.ScoreScreen
             {
                 KeepFrameTimes = GlobalVariables.VerboseReplays
             };
+            
+            // In multiplayer, wait for replay sync to complete BEFORE loading data
+            // NOTE: Currently only supported for LiteNet multiplayer
+            if (isMultiplayerSession && MultiplayerReplaySync.Instance != null)
+            {
+#if UNITY_EDITOR || YARG_TEST_BUILD
+                YargLogger.LogInfo("Waiting for multiplayer replay sync to complete before analyzing...");
+#endif
+                // Wait for sync to complete
+                int maxWaitMs = 5000; // 5 second timeout
+                int elapsedMs = 0;
+                while (MultiplayerReplaySync.Instance.IsSyncing && elapsedMs < maxWaitMs)
+                {
+                    await UniTask.Delay(100);
+                    elapsedMs += 100;
+                }
+#if UNITY_EDITOR || YARG_TEST_BUILD
+                YargLogger.LogInfo($"Replay sync complete after {elapsedMs}ms - checking for merged replay data");
+#endif
+                
+                // Use the merged replay info instead of the local one (if available)
+                // This ensures all players analyze the same complete replay data
+                var mergedReplay = MultiplayerReplaySync.Instance.MergedReplayInfo;
+                if (mergedReplay != null)
+                {
+                    replayEntry = mergedReplay;
+#if UNITY_EDITOR || YARG_TEST_BUILD
+                    YargLogger.LogInfo($"Using merged replay: {mergedReplay.FilePath}");
+#endif
+                }
+                else
+                {
+#if UNITY_EDITOR || YARG_TEST_BUILD
+                    YargLogger.LogWarning("Merged replay info not available (Mirror networking doesn't support replay sync yet). Each player will use their local replay.");
+#endif
+                }
+            }
+            
+            // Now load the replay data (will be complete after sync in multiplayer)
             var (result, data) = ReplayIO.TryLoadData(replayEntry, replayOptions);
             if (result != ReplayReadResult.Valid)
             {
@@ -368,15 +419,17 @@ namespace YARG.Menu.ScoreScreen
             var results = ReplayAnalyzer.AnalyzeReplay(chart, replayEntry, data);
             bool allPass = true;
 
+            // Validate all replays (single player or multiplayer after sync)
             for (int i = 0; i < results.Length; i++)
             {
                 var analysisResult = results[i];
+                var profileData = data.Frames[i];
 
                 // Always print the stats in debug mode
 #if UNITY_EDITOR || YARG_TEST_BUILD
                 YargLogger.LogFormatInfo("({0}, {1}/{2}) Verification Result: {3}. Stats:\n{4}",
-                    data.Frames[i].Profile.Name, data.Frames[i].Profile.CurrentInstrument,
-                    data.Frames[i].Profile.CurrentDifficulty, item4: analysisResult.Passed ? "Passed" : "Failed",
+                    profileData.Profile.Name, profileData.Profile.CurrentInstrument,
+                    profileData.Profile.CurrentDifficulty, item4: analysisResult.Passed ? "Passed" : "Failed",
                     item5: analysisResult.StatLog);
 #endif
 
@@ -384,8 +437,8 @@ namespace YARG.Menu.ScoreScreen
                 {
 #if !(UNITY_EDITOR || YARG_TEST_BUILD)
                     YargLogger.LogFormatWarning("({0}, {1}/{2}) FAILED verification. Stats:\n{3}",
-                        data.Frames[i].Profile.Name, data.Frames[i].Profile.CurrentInstrument,
-                        data.Frames[i].Profile.CurrentDifficulty, item4: analysisResult.StatLog);
+                        profileData.Profile.Name, profileData.Profile.CurrentInstrument,
+                        profileData.Profile.CurrentDifficulty, item4: analysisResult.StatLog);
 #endif
                     _analyzingReplay = false;
                     allPass = false;
@@ -412,7 +465,10 @@ namespace YARG.Menu.ScoreScreen
 
             _continueButtonEntry = new NavigationScheme.Entry(MenuAction.Green, "Menu.Common.Continue", () =>
                 {
-                    if (!_analyzingReplay)
+                    // In single player, wait for replay analysis
+                    // In multiplayer, use ready system instead (handled separately)
+                    bool shouldWaitForReplay = _analyzingReplay && !_isMultiplayer;
+                    if (!shouldWaitForReplay)
                     {
                         GlobalVariables.State.ShowIndex++;
                         if (GlobalVariables.State.PlayingAShow &&

@@ -1,7 +1,9 @@
+using System.Collections;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
-using TMPro;
 using YARG.Core.Song;
+using YARG.Multiplayer;
 using YARG.Networking;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
@@ -20,7 +22,8 @@ namespace YARG.Menu.Multiplayer
         [SerializeField] private Button startSongButton;
         [SerializeField] private TextMeshProUGUI waitingText;
 
-        private SongEntry _selectedSong;
+        private MultiplayerShowPlaylist _showPlaylist;
+        private Coroutine _waitForPlaylistRoutine;
         private bool _isHost;
 
         private void Start()
@@ -59,67 +62,184 @@ namespace YARG.Menu.Multiplayer
 
             if (selectedSongText != null)
             {
-                selectedSongText.text = "No song selected";
+                selectedSongText.text = "Queue empty";
             }
 
-            // Subscribe to song selection events
-            if (YargNetworkManager.Instance != null)
+            UpdateWaitingLabel();
+            UpdateStartButtonState();
+
+            if (!TryAttachPlaylist() && gameObject.activeInHierarchy)
             {
-                YargNetworkManager.Instance.OnSongSelected += OnSongSelected;
+                _waitForPlaylistRoutine = StartCoroutine(WaitForPlaylistReference());
             }
         }
 
         private void OnDestroy()
         {
-            if (YargNetworkManager.Instance != null)
+            DetachPlaylistEvents();
+
+            if (_waitForPlaylistRoutine != null)
             {
-                YargNetworkManager.Instance.OnSongSelected -= OnSongSelected;
+                StopCoroutine(_waitForPlaylistRoutine);
+                _waitForPlaylistRoutine = null;
             }
         }
 
-        /// <summary>
-        /// Called when host or any player selects a song.
-        /// </summary>
-        public void OnSongSelected(SongEntry song)
+        private IEnumerator WaitForPlaylistReference()
         {
-            _selectedSong = song;
-
-            if (selectedSongText != null)
+            float elapsed = 0f;
+            const float timeout = 2f;
+            while (!TryAttachPlaylist() && elapsed < timeout)
             {
-                selectedSongText.text = $"Selected: {song.Name} by {song.Artist}";
+                yield return new WaitForSeconds(0.1f);
+                elapsed += 0.1f;
+            }
+        }
+
+        private bool TryAttachPlaylist()
+        {
+            var playlist = YargNetworkManager.Instance?.MultiplayerShowPlaylist;
+            if (playlist == null)
+            {
+                return false;
             }
 
-            // Enable start button if we're host
-            if (startSongButton != null && _isHost)
+            AttachPlaylist(playlist);
+            return true;
+        }
+
+        private void AttachPlaylist(MultiplayerShowPlaylist playlist)
+        {
+            if (_showPlaylist == playlist)
             {
-                startSongButton.interactable = true;
+                return;
             }
+
+            DetachPlaylistEvents();
+            _showPlaylist = playlist;
+            _showPlaylist.OnQueueChanged += HandleQueueChanged;
+            _showPlaylist.OnSetStarted += HandleSetStateChanged;
+            _showPlaylist.OnSetEnded += HandleSetStateChanged;
+            _showPlaylist.OnSongStarting += HandleSongStarting;
+            UpdateUiFromPlaylist();
+        }
+
+        private void DetachPlaylistEvents()
+        {
+            if (_showPlaylist == null)
+            {
+                return;
+            }
+
+            _showPlaylist.OnQueueChanged -= HandleQueueChanged;
+            _showPlaylist.OnSetStarted -= HandleSetStateChanged;
+            _showPlaylist.OnSetEnded -= HandleSetStateChanged;
+            _showPlaylist.OnSongStarting -= HandleSongStarting;
+            _showPlaylist = null;
+        }
+
+        private void HandleQueueChanged()
+        {
+            UpdateUiFromPlaylist();
+        }
+
+        private void HandleSetStateChanged()
+        {
+            UpdateUiFromPlaylist();
+        }
+
+        private void HandleSongStarting(SongEntry _)
+        {
+            UpdateSelectedSongLabel();
         }
 
         private void OnStartSongClicked()
         {
-            if (!_isHost || _selectedSong == null)
+            if (!_isHost)
             {
-                Debug.LogWarning("[MultiplayerMusicLibrary] Cannot start song - not host or no song selected");
+                Debug.LogWarning("[MultiplayerMusicLibrary] Cannot start show - local user is not host");
                 return;
             }
 
-            Debug.Log($"[MultiplayerMusicLibrary] Host starting song: {_selectedSong.Name}");
-
-            // Set global state for local host
-            GlobalVariables.State.CurrentSong = _selectedSong;
-            GlobalVariables.State.ShowSongs.Clear();
-            GlobalVariables.State.ShowSongs.Add(_selectedSong);
-            GlobalVariables.State.PlayingAShow = false;
-
-            // Navigate host to difficulty select
-            MenuManager.Instance.PushMenu(MenuManager.Menu.DifficultySelect);
-
-            // Tell network manager to start song for all clients
-            if (YargNetworkManager.Instance != null)
+            if (_showPlaylist == null || !_showPlaylist.HasQueue)
             {
-                YargNetworkManager.Instance.StartMultiplayerSong(_selectedSong);
+                Debug.LogWarning("[MultiplayerMusicLibrary] Cannot start show - playlist not ready or empty");
+                return;
             }
+
+            Debug.Log("[MultiplayerMusicLibrary] Host requested start of multiplayer show via playlist UI");
+            _showPlaylist.CmdStartShow();
+        }
+
+        private void UpdateUiFromPlaylist()
+        {
+            UpdateSelectedSongLabel();
+            UpdateStartButtonState();
+            UpdateWaitingLabel();
+        }
+
+        private void UpdateSelectedSongLabel()
+        {
+            if (selectedSongText == null)
+            {
+                return;
+            }
+
+            if (_showPlaylist == null || !_showPlaylist.HasQueue)
+            {
+                selectedSongText.text = _isHost
+                    ? "Queue empty"
+                    : "Waiting for host to queue songs";
+                return;
+            }
+
+            var queue = _showPlaylist.CurrentQueue;
+            if (queue.Count == 0)
+            {
+                selectedSongText.text = "Queue empty";
+                return;
+            }
+
+            int index = _showPlaylist.IsPlayingSet
+                ? Mathf.Clamp(_showPlaylist.CurrentSongIndex, 0, queue.Count - 1)
+                : 0;
+
+            var song = queue[index];
+            string songName = song.Name.ToString();
+            string artistName = song.Artist.ToString();
+            string prefix = _showPlaylist.IsPlayingSet ? "Now playing" : "Next in set";
+            selectedSongText.text = $"{prefix}: {songName} by {artistName}";
+        }
+
+        private void UpdateStartButtonState()
+        {
+            if (startSongButton == null)
+            {
+                return;
+            }
+
+            bool canStart = _isHost && _showPlaylist != null && _showPlaylist.HasQueue && !_showPlaylist.IsPlayingSet;
+            startSongButton.gameObject.SetActive(_isHost);
+            startSongButton.interactable = canStart;
+        }
+
+        private void UpdateWaitingLabel()
+        {
+            if (waitingText == null)
+            {
+                return;
+            }
+
+            if (_isHost)
+            {
+                waitingText.gameObject.SetActive(false);
+                return;
+            }
+
+            waitingText.gameObject.SetActive(true);
+            waitingText.text = _showPlaylist != null && _showPlaylist.HasQueue
+                ? "Waiting for host to start the show"
+                : "Waiting for songs to be queued";
         }
     }
 }

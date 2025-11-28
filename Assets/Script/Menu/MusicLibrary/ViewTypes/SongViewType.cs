@@ -165,7 +165,7 @@ namespace YARG.Menu.MusicLibrary
                 Debug.Log($"[SongViewType] Adding song to multiplayer setlist: {SongEntry.Name}");
                 
                 // Add to the multiplayer show playlist
-                _musicLibrary.AddSongToMultiplayerShow(SongEntry.Hash.ToString());
+                _musicLibrary.AddSongToMultiplayerShow(SongEntry);
                 
                 // Show feedback to user
                 Menu.Persistent.ToastManager.ToastSuccess(Localization.Localize.Key("Menu.MusicLibrary.AddedToSet"));
@@ -227,7 +227,7 @@ namespace YARG.Menu.MusicLibrary
             {
                 // Multiplayer show playlist - use network command
                 Debug.Log($"[SongViewType] Removing song from multiplayer setlist: {SongEntry.Name}");
-                _musicLibrary.RemoveSongFromMultiplayerShow(SongEntry.Hash.ToString());
+                _musicLibrary.RemoveSongFromMultiplayerShow(SongEntry);
                 Menu.Persistent.ToastManager.ToastInformation($"Removed '{SongEntry.Name}' from setlist");
             }
             else

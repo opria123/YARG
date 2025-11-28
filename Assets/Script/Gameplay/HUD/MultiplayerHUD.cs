@@ -2,14 +2,19 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using YARG.Networking;
+using YARG.Networking.NewNet;
+using System;
 using System.Collections.Generic;
 using YARG.Core;
+using YARG.Menu.Multiplayer;
+using YARG.Net.Packets;
 
 namespace YARG.Gameplay.HUD
 {
     /// <summary>
     /// Displays other players' stats during multiplayer gameplay.
     /// Shows names, scores, combos, and star power status.
+    /// Supports both Mirror (legacy) and LiteNet networking.
     /// </summary>
     public class MultiplayerHUD : MonoBehaviour
     {
@@ -24,14 +29,30 @@ namespace YARG.Gameplay.HUD
         private GameObject multiplayerPanel;
         
         private bool _isMultiplayer;
-        private Dictionary<NetworkPlayerData, PlayerStatsDisplay> _playerDisplays = new();
+        private bool _isLiteNet;
+        private Dictionary<NetworkPlayerData, PlayerStatsDisplay> _mirrorPlayerDisplays = new();
+        private Dictionary<Guid, PlayerStatsDisplay> _liteNetPlayerDisplays = new();
+        private LiteNetGameplaySync _liteNetSync;
         private float _updateInterval = 0.1f; // Update UI every 100ms
         private float _lastUpdateTime;
 
         private void Start()
         {
-            // Check if we're in multiplayer mode
-            if (YargNetworkManager.Instance == null || !YargNetworkManager.Instance.isNetworkActive)
+            // Check for LiteNet multiplayer first
+            _isLiteNet = MultiplayerModeUtility.IsLiteNetMultiplayer;
+            
+            if (_isLiteNet)
+            {
+                _isMultiplayer = true;
+                InitializeLiteNetMode();
+            }
+            // Check for Mirror multiplayer
+            else if (MultiplayerModeUtility.IsMirrorMultiplayer)
+            {
+                _isMultiplayer = true;
+                InitializeMirrorMode();
+            }
+            else
             {
                 _isMultiplayer = false;
                 if (multiplayerPanel != null)
@@ -41,16 +62,45 @@ namespace YARG.Gameplay.HUD
                 return;
             }
 
-            _isMultiplayer = true;
             if (multiplayerPanel != null)
             {
                 multiplayerPanel.SetActive(true);
             }
 
-            Debug.Log("[MultiplayerHUD] Initializing multiplayer HUD");
+            Debug.Log($"[MultiplayerHUD] Initializing multiplayer HUD (Mode: {(_isLiteNet ? "LiteNet" : "Mirror")})");
+        }
 
-            // Create displays for all players
-            RefreshPlayerList();
+        private void InitializeLiteNetMode()
+        {
+            // Find the LiteNetGameplaySync component
+            _liteNetSync = FindObjectOfType<LiteNetGameplaySync>();
+            if (_liteNetSync == null)
+            {
+                Debug.LogWarning("[MultiplayerHUD] LiteNetGameplaySync not found - HUD may not function properly");
+                return;
+            }
+
+            // Subscribe to remote state updates
+            _liteNetSync.OnRemoteStateUpdated += OnLiteNetPlayerStateUpdated;
+
+            Debug.Log("[MultiplayerHUD] LiteNet mode initialized");
+        }
+
+        private void InitializeMirrorMode()
+        {
+            // Create displays for all Mirror players
+            RefreshMirrorPlayerList();
+        }
+
+        private void OnLiteNetPlayerStateUpdated(Guid sessionId, GameplayStatePacket state)
+        {
+            // Create display if it doesn't exist
+            if (!_liteNetPlayerDisplays.ContainsKey(sessionId))
+            {
+                CreateLiteNetPlayerDisplay(sessionId);
+            }
+
+            // Update will happen in Update() loop
         }
 
         private void Update()
@@ -64,8 +114,36 @@ namespace YARG.Gameplay.HUD
 
             _lastUpdateTime = Time.time;
 
-            // Update all player displays
-            foreach (var kvp in _playerDisplays)
+            if (_isLiteNet)
+            {
+                UpdateLiteNetDisplays();
+            }
+            else
+            {
+                UpdateMirrorDisplays();
+            }
+        }
+
+        private void UpdateLiteNetDisplays()
+        {
+            if (_liteNetSync == null)
+                return;
+
+            var allStates = _liteNetSync.GetAllRemoteStates();
+            
+            foreach (var kvp in allStates)
+            {
+                if (_liteNetPlayerDisplays.TryGetValue(kvp.Key, out var display) && display != null)
+                {
+                    display.UpdateDisplayFromLiteNet(kvp.Value);
+                }
+            }
+        }
+
+        private void UpdateMirrorDisplays()
+        {
+            // Update all Mirror player displays
+            foreach (var kvp in _mirrorPlayerDisplays)
             {
                 if (kvp.Key != null && kvp.Value != null)
                 {
@@ -74,20 +152,52 @@ namespace YARG.Gameplay.HUD
             }
         }
 
-        private void RefreshPlayerList()
+        private void CreateLiteNetPlayerDisplay(Guid sessionId)
+        {
+            if (playerStatsContainer == null)
+            {
+                Debug.LogWarning("[MultiplayerHUD] playerStatsContainer is null - cannot create player display");
+                return;
+            }
+
+            GameObject displayObj;
+            
+            if (playerStatsPrefab != null)
+            {
+                displayObj = Instantiate(playerStatsPrefab, playerStatsContainer);
+            }
+            else
+            {
+                // Create a simple default display if no prefab is assigned
+                displayObj = new GameObject($"Player_{sessionId}");
+                displayObj.transform.SetParent(playerStatsContainer, false);
+            }
+
+            var display = displayObj.GetComponent<PlayerStatsDisplay>();
+            if (display == null)
+            {
+                display = displayObj.AddComponent<PlayerStatsDisplay>();
+                display.InitializeDefault();
+            }
+
+            _liteNetPlayerDisplays[sessionId] = display;
+            Debug.Log($"[MultiplayerHUD] Created LiteNet display for session {sessionId}");
+        }
+
+        private void RefreshMirrorPlayerList()
         {
             if (YargNetworkManager.Instance == null)
                 return;
 
             // Clear existing displays
-            foreach (var display in _playerDisplays.Values)
+            foreach (var display in _mirrorPlayerDisplays.Values)
             {
                 if (display != null)
                 {
                     Destroy(display.gameObject);
                 }
             }
-            _playerDisplays.Clear();
+            _mirrorPlayerDisplays.Clear();
 
             // Get all connected players
             var players = YargNetworkManager.Instance.GetAllPlayers();
@@ -100,14 +210,14 @@ namespace YARG.Gameplay.HUD
                 // Create display for this player (but not for local player)
                 if (!playerData.IsLocalUser)
                 {
-                    CreatePlayerDisplay(playerData);
+                    CreateMirrorPlayerDisplay(playerData);
                 }
             }
 
-            Debug.Log($"[MultiplayerHUD] Created displays for {_playerDisplays.Count} remote players");
+            Debug.Log($"[MultiplayerHUD] Created displays for {_mirrorPlayerDisplays.Count} remote Mirror players");
         }
 
-        private void CreatePlayerDisplay(NetworkPlayerData playerData)
+        private void CreateMirrorPlayerDisplay(NetworkPlayerData playerData)
         {
             if (playerStatsContainer == null)
             {
@@ -135,21 +245,37 @@ namespace YARG.Gameplay.HUD
                 display.InitializeDefault();
             }
 
-            _playerDisplays[playerData] = display;
+            _mirrorPlayerDisplays[playerData] = display;
             display.UpdateDisplay(playerData);
         }
 
         private void OnDestroy()
         {
-            // Clean up
-            foreach (var display in _playerDisplays.Values)
+            // Unsubscribe from LiteNet events
+            if (_liteNetSync != null)
+            {
+                _liteNetSync.OnRemoteStateUpdated -= OnLiteNetPlayerStateUpdated;
+            }
+
+            // Clean up Mirror displays
+            foreach (var display in _mirrorPlayerDisplays.Values)
             {
                 if (display != null)
                 {
                     Destroy(display.gameObject);
                 }
             }
-            _playerDisplays.Clear();
+            _mirrorPlayerDisplays.Clear();
+
+            // Clean up LiteNet displays
+            foreach (var display in _liteNetPlayerDisplays.Values)
+            {
+                if (display != null)
+                {
+                    Destroy(display.gameObject);
+                }
+            }
+            _liteNetPlayerDisplays.Clear();
         }
     }
 
@@ -284,6 +410,64 @@ namespace YARG.Gameplay.HUD
                 // You can set instrument-specific sprites here
                 // For now, just enable/disable based on instrument value
                 instrumentIcon.gameObject.SetActive(playerData.Instrument >= 0);
+            }
+        }
+
+        /// <summary>
+        /// Update display from LiteNet gameplay state packet.
+        /// </summary>
+        public void UpdateDisplayFromLiteNet(GameplayStatePacket state)
+        {
+            if (state == null)
+                return;
+
+            // Update name (for now just show session ID since we don't have player names in state)
+            if (nameText != null)
+            {
+                nameText.text = $"Player {state.SessionId.ToString().Substring(0, 8)}";
+            }
+
+            // Update score
+            if (scoreText != null)
+            {
+                scoreText.text = state.Score.ToString("N0");
+            }
+
+            // Update combo
+            if (comboText != null)
+            {
+                if (state.Combo > 0)
+                {
+                    comboText.text = $"{state.Combo}x";
+                    comboText.color = Color.cyan;
+                }
+                else
+                {
+                    comboText.text = "0x";
+                    comboText.color = Color.gray;
+                }
+            }
+
+            // Update star power indicator
+            if (starPowerIndicator != null)
+            {
+                starPowerIndicator.gameObject.SetActive(state.StarPowerActive);
+                
+                if (state.StarPowerActive)
+                {
+                    starPowerIndicator.color = Color.yellow;
+                }
+                else
+                {
+                    // Show charge level when not active
+                    float alpha = state.StarPowerAmount;
+                    starPowerIndicator.color = new Color(1f, 1f, 0f, alpha * 0.5f);
+                }
+
+                if (starPowerIndicator.type == Image.Type.Filled)
+                {
+                    starPowerIndicator.fillAmount = Mathf.Clamp01(state.StarPowerAmount);
+                }
             }
         }
     }

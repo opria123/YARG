@@ -1,0 +1,534 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>YARG.Net</name>
+    </assembly>
+    <members>
+        <member name="T:YARG.Net.Directory.ILobbyDirectoryClient">
+            <summary>
+            Client interface for querying available lobbies from the introducer service.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Directory.ILobbyDirectoryClient.LobbiesChanged">
+            <summary>
+            Raised when the lobby list has been refreshed from the introducer.
+            </summary>
+        </member>
+        <member name="P:YARG.Net.Directory.ILobbyDirectoryClient.Lobbies">
+            <summary>
+            Returns the most recently fetched list of lobbies.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.ILobbyDirectoryClient.StartPolling(System.TimeSpan)">
+            <summary>
+            Starts periodic polling of the introducer service.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.ILobbyDirectoryClient.StopPolling">
+            <summary>
+            Stops periodic polling.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.ILobbyDirectoryClient.RefreshAsync(System.Threading.CancellationToken)">
+            <summary>
+            Performs a single refresh of the lobby list.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Directory.LobbyDirectoryChangedEventArgs">
+            <summary>
+            Event args containing the updated lobby list.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Directory.LobbyAdvertisementRequest">
+            <summary>
+            Payload sent by hosts to advertise their lobby to the introducer service.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyAdvertisementRequest.#ctor(System.Guid,System.String,System.String,System.String,System.Int32,System.Int32,System.Int32,System.Boolean,System.String)">
+            <summary>
+            Payload sent by hosts to advertise their lobby to the introducer service.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Directory.LobbyDirectoryEntry">
+            <summary>
+            Lobby entry returned to clients when querying the introducer.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyDirectoryEntry.#ctor(System.Guid,System.String,System.String,System.String,System.Int32,System.Int32,System.Int32,System.Boolean,System.String,System.DateTimeOffset)">
+            <summary>
+            Lobby entry returned to clients when querying the introducer.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Directory.ILobbyAdvertiser">
+            <summary>
+            Client interface for advertising a lobby to the introducer service.
+            </summary>
+        </member>
+        <member name="P:YARG.Net.Directory.ILobbyAdvertiser.IsAdvertising">
+            <summary>
+            Whether the advertiser is currently running heartbeats.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.ILobbyAdvertiser.StartAdvertising(YARG.Net.Directory.LobbyAdvertisementRequest,System.TimeSpan)">
+            <summary>
+            Starts advertising the lobby with periodic heartbeats.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.ILobbyAdvertiser.StopAdvertisingAsync(System.Threading.CancellationToken)">
+            <summary>
+            Stops advertising and removes the lobby from the directory.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.ILobbyAdvertiser.UpdateAdvertisement(YARG.Net.Directory.LobbyAdvertisementRequest)">
+            <summary>
+            Updates the advertisement data (e.g., player count changed).
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Directory.LobbyAdvertiser">
+            <summary>
+            HTTP-based client for advertising lobbies to the introducer service.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyAdvertiser.#ctor(System.Uri,System.Net.Http.HttpClient)">
+            <summary>
+            Creates a new lobby advertiser.
+            </summary>
+            <param name="introducerBaseUri">Base URI of the introducer service.</param>
+            <param name="httpClient">Optional HttpClient instance.</param>
+        </member>
+        <member name="P:YARG.Net.Directory.LobbyAdvertiser.IsAdvertising">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyAdvertiser.StartAdvertising(YARG.Net.Directory.LobbyAdvertisementRequest,System.TimeSpan)">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyAdvertiser.StopAdvertisingAsync(System.Threading.CancellationToken)">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyAdvertiser.UpdateAdvertisement(YARG.Net.Directory.LobbyAdvertisementRequest)">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyAdvertiser.Dispose">
+            <inheritdoc />
+        </member>
+        <member name="T:YARG.Net.Directory.LobbyDirectoryClient">
+            <summary>
+            HTTP-based client for polling the lobby directory/introducer service.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Directory.LobbyDirectoryClient.LobbiesChanged">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyDirectoryClient.#ctor(System.Uri,System.Nullable{System.TimeSpan},System.Net.Http.HttpClient)">
+            <summary>
+            Creates a new directory client pointing at the given introducer endpoint.
+            </summary>
+            <param name="directoryUri">Base URI of the introducer's lobby list endpoint.</param>
+            <param name="lobbyTtl">How long a lobby should be considered active after its last heartbeat.</param>
+            <param name="httpClient">Optional HttpClient instance (for testing or reuse).</param>
+        </member>
+        <member name="P:YARG.Net.Directory.LobbyDirectoryClient.Lobbies">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyDirectoryClient.StartPolling(System.TimeSpan)">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyDirectoryClient.StopPolling">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyDirectoryClient.RefreshAsync(System.Threading.CancellationToken)">
+            <inheritdoc />
+        </member>
+        <member name="M:YARG.Net.Directory.LobbyDirectoryClient.Dispose">
+            <inheritdoc />
+        </member>
+        <member name="T:YARG.Net.Handlers.Client.ClientCountdownHandler">
+            <summary>
+            Handles countdown packets received on the client.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientCountdownHandler.CountdownReceived">
+            <summary>
+            Raised when a gameplay countdown is received from the server.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientCountdownHandler.Register(YARG.Net.Packets.Dispatch.IPacketDispatcher)">
+            <summary>
+            Registers this handler with the provided dispatcher.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientCountdownHandler.HandleAsync(YARG.Net.Packets.PacketContext,YARG.Net.Packets.PacketEnvelope{YARG.Net.Packets.GameplayCountdownPacket},System.Threading.CancellationToken)">
+            <summary>
+            Handles a countdown packet dispatched via <see cref="T:YARG.Net.Packets.Dispatch.IPacketDispatcher"/>.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Client.ClientGameplayHandler">
+            <summary>
+            Handles gameplay-related packets on the client side.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientGameplayHandler.GameplayStateReceived">
+            <summary>
+            Raised when gameplay state is received from another player.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientGameplayHandler.GameplayStartReceived">
+            <summary>
+            Raised when gameplay start signal is received.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientGameplayHandler.TimeSyncReceived">
+            <summary>
+            Raised when time sync is received from the server.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientGameplayHandler.PauseStateChanged">
+            <summary>
+            Raised when pause state changes.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientGameplayHandler.GameplayEnded">
+            <summary>
+            Raised when gameplay ends.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientGameplayHandler.SendGameplayState(YARG.Net.Transport.INetConnection,YARG.Net.Runtime.ClientSessionContext,YARG.Net.Packets.GameplayStatePacket)">
+            <summary>
+            Sends local gameplay state to the server for broadcast.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientGameplayHandler.SendPauseState(YARG.Net.Transport.INetConnection,System.Guid,System.Boolean,System.Double)">
+            <summary>
+            Sends a pause request to the server.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientGameplayHandler.TryGetPlayerState(System.Guid,YARG.Net.Packets.GameplayStatePacket@)">
+            <summary>
+            Gets the latest gameplay state for a specific player.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientGameplayHandler.GetAllPlayerStates">
+            <summary>
+            Gets all current player states.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientGameplayHandler.ClearPlayerStates">
+            <summary>
+            Clears all cached player states.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Client.ClientHandshakeRequestSender">
+            <summary>
+            Emits <see cref="T:YARG.Net.Packets.HandshakeRequestPacket"/> messages once a client transport connects.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientHandshakeRequestSender.SendHandshake(YARG.Net.Transport.INetConnection,System.String,System.String,System.String)">
+            <summary>
+            Sends a handshake request using the provided connection and metadata.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientHandshakeRequestSender.SendHandshake(YARG.Net.Transport.INetConnection,System.String,System.String)">
+            <summary>
+            Sends a handshake using <see cref="F:YARG.Net.Packets.ProtocolVersion.Current"/>.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Client.ClientHandshakeResponseHandler">
+            <summary>
+            Handles <see cref="T:YARG.Net.Packets.HandshakeResponsePacket"/> messages on the client and updates session context.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Client.ClientLobbyCommandSender">
+            <summary>
+            Helper for sending lobby-related commands from a client to the server.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Client.ClientLobbyStateHandler">
+            <summary>
+            Caches lobby state snapshots received on the client via <see cref="F:YARG.Net.Packets.PacketType.LobbyState"/> packets.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Client.ClientLobbyStateHandler.LobbyStateChanged">
+            <summary>
+            Raised when the cached lobby snapshot changes.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientLobbyStateHandler.Register(YARG.Net.Packets.Dispatch.IPacketDispatcher)">
+            <summary>
+            Registers this handler with the provided dispatcher so it can receive lobby state packets.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientLobbyStateHandler.TryGetSnapshot(YARG.Net.Sessions.LobbyStateSnapshot@)">
+            <summary>
+            Attempts to retrieve the latest cached lobby snapshot.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Client.ClientLobbyStateHandler.HandleAsync(YARG.Net.Packets.PacketContext,YARG.Net.Packets.PacketEnvelope{YARG.Net.Packets.LobbyStatePacket},System.Threading.CancellationToken)">
+            <summary>
+            Handles a lobby state packet dispatched via <see cref="T:YARG.Net.Packets.Dispatch.IPacketDispatcher"/>.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.ServerHandshakeHandler">
+            <summary>
+            Handles <see cref="T:YARG.Net.Packets.HandshakeRequestPacket"/> messages for server runtimes.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Server.ServerGameplayHandler">
+            <summary>
+            Handles gameplay-related packets and broadcasts state to all clients.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Server.ServerGameplayHandler.GameplayStateReceived">
+            <summary>
+            Raised when a gameplay state is received from a client.
+            </summary>
+        </member>
+        <member name="E:YARG.Net.Handlers.Server.ServerGameplayHandler.PauseStateChanged">
+            <summary>
+            Raised when a pause state changes.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Server.ServerGameplayHandler.BroadcastGameplayStart(System.Double,System.Double)">
+            <summary>
+            Broadcasts a gameplay start signal to all clients.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Server.ServerGameplayHandler.BroadcastTimeSync(System.Double,System.Double)">
+            <summary>
+            Broadcasts a time sync packet to all clients.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Handlers.Server.ServerGameplayHandler.BroadcastGameplayEnd(YARG.Net.Packets.GameplayEndReason)">
+            <summary>
+            Broadcasts a gameplay end signal to all clients.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Handlers.Server.ServerLobbyCommandHandler">
+            <summary>
+            Handles lobby-related commands sent by clients (ready toggles, song selection).
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.Dispatch.PacketDispatcher">
+            <summary>
+            Routes serialized packets to registered handlers using <see cref="T:YARG.Net.Serialization.INetSerializer"/>.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.GameplayStatePacket">
+            <summary>
+            Sent by clients to broadcast their gameplay state to other players.
+            Replicated via server to all connected clients.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.GameplayStatePacket.#ctor(System.Guid,System.UInt32,System.Int32,System.Int32,System.Int32,System.Boolean,System.Single,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Single,System.Int32,System.Boolean,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Double,System.Double)">
+            <summary>
+            Sent by clients to broadcast their gameplay state to other players.
+            Replicated via server to all connected clients.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.GameplayStartPacket">
+            <summary>
+            Sent by the host to signal gameplay is starting with synchronized timing.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.GameplayStartPacket.#ctor(System.Guid,System.Double,System.Double)">
+            <summary>
+            Sent by the host to signal gameplay is starting with synchronized timing.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.GameplayTimeSyncPacket">
+            <summary>
+            Sent to sync chart time across clients during gameplay.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.GameplayTimeSyncPacket.#ctor(System.Guid,System.Double,System.Double)">
+            <summary>
+            Sent to sync chart time across clients during gameplay.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.GameplayPausePacket">
+            <summary>
+            Sent when a player pauses or resumes gameplay.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.GameplayPausePacket.#ctor(System.Guid,System.Boolean,System.Double)">
+            <summary>
+            Sent when a player pauses or resumes gameplay.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.GameplayEndPacket">
+            <summary>
+            Sent when gameplay ends (song complete, fail, or quit).
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.GameplayEndPacket.#ctor(System.Guid,YARG.Net.Packets.GameplayEndReason)">
+            <summary>
+            Sent when gameplay ends (song complete, fail, or quit).
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.IPacketPayload">
+            <summary>
+            Marker interface implemented by all packet payload DTOs.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.PacketContext">
+            <summary>
+            Provides transport metadata to packet handlers.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.PacketContext.#ctor(YARG.Net.Transport.INetConnection,YARG.Net.Transport.ChannelType,YARG.Net.Packets.PacketEndpointRole)">
+            <summary>
+            Provides transport metadata to packet handlers.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.PacketEnvelope`1">
+            <summary>
+            Wraps a strongly typed payload with metadata that helps routers dispatch packets.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Packets.PacketEnvelope`1.#ctor(YARG.Net.Packets.PacketType,`0,System.String)">
+            <summary>
+            Wraps a strongly typed payload with metadata that helps routers dispatch packets.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.PacketType">
+            <summary>
+            Enumerates the well-known packet categories exchanged between peers.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Packets.ProtocolVersion">
+            <summary>
+            Central place to bump protocol compatibility between client/server builds.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Runtime.ClientNetworkingBootstrapper">
+            <summary>
+            Helper for wiring up the default client runtime, packet dispatcher, and session-aware helpers.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Runtime.ClientSessionContext">
+            <summary>
+            Tracks the local client's session identifier once the server accepts the handshake.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Runtime.DefaultClientRuntime">
+            <summary>
+            Default client runtime that drives an <see cref="T:YARG.Net.Transport.INetTransport"/> on the Unity side.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Runtime.DefaultServerRuntime">
+            <summary>
+            Basic polling-based server runtime that drives an <see cref="T:YARG.Net.Transport.INetTransport"/>.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Serialization.JsonNetSerializer">
+            <summary>
+            `INetSerializer` backed by <see cref="T:System.Text.Json.JsonSerializer"/>.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Serialization.NetSerializerOptions">
+            <summary>
+            Factory helpers for serializer option instances shared across transports.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Serialization.NetSerializerOptions.CreateDefault">
+            <summary>
+            Creates the default <see cref="T:System.Text.Json.JsonSerializerOptions"/> used by YARG networking payloads.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Serialization.NewtonsoftNetSerializer">
+            <summary>
+            <see cref="T:YARG.Net.Serialization.INetSerializer"/> implementation backed by Newtonsoft.Json for Unity/Mono consumers.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Sessions.LobbyConfiguration">
+            <summary>
+            Provides configurable limits for a lobby instance.
+            </summary>
+        </member>
+        <member name="P:YARG.Net.Sessions.LobbyConfiguration.MaxPlayers">
+            <summary>
+            Maximum number of active (non-spectator) players allowed in the lobby.
+            </summary>
+        </member>
+        <member name="P:YARG.Net.Sessions.LobbyConfiguration.AllowSpectators">
+            <summary>
+            Whether spectators are allowed to join the lobby.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Sessions.LobbyStateManager">
+            <summary>
+            Maintains lobby membership, readiness, and selection state.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Sessions.LobbyStateManager.TryStartCountdown(System.Int32)">
+            <summary>
+            Starts the countdown to begin gameplay. Only valid when status is ReadyToPlay.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Sessions.LobbyStateManager.CancelCountdown">
+            <summary>
+            Cancels the countdown. Called if a player becomes unready or leaves.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Sessions.LobbyStateManager.CompleteCountdown">
+            <summary>
+            Completes the countdown and signals that gameplay should start.
+            Returns true if the status is still InCountdown (valid to start).
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Sessions.LobbyStateManager.ResetAfterGameplay">
+            <summary>
+            Resets the lobby after gameplay ends.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Sessions.LobbyStateSnapshot">
+            <summary>
+            Immutable view of the lobby state for broadcasting or querying.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Sessions.LobbyStateSnapshot.#ctor(System.Guid,System.Collections.Generic.IReadOnlyList{YARG.Net.Packets.LobbyPlayer},YARG.Net.Packets.LobbyStatus,YARG.Net.Packets.SongSelectionState)">
+            <summary>
+            Immutable view of the lobby state for broadcasting or querying.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Sessions.ServerLobbyCoordinator">
+            <summary>
+            Bridges handshake/session events to lobby state broadcasts.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Sessions.SessionManager">
+            <summary>
+            Tracks active player sessions for a server runtime.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Sessions.SessionRecord">
+            <summary>
+            Represents a logical player session tracked by the server runtime.
+            </summary>
+        </member>
+        <member name="M:YARG.Net.Sessions.SessionRecord.#ctor(System.Guid,System.Guid,System.String,System.DateTimeOffset,YARG.Net.Transport.INetConnection)">
+            <summary>
+            Represents a logical player session tracked by the server runtime.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Transport.ChannelType">
+            <summary>
+            Logical channels map onto transport-specific delivery guarantees.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Transport.INetConnection">
+            <summary>
+            Represents a logical peer connected to the transport.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Transport.LiteNetLibTransport">
+            <summary>
+            LiteNetLib-backed implementation of <see cref="T:YARG.Net.Transport.INetTransport"/> for production networking.
+            </summary>
+        </member>
+        <member name="T:YARG.Net.Transport.NullTransport">
+            <summary>
+            Minimal placeholder transport so early unit tests can run without LiteNetLib.
+            </summary>
+        </member>
+    </members>
+</doc>

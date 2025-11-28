@@ -13,6 +13,12 @@ using YARG.Networking;
 using YARG.Networking.Bookmarks;
 using Cysharp.Threading.Tasks;
 using YARG.Localization;
+using YARG.Networking.NewNet;
+using YARG.Net.Directory;
+using YARG.Net.Handlers.Client;
+using YARG.Net.Runtime;
+using YARG.Net.Sessions;
+using YARG.Settings;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -75,6 +81,7 @@ namespace YARG.Menu.Multiplayer
         private const float PING_STATUS_REFRESH_MIN_INTERVAL = 4.0f;
         private const float DISCOVERY_PING_INTERVAL = 5.0f;
         private const int MAX_CONSECUTIVE_PROBE_FAILURES = 6;
+        private const string LiteNetLibTransportId = "LiteNetLibTransport";
 
         private LobbyFavorites _favorites;
         private List<YargNetworkManager.LobbyInfo> _currentLobbies = new();
@@ -101,6 +108,20 @@ namespace YARG.Menu.Multiplayer
         private CancellationTokenSource _pingCancellation;
         private float _lastPingStartedAt = float.NegativeInfinity;
         private float _nextAutomaticPingAt;
+        private bool _liteNetLibJoinInProgress;
+        private bool _liteNetLibEventsHooked;
+        private string _liteNetLibPendingHost;
+        private int _liteNetLibPendingPort;
+        private string _liteNetLibPendingDisplayName;
+        private string _liteNetLibPendingPassword;
+        private YargNetworkManager.LobbyInfo _liteNetLibPendingLobby;
+        private LobbyStateSnapshot _liteNetSnapshot;
+        private bool _liteNetSnapshotDirty;
+
+        // Directory service integration
+        private bool _directoryEventsHooked;
+        private List<LobbyDirectoryEntry> _directoryLobbies = new();
+        private bool _directoryLobbiesDirty;
 
         private bool _pendingPasswordSaveRequested;
         private string _pendingPasswordAddress;
@@ -169,6 +190,12 @@ namespace YARG.Menu.Multiplayer
                 _sidebar.DirectConnectSubmitted += OnDirectConnectSubmitted;
             }
 
+            SubscribeToLiteNetLibEvents();
+            SubscribeToDirectoryEvents();
+            PrimeLiteNetSnapshot();
+            _liteNetSnapshotDirty = true;
+            _directoryLobbiesDirty = true;
+
             // Build the view list first so navigatables are added to the NavigationGroup
             RefreshList(false);
 
@@ -211,6 +238,9 @@ namespace YARG.Menu.Multiplayer
                 YargNetworkManager.Instance.OnNetworkError -= HandleNetworkError;
             }
 
+            UnsubscribeFromLiteNetLibEvents();
+            UnsubscribeFromDirectoryEvents();
+
             ClearPendingPasswordUpdate();
             _lastPasswordAttemptLobby = null;
             _lastPasswordAttemptKey = null;
@@ -230,6 +260,12 @@ namespace YARG.Menu.Multiplayer
                 _sidebar.ClearLobby();
             }
             _selectedLobby = null;
+
+            ClearLiteNetLibJoinState();
+            _liteNetSnapshot = null;
+            _liteNetSnapshotDirty = false;
+            _directoryLobbies.Clear();
+            _directoryLobbiesDirty = false;
 
             if (_pingCancellation != null)
             {
@@ -396,6 +432,11 @@ namespace YARG.Menu.Multiplayer
 
                     myLobbiesSection.Add(new MyLobbyViewType(preset, this));
                 }
+            }
+
+            if (TryBuildLiteNetView(out var liteNetView))
+            {
+                myLobbiesSection.Insert(0, liteNetView);
             }
 
             var discoveredSection = new List<LobbyViewType>();
@@ -578,11 +619,87 @@ namespace YARG.Menu.Multiplayer
                 }
 
                 var password = preset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private ? preset.password ?? string.Empty : string.Empty;
-                YargNetworkManager.Instance?.CreateLobby(preset.lobbyName, preset.maxPlayers, preset.PrivacyMode, password);
+
+                // Use LiteNet hosting only - Mirror is deprecated and lacks replay sync support
+                TryStartLiteNetHost(preset.lobbyName, preset.maxPlayers, password);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to create lobby from sidebar submission: {ex}");
+                Debug.LogError($"[LobbyBrowserMenu] Failed to create lobby from sidebar submission: {ex}");
+                ToastManager.ToastError($"Failed to create lobby: {ex.Message}");
+            }
+        }
+
+        private void TryStartLiteNetHost(string lobbyName, int maxPlayers, string password)
+        {
+            int port = SettingsManager.Settings?.NetworkPort?.Value ?? NetworkTransportDefaults.DefaultUdpPort;
+            string hostName = YargNetworkManager.Instance?.PlayerName ?? "Host";
+
+            // Get introducer URI from settings for public lobby advertising
+            Uri? introducerUri = null;
+            string introducerUriStr = SettingsManager.Settings?.IntroducerUri?.Value;
+            if (!string.IsNullOrWhiteSpace(introducerUriStr))
+            {
+                try
+                {
+                    introducerUri = new Uri(introducerUriStr);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[LobbyBrowserMenu] Invalid introducer URI '{introducerUriStr}': {ex.Message}");
+                }
+            }
+
+            var options = new ServerHostOptions
+            {
+                LobbyName = lobbyName,
+                HostName = hostName,
+                MaxPlayers = maxPlayers,
+                Password = string.IsNullOrEmpty(password) ? null : password,
+                Port = port,
+                EnableNatPunchThrough = true,
+                IntroducerUri = introducerUri,
+            };
+
+            StartLiteNetHostAsync(options).Forget();
+        }
+
+        private async UniTaskVoid StartLiteNetHostAsync(ServerHostOptions options)
+        {
+            try
+            {
+                var serverService = ServerNetworkingService.Instance;
+                await serverService.StartAsync(options);
+
+                // Now connect the local client to its own server
+                var clientService = ClientNetworkingService.Instance;
+                clientService.Initialize();
+
+                var parameters = new ClientConnectionParameters(
+                    "127.0.0.1",
+                    options.Port,
+                    options.HostName ?? "Host",
+                    options.Password);
+
+                await clientService.ConnectAsync(parameters);
+
+                // Navigate to the lobby room
+                if (MenuManager.Instance != null)
+                {
+                    MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LobbyBrowserMenu] LiteNet host start failed: {ex.Message}");
+
+                // Clean up server if client connection failed
+                if (ServerNetworkingService.HasInstance)
+                {
+                    await ServerNetworkingService.Instance.StopAsync();
+                }
+
+                ClientNetworkingMenuUtility.ShowConnectionError($"Failed to start server: {ex.Message}");
             }
         }
 
@@ -598,24 +715,17 @@ namespace YARG.Menu.Multiplayer
             string displayName = string.IsNullOrWhiteSpace(data.DisplayName) ? address : data.DisplayName.Trim();
             LobbyBookmarkStore.Instance.RecordConnection(address, data.Port, displayName, data.Password ?? string.Empty);
 
-            string endpoint;
-            try
+            int port = data.Port > 0 ? data.Port : (SettingsManager.Settings?.NetworkPort?.Value ?? NetworkTransportDefaults.DefaultUdpPort);
+            string password = data.Password ?? string.Empty;
+
+            if (!ClientNetworkingMenuUtility.IsServiceAvailable)
             {
-                endpoint = EndpointUtility.FormatEndpoint(address, data.Port);
-            }
-            catch (Exception)
-            {
-                endpoint = string.Concat(address, ":", data.Port);
+                Debug.LogWarning("[LobbyBrowserMenu] LiteNetLib service unavailable for direct connect.");
+                ClientNetworkingMenuUtility.ShowConnectionError(Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected"));
+                return;
             }
 
-            try
-            {
-                YargNetworkManager.Instance?.JoinLobby(endpoint, data.Password ?? string.Empty);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Direct connect join failed: {ex}");
-            }
+            BeginLiteNetLibJoin(address, port, displayName, password, null);
         }
 
         public void JoinLobby(YargNetworkManager.LobbyInfo lobby)
@@ -681,6 +791,12 @@ namespace YARG.Menu.Multiplayer
         private void JoinLobbyWithPassword(YargNetworkManager.LobbyInfo lobby, string password)
         {
             TrackPasswordSubmission(lobby, password);
+            if (ShouldUseLiteNetLib(lobby))
+            {
+                BeginLiteNetLibJoin(lobby, password);
+                return;
+            }
+
             YargNetworkManager.Instance?.JoinDiscoveredLobby(lobby, password);
         }
 
@@ -825,6 +941,247 @@ namespace YARG.Menu.Multiplayer
             return YargNetworkManager.Instance?.SuggestedDirectConnectPort ?? NetworkTransportDefaults.DefaultUdpPort;
         }
 
+        private void SubscribeToLiteNetLibEvents(bool forceCreate = false)
+        {
+            if (_liteNetLibEventsHooked)
+            {
+                return;
+            }
+
+            if (!ClientNetworkingService.HasInstance)
+            {
+                if (!forceCreate)
+                {
+                    return;
+                }
+
+                _ = ClientNetworkingService.Instance;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            service.HandshakeCompleted += HandleLiteNetLibHandshakeCompleted;
+            service.Disconnected += HandleLiteNetLibDisconnected;
+            service.LobbyStateChanged += HandleLiteNetLibLobbyStateChanged;
+            _liteNetLibEventsHooked = true;
+        }
+
+        private void UnsubscribeFromLiteNetLibEvents()
+        {
+            if (!_liteNetLibEventsHooked)
+            {
+                return;
+            }
+
+            if (!ClientNetworkingService.HasInstance)
+            {
+                _liteNetLibEventsHooked = false;
+                return;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            service.HandshakeCompleted -= HandleLiteNetLibHandshakeCompleted;
+            service.Disconnected -= HandleLiteNetLibDisconnected;
+            service.LobbyStateChanged -= HandleLiteNetLibLobbyStateChanged;
+            _liteNetLibEventsHooked = false;
+        }
+
+        private void HandleLiteNetLibHandshakeCompleted(object sender, ClientHandshakeCompletedEventArgs e)
+        {
+            if (!_liteNetLibJoinInProgress)
+            {
+                return;
+            }
+
+            if (!e.Accepted)
+            {
+                var reason = string.IsNullOrWhiteSpace(e.Reason)
+                    ? Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected")
+                    : e.Reason;
+
+                HandleNetworkError(reason);
+                ClientNetworkingMenuUtility.ShowConnectionError(reason);
+                ClearLiteNetLibJoinState();
+                return;
+            }
+
+            var snapshot = _liteNetLibPendingLobby ?? _lastPasswordAttemptLobby;
+            if (_pendingPasswordSaveRequested && snapshot != null)
+            {
+                HandleLobbyJoined(snapshot);
+            }
+
+            PrimeLiteNetSnapshot();
+            _liteNetSnapshotDirty = true;
+            ClearLiteNetLibJoinState();
+
+            // Navigate client to the lobby room (host already navigates in StartLiteNetHostAsync)
+            if (MenuManager.Instance != null)
+            {
+                Debug.Log("[LobbyBrowserMenu] LiteNet client handshake completed, navigating to LobbyRoom");
+                MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+            }
+        }
+
+        private void HandleLiteNetLibDisconnected(object sender, ClientDisconnectedEventArgs e)
+        {
+            if (_liteNetLibJoinInProgress)
+            {
+                ClearLiteNetLibJoinState();
+            }
+
+            _liteNetSnapshot = null;
+            _liteNetSnapshotDirty = true;
+        }
+
+        private void HandleLiteNetLibLobbyStateChanged(object sender, ClientLobbyStateChangedEventArgs e)
+        {
+            _liteNetSnapshot = e?.Snapshot;
+            _liteNetSnapshotDirty = true;
+        }
+
+        // --- Directory Service Integration ---
+        private void SubscribeToDirectoryEvents()
+        {
+            if (_directoryEventsHooked)
+            {
+                return;
+            }
+
+            // Initialize the directory service with the introducer URI from settings if not already done
+            TryInitializeDirectoryService();
+
+            if (!LobbyDirectoryService.HasInstance)
+            {
+                return;
+            }
+
+            var service = LobbyDirectoryService.Instance;
+            service.LobbiesChanged += HandleDirectoryLobbiesChanged;
+            _directoryEventsHooked = true;
+
+            // Start polling while the browser is open
+            service.StartPolling(TimeSpan.FromSeconds(5));
+
+            // Seed with current lobbies
+            _directoryLobbies = new List<LobbyDirectoryEntry>(service.Lobbies);
+            _directoryLobbiesDirty = true;
+        }
+
+        private void TryInitializeDirectoryService()
+        {
+            // Get the introducer URI from settings
+            string introducerUriStr = SettingsManager.Settings?.IntroducerUri?.Value;
+            if (string.IsNullOrWhiteSpace(introducerUriStr))
+            {
+                Debug.Log("[LobbyBrowserMenu] No introducer URI configured; directory service will not be initialized.");
+                return;
+            }
+
+            Uri introducerUri;
+            try
+            {
+                introducerUri = new Uri(introducerUriStr);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyBrowserMenu] Invalid introducer URI '{introducerUriStr}': {ex.Message}");
+                return;
+            }
+
+            var service = LobbyDirectoryService.Instance;
+            service.Initialize(introducerUri, lobbyTtl: TimeSpan.FromSeconds(30));
+            Debug.Log($"[LobbyBrowserMenu] Directory service initialized with URI: {introducerUri}");
+        }
+
+        private void UnsubscribeFromDirectoryEvents()
+        {
+            if (!_directoryEventsHooked)
+            {
+                return;
+            }
+
+            if (!LobbyDirectoryService.HasInstance)
+            {
+                _directoryEventsHooked = false;
+                return;
+            }
+
+            var service = LobbyDirectoryService.Instance;
+
+            // Stop polling when leaving the browser
+            service.StopPolling();
+
+            service.LobbiesChanged -= HandleDirectoryLobbiesChanged;
+            _directoryEventsHooked = false;
+        }
+
+        private void HandleDirectoryLobbiesChanged(object sender, LobbyDirectoryChangedEventArgs e)
+        {
+            _directoryLobbies = e?.Lobbies != null
+                ? new List<LobbyDirectoryEntry>(e.Lobbies)
+                : new List<LobbyDirectoryEntry>();
+            _directoryLobbiesDirty = true;
+        }
+
+        private void ClearLiteNetLibJoinState()
+        {
+            _liteNetLibJoinInProgress = false;
+            _liteNetLibPendingHost = null;
+            _liteNetLibPendingDisplayName = null;
+            _liteNetLibPendingPassword = null;
+            _liteNetLibPendingPort = 0;
+            _liteNetLibPendingLobby = null;
+        }
+
+        private void PrimeLiteNetSnapshot()
+        {
+            if (!ClientNetworkingService.HasInstance)
+            {
+                _liteNetSnapshot = null;
+                return;
+            }
+
+            var handler = ClientNetworkingService.Instance.LobbyHandler;
+            if (handler != null && handler.TryGetSnapshot(out var snapshot) && snapshot != null)
+            {
+                _liteNetSnapshot = snapshot;
+            }
+            else
+            {
+                _liteNetSnapshot = null;
+            }
+        }
+
+        internal void NavigateToLiteNetLobby()
+        {
+            if (MenuManager.Instance == null)
+            {
+                return;
+            }
+
+            if (MenuManager.Instance.CurrentMenu != MenuManager.Menu.LobbyRoom)
+            {
+                MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+            }
+        }
+
+        private bool TryBuildLiteNetView(out LiteNetLobbyViewType view)
+        {
+            view = null;
+            if (_liteNetSnapshot == null)
+            {
+                return false;
+            }
+
+            if (!ClientNetworkingService.HasInstance || !ClientNetworkingService.Instance.IsConnected)
+            {
+                return false;
+            }
+
+            view = new LiteNetLobbyViewType(_liteNetSnapshot, this);
+            return true;
+        }
+
         private void HandleLobbyJoined(YargNetworkManager.LobbyInfo lobby)
         {
             if (!_pendingPasswordSaveRequested)
@@ -859,7 +1216,7 @@ namespace YARG.Menu.Multiplayer
 
         private void HandleNetworkError(string error)
         {
-            if (!string.Equals(error, "Incorrect password", StringComparison.OrdinalIgnoreCase))
+            if (!IsPasswordErrorMessage(error))
             {
                 return;
             }
@@ -880,6 +1237,17 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
+        private static bool IsPasswordErrorMessage(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            return message.IndexOf("incorrect password", StringComparison.OrdinalIgnoreCase) >= 0
+                || message.IndexOf("invalid password", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private void ClearPendingPasswordUpdate()
         {
             _pendingPasswordSaveRequested = false;
@@ -890,6 +1258,121 @@ namespace YARG.Menu.Multiplayer
             _lastPasswordAttemptLobby = null;
             _lastPasswordAttemptKey = null;
             _lastPasswordAttemptWasAuto = false;
+        }
+
+        private static bool ShouldUseLiteNetLib(YargNetworkManager.LobbyInfo lobby)
+        {
+            if (lobby == null)
+            {
+                return false;
+            }
+
+            return string.Equals(lobby.transportId ?? string.Empty, LiteNetLibTransportId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void BeginLiteNetLibJoin(YargNetworkManager.LobbyInfo lobby, string password)
+        {
+            if (!TryResolveLiteNetLibEndpoint(lobby, out var host, out var port))
+            {
+                Debug.LogWarning("[LobbyBrowserMenu] Unable to resolve endpoint for LiteNetLib lobby join.");
+                return;
+            }
+
+            var displayName = !string.IsNullOrWhiteSpace(lobby?.lobbyName) ? lobby.lobbyName : host;
+            var snapshot = CloneLobbyInfo(lobby);
+            BeginLiteNetLibJoin(host, port, displayName, password, snapshot);
+        }
+
+        private void BeginLiteNetLibJoin(string host, int port, string displayName, string password, YargNetworkManager.LobbyInfo lobbySnapshot)
+        {
+            SubscribeToLiteNetLibEvents(forceCreate: true);
+
+            if (!ClientNetworkingService.HasInstance)
+            {
+                Debug.LogWarning("[LobbyBrowserMenu] LiteNetLib service could not be created for join attempts.");
+                return;
+            }
+
+            if (_liteNetLibJoinInProgress)
+            {
+                Debug.Log("[LobbyBrowserMenu] LiteNetLib join already in progress.");
+                return;
+            }
+
+            host = host?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(host))
+            {
+                Debug.LogWarning("[LobbyBrowserMenu] LiteNetLib join missing host.");
+                return;
+            }
+
+            string normalizedEndpoint;
+            try
+            {
+                normalizedEndpoint = EndpointUtility.FormatEndpoint(host, port);
+            }
+            catch
+            {
+                normalizedEndpoint = string.Concat(host, ":", port);
+            }
+
+            _liteNetLibJoinInProgress = true;
+            _liteNetLibPendingHost = host;
+            _liteNetLibPendingPort = port;
+            _liteNetLibPendingDisplayName = !string.IsNullOrWhiteSpace(displayName) ? displayName : host;
+            _liteNetLibPendingPassword = password ?? string.Empty;
+            _liteNetLibPendingLobby = lobbySnapshot;
+
+            ClientNetworkingMenuUtility.ShowConnectingDialog(normalizedEndpoint);
+
+            var parameters = ClientNetworkingMenuUtility.BuildParameters(host, port, password);
+            ConnectLiteNetLibAsync(parameters);
+        }
+
+        private async void ConnectLiteNetLibAsync(ClientConnectionParameters parameters)
+        {
+            try
+            {
+                var service = ClientNetworkingService.Instance;
+                service.Initialize();
+                await service.ConnectAsync(parameters);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyBrowserMenu] LiteNetLib connection failed: {ex.Message}");
+                ClientNetworkingMenuUtility.ShowConnectionError(ex.Message);
+                ClearLiteNetLibJoinState();
+            }
+        }
+
+        private static bool TryResolveLiteNetLibEndpoint(YargNetworkManager.LobbyInfo lobby, out string host, out int port)
+        {
+            host = string.Empty;
+            port = 0;
+
+            if (lobby == null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(lobby.publicAddress))
+            {
+                host = lobby.publicAddress.Trim();
+                port = lobby.publicPort > 0 ? lobby.publicPort : lobby.port;
+            }
+
+            if (string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(lobby.ipAddress))
+            {
+                host = lobby.ipAddress.Trim();
+                port = lobby.port > 0 ? lobby.port : lobby.publicPort;
+            }
+
+            if (port <= 0)
+            {
+                port = SettingsManager.Settings?.NetworkPort?.Value ?? NetworkTransportDefaults.DefaultUdpPort;
+            }
+
+            return !string.IsNullOrWhiteSpace(host);
         }
 
         private void Back() => MenuManager.Instance.PopMenu();
@@ -1098,6 +1581,7 @@ namespace YARG.Menu.Multiplayer
             lobby.isActive = true;
             lobby.lastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
+
 
         private static YargNetworkManager.LobbyInfo CloneLobbyInfo(YargNetworkManager.LobbyInfo source)
         {
@@ -1595,11 +2079,13 @@ namespace YARG.Menu.Multiplayer
 
             try
             {
-                YargNetworkManager.Instance?.CreateLobby(storedPreset.lobbyName, storedPreset.maxPlayers, storedPreset.PrivacyMode, storedPreset.password ?? string.Empty);
+                // Use LiteNet hosting only - Mirror is deprecated
+                TryStartLiteNetHost(storedPreset.lobbyName, storedPreset.maxPlayers, storedPreset.password ?? string.Empty);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to create lobby from preset '{storedPreset?.lobbyName}': {ex}");
+                Debug.LogError($"[LobbyBrowserMenu] Failed to create lobby from preset '{storedPreset?.lobbyName}': {ex}");
+                ToastManager.ToastError($"Failed to start lobby: {ex.Message}");
             }
         }
 
@@ -1611,6 +2097,75 @@ namespace YARG.Menu.Multiplayer
             _lastShownSidebarView = null;
             ApplyNavigationSchemeForCurrentView();
             _sidebar.ShowCreateLobbyForm(preset, true);
+        }
+
+        /// <summary>
+        /// Merges lobbies from the LiteNet directory service into the current lobbies list
+        /// so they appear alongside (or replace) Mirror-discovered lobbies.
+        /// </summary>
+        private void MergeDirectoryLobbiesIntoCurrentLobbies()
+        {
+            if (_directoryLobbies == null || _directoryLobbies.Count == 0)
+            {
+                return;
+            }
+
+            // Build a lookup of existing lobbies by endpoint key so we can merge or replace
+            var existingByKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < _currentLobbies.Count; i++)
+            {
+                var lobby = _currentLobbies[i];
+                var key = LobbyBookmarkUtility.BuildKey(lobby.ipAddress, lobby.port);
+                if (!string.IsNullOrEmpty(key) && !existingByKey.ContainsKey(key))
+                {
+                    existingByKey[key] = i;
+                }
+            }
+
+            foreach (var entry in _directoryLobbies)
+            {
+                if (entry == null)
+                {
+                    continue;
+                }
+
+                // Try to match the snapshot if available (same lobby ID)
+                LobbyStateSnapshot? matchingSnapshot = null;
+                if (_liteNetSnapshot != null && _liteNetSnapshot.LobbyId == entry.LobbyId)
+                {
+                    matchingSnapshot = _liteNetSnapshot;
+                }
+
+                var synthesized = LobbyInfoConverter.FromDirectoryEntry(entry, matchingSnapshot);
+                var key = LobbyBookmarkUtility.BuildKey(synthesized.ipAddress, synthesized.port);
+
+                if (!string.IsNullOrEmpty(key) && existingByKey.TryGetValue(key, out var existingIndex))
+                {
+                    // Replace existing entry with newer LiteNet data if it's more recent or LiteNet-sourced
+                    var existing = _currentLobbies[existingIndex];
+                    if (LobbyInfoConverter.IsLiteNetLobby(synthesized) || synthesized.lastSeen > existing.lastSeen)
+                    {
+                        _currentLobbies[existingIndex] = synthesized;
+                    }
+                }
+                else
+                {
+                    // Add as new lobby
+                    _currentLobbies.Add(synthesized);
+                    if (!string.IsNullOrEmpty(key))
+                    {
+                        existingByKey[key] = _currentLobbies.Count - 1;
+                    }
+                }
+
+                // Also update the ping cache so saved entries show as online
+                if (!string.IsNullOrEmpty(key))
+                {
+                    _pingedLobbies ??= new Dictionary<string, YargNetworkManager.LobbyInfo>();
+                    _pingedLobbies[key] = synthesized;
+                    ResetProbeFailureCount(key);
+                }
+            }
         }
 
         // Discovery callbacks
@@ -1660,6 +2215,14 @@ namespace YARG.Menu.Multiplayer
         protected override void Update()
         {
             base.Update();
+
+            if (_liteNetSnapshotDirty || _directoryLobbiesDirty)
+            {
+                _liteNetSnapshotDirty = false;
+                _directoryLobbiesDirty = false;
+                MergeDirectoryLobbiesIntoCurrentLobbies();
+                RefreshList(true);
+            }
 
             if (Time.unscaledTime >= _nextStaleSweepAt)
             {
@@ -1962,20 +2525,31 @@ namespace YARG.Menu.Multiplayer
 
         public void JoinSavedBookmark(LobbyBookmark bookmark)
         {
-            if (bookmark == null) return; if (_pingedLobbies.TryGetValue(bookmark.EndpointKey, out var live) && live != null) { JoinLobby(live); return; }
-            // Join using the normalized endpoint (address:port). YargNetworkManager does not expose JoinBookmark,
-            // so use JoinLobby with a formatted endpoint and the saved password.
-            try
+            if (bookmark == null)
             {
-                string endpoint = EndpointUtility.FormatEndpoint(bookmark.address, bookmark.port <= 0 ? (YargNetworkManager.Instance?.SuggestedDirectConnectPort ?? NetworkTransportDefaults.DefaultUdpPort) : bookmark.port);
-                YargNetworkManager.Instance?.JoinLobby(endpoint, bookmark.password ?? string.Empty);
+                return;
             }
-            catch (Exception)
+
+            if (!ClientNetworkingMenuUtility.IsServiceAvailable)
             {
-                // Fallback: attempt naive concat
-                string endpoint = string.Concat(bookmark.address, ":", bookmark.port);
-                YargNetworkManager.Instance?.JoinLobby(endpoint, bookmark.password ?? string.Empty);
+                Debug.LogWarning("[LobbyBrowserMenu] LiteNetLib service unavailable for saved bookmark join.");
+                ClientNetworkingMenuUtility.ShowConnectionError(Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected"));
+                return;
             }
+
+            if (_pingedLobbies.TryGetValue(bookmark.EndpointKey, out var live) && live != null)
+            {
+                JoinLobby(live);
+                return;
+            }
+
+            int resolvedPort = bookmark.port > 0
+                ? bookmark.port
+                : (SettingsManager.Settings?.NetworkPort?.Value ?? NetworkTransportDefaults.DefaultUdpPort);
+
+            string displayName = string.IsNullOrWhiteSpace(bookmark.displayName) ? bookmark.address : bookmark.displayName;
+
+            BeginLiteNetLibJoin(bookmark.address, resolvedPort, displayName, bookmark.password ?? string.Empty, null);
         }
 
         /// <summary>

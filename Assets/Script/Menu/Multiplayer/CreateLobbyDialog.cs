@@ -3,13 +3,17 @@ using UnityEngine.UI;
 using TMPro;
 using YARG.Core.Logging;
 using YARG.Networking;
+using YARG.Networking.NewNet;
 using YARG.Menu.Persistent;
+using Cysharp.Threading.Tasks;
+using System;
 
 namespace YARG.Menu.Multiplayer
 {
     /// <summary>
     /// Dialog for creating a new lobby.
-    /// Uses YARG's dialog system for consistent UI.
+    /// Uses LiteNet networking for all new lobbies.
+    /// Mirror (legacy) support has been deprecated.
     /// </summary>
     public class CreateLobbyDialog : MonoBehaviour
     {
@@ -63,7 +67,13 @@ namespace YARG.Menu.Multiplayer
             // Set default lobby name
             if (lobbyNameInput != null)
             {
-                lobbyNameInput.text = $"{YargNetworkManager.Instance.PlayerName}'s Lobby";
+                string playerName = "Player";
+                // Try to get player name from Mirror first (for backwards compatibility)
+                if (YargNetworkManager.Instance != null)
+                {
+                    playerName = YargNetworkManager.Instance.PlayerName;
+                }
+                lobbyNameInput.text = $"{playerName}'s Lobby";
             }
 
             OnPrivacyModeChanged(0);
@@ -86,7 +96,7 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
-        public void OnCreateClicked()
+        public async void OnCreateClicked()
         {
             string lobbyName = lobbyNameInput != null ? lobbyNameInput.text : "YARG Lobby";
             if (string.IsNullOrEmpty(lobbyName))
@@ -95,21 +105,55 @@ namespace YARG.Menu.Multiplayer
             }
 
             int maxPlayers = maxPlayersDropdown != null ? maxPlayersDropdown.value + 2 : 8;
-            var privacyMode = privacyModeDropdown != null 
-                ? (YargNetworkManager.LobbyPrivacyMode)privacyModeDropdown.value 
-                : YargNetworkManager.LobbyPrivacyMode.Public;
-            string password = (privacyMode == YargNetworkManager.LobbyPrivacyMode.Private && passwordInput != null) 
-                ? passwordInput.text 
-                : "";
+            bool isPrivate = privacyModeDropdown != null && privacyModeDropdown.value == 1;
+            string password = (isPrivate && passwordInput != null) ? passwordInput.text : "";
 
             // Close this dialog first
             gameObject.SetActive(false);
             
-            YargLogger.LogFormatInfo("[CreateLobbyDialog] Create clicked with name '{0}', maxPlayers={1}, privacy={2}", lobbyName, maxPlayers, privacyMode);
-            YargNetworkManager.Instance.CreateLobby(lobbyName, maxPlayers, privacyMode, password);
-            
-            // Don't show success message here - OnLobbyJoined will handle it
-            // This prevents dialog spam when another dialog is already showing
+            YargLogger.LogFormatInfo("[CreateLobbyDialog] Creating LiteNet lobby: '{0}', maxPlayers={1}, hasPassword={2}", 
+                lobbyName, maxPlayers, isPrivate);
+
+            try
+            {
+                // Get player name
+                string playerName = "Player";
+                if (YargNetworkManager.Instance != null)
+                {
+                    playerName = YargNetworkManager.Instance.PlayerName;
+                }
+
+                // Use LiteNet for new lobbies
+                var options = new ServerHostOptions
+                {
+                    LobbyName = lobbyName,
+                    HostName = playerName,
+                    MaxPlayers = maxPlayers,
+                    Password = isPrivate ? password : null,
+                    Port = 7777,
+                    EnableNatPunchThrough = true,
+                    IntroducerUri = new Uri("https://introducer.yarg.in/api/lobbies")
+                };
+
+                await ServerNetworkingService.Instance.StartAsync(options);
+                YargLogger.LogInfo("[CreateLobbyDialog] LiteNet server started successfully");
+                
+                // Connect locally as host
+                var connectionParams = new ClientConnectionParameters(
+                    address: "127.0.0.1",
+                    port: 7777,
+                    playerName: playerName,
+                    password: password
+                );
+                await ClientNetworkingService.Instance.ConnectAsync(connectionParams);
+                YargLogger.LogInfo("[CreateLobbyDialog] Connected to local LiteNet server as host");
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogException(ex, "Failed to create LiteNet lobby");
+                DialogManager.Instance.ShowMessage("Failed to Create Lobby", 
+                    $"Could not create lobby: {ex.Message}\n\nPlease try again.");
+            }
         }
 
         public void OnCancelClicked()

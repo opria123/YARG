@@ -1,13 +1,17 @@
 using System;
 using System.Globalization;
+using System.Linq;
+using Cysharp.Text;
+using UnityEngine;
+using YARG.Helpers;
+using YARG.Helpers.Extensions;
+using YARG.Localization;
+using YARG.Menu.Data;
 using YARG.Menu.ListMenu;
 using YARG.Networking;
 using YARG.Networking.Bookmarks;
-using Cysharp.Text;
-using YARG.Helpers;
-using YARG.Helpers.Extensions;
-using YARG.Menu.Data;
-using UnityEngine;
+using YARG.Net.Packets;
+using YARG.Net.Sessions;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -671,6 +675,83 @@ namespace YARG.Menu.Multiplayer
             }
 
             return string.Concat("Hosted ", last.ToString("MMM d, yyyy", CultureInfo.CurrentCulture));
+        }
+    }
+
+    /// <summary>
+    /// ViewType that surfaces the currently connected LiteNetLib lobby (if any).
+    /// </summary>
+    public class LiteNetLobbyViewType : LobbyViewType
+    {
+        private readonly LobbyStateSnapshot _snapshot;
+        private readonly LobbyBrowserMenu _menu;
+
+        internal override LobbyBrowserMenu MenuOwner => _menu;
+
+        public LiteNetLobbyViewType(LobbyStateSnapshot snapshot, LobbyBrowserMenu menu)
+        {
+            _snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+            _menu = menu;
+        }
+
+        public LobbyStateSnapshot Snapshot => _snapshot;
+
+        public override BackgroundType Background => BackgroundType.Normal;
+        public override bool ShowFavoriteButton => false;
+
+        public override string GetSelectionKey()
+        {
+            return string.Concat("litenet:", _snapshot.LobbyId.ToString("N"));
+        }
+
+        public override string GetPrimaryText(bool selected)
+        {
+            string host = ResolveHostName();
+            string status = Localize.Key("Menu", "LobbyBrowser", "StatusConnected");
+            string title = string.IsNullOrWhiteSpace(host)
+                ? status
+                : ZString.Format("{0} · {1}", host, status);
+            return FormatAs(title, TextType.Primary, selected);
+        }
+
+        public override string GetSecondaryText(bool selected)
+        {
+            return FormatAs(GetHostedRecencyText(selected), TextType.Secondary, selected);
+        }
+
+        public string GetMaxPlayersLabel(bool selected)
+        {
+            int activePlayers = _snapshot.Players.Count(p => p.Role != LobbyRole.Spectator);
+            string label = activePlayers == 1
+                ? "1 active player"
+                : string.Concat(activePlayers, " active players");
+            return FormatAs(label, TextType.Secondary, selected);
+        }
+
+        public bool IsPasswordProtected() => false;
+
+        public string GetHostedRecencyText(bool selected)
+        {
+            string status = _snapshot.Status switch
+            {
+                LobbyStatus.Idle => "Idle",
+                LobbyStatus.SelectingSong => "Selecting song",
+                LobbyStatus.ReadyToPlay => "Ready to play",
+                LobbyStatus.InCountdown => "Starting soon",
+                _ => _snapshot.Status.ToString()
+            };
+
+            return FormatAs(status, TextType.Secondary, selected);
+        }
+
+        public override void OnJoinClick()
+        {
+            _menu?.NavigateToLiteNetLobby();
+        }
+
+        private string ResolveHostName()
+        {
+            return _snapshot.Players.FirstOrDefault(p => p.Role == LobbyRole.Host)?.DisplayName ?? string.Empty;
         }
     }
 }

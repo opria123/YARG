@@ -120,6 +120,12 @@ namespace YARG.Settings
 
             public IntSetting NetworkPort { get; } = new(7777, 1024, 65535, NetworkPortCallback);
 
+            /// <summary>
+            /// The URI of the lobby introducer service for public lobby discovery.
+            /// Leave empty to disable automatic lobby advertising and discovery.
+            /// </summary>
+            public TextSetting IntroducerUri { get; } = new("https://introducer.yarg.in/api/lobbies");
+
             #endregion
 
             #region Songs

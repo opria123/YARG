@@ -1,12 +1,18 @@
 using System;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using YARG.Core.Input;
 using YARG.Networking;
+using YARG.Networking.NewNet;
 using YARG.Menu.Data;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
+using YARG.Net.Handlers.Client;
+using YARG.Net.Packets;
+using YARG.Net.Sessions;
+using YARG.Net.Runtime;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -60,6 +66,37 @@ namespace YARG.Menu.Multiplayer
         private string _wanAddress = string.Empty;
         private bool _lanVisible;
         private bool _wanVisible;
+        private const string LiteNetLobbyPlaceholderName = "Online Lobby";
+        private LobbyStateSnapshot? _liteNetSnapshot;
+        private bool _liteNetModeActive;
+        private bool _liteNetConnectionLastFrame;
+        private bool _liteNetReadyAvailable;
+        private bool _liteNetLocalReady;
+        private bool _liteNetAllPlayersReady;
+        private Guid? _liteNetLocalSessionId;
+        private PlayerView _liteNetLocalPlayerView;
+        private bool _liteNetEventsHooked;
+        private ClientSessionContext? _liteNetSessionContext;
+        private readonly object _liteNetSnapshotLock = new();
+        private LobbyStateSnapshot? _liteNetPendingSnapshot;
+        private bool _liteNetSnapshotDirty;
+        private LobbyStatus _previousLobbyStatus = LobbyStatus.Idle;
+        private string _previousSongSelectionId;
+
+        private bool IsLiteNetClientConnected => ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.IsConnected;
+        private bool ShouldUseLiteNetFlow => _liteNetModeActive || IsLiteNetClientConnected;
+
+        private Guid? GetLiteNetSessionId()
+        {
+            if (!ClientNetworkingService.HasInstance)
+            {
+                return null;
+            }
+
+            return ClientNetworkingService.Instance.SessionContext != null
+                ? ClientNetworkingService.Instance.SessionContext.SessionId
+                : null;
+        }
 
         private void Start()
         {
@@ -93,6 +130,8 @@ namespace YARG.Menu.Multiplayer
                 _defaultWaitingForHostText = waitingForHostText.text;
             }
             
+            SubscribeToLiteNetEvents();
+
             // Subscribe to network events
             if (YargNetworkManager.Instance != null)
             {
@@ -135,6 +174,8 @@ namespace YARG.Menu.Multiplayer
                 YargNetworkManager.Instance.OnPlayerLeft += OnPlayerLeftLobby;
             }
             
+            SubscribeToLiteNetEvents();
+
             // RefreshLobbyInfo will call UpdateNavigationScheme after setting isHost
             RefreshLobbyInfo();
 
@@ -175,6 +216,8 @@ namespace YARG.Menu.Multiplayer
                 YargNetworkManager.Instance.OnSharedSongSyncStateChanged -= OnSharedSongSyncStateChanged;
             }
 
+            UnsubscribeFromLiteNetEvents();
+
             if (lanVisibilityToggleButton != null)
             {
                 lanVisibilityToggleButton.onClick.RemoveListener(ToggleLanVisibility);
@@ -200,6 +243,155 @@ namespace YARG.Menu.Multiplayer
         {
             _isQuitting = true;
         }
+
+        private void Update()
+        {
+            if (!ShouldUseLiteNetFlow || !ClientNetworkingService.HasInstance)
+            {
+                _liteNetConnectionLastFrame = false;
+
+                ProcessQueuedLiteNetSnapshot();
+                return;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            bool connected = service.IsConnected;
+
+            ProcessQueuedLiteNetSnapshot();
+
+            if (!connected && _liteNetConnectionLastFrame && _liteNetModeActive)
+            {
+                HandleLiteNetDisconnection("Disconnected from host.");
+            }
+
+            _liteNetConnectionLastFrame = connected;
+
+            if (connected && service.TryGetLobbySnapshot(out var snapshot) && snapshot != null)
+            {
+                if (!ReferenceEquals(_liteNetSnapshot, snapshot))
+                {
+                    ApplyLiteNetSnapshot(snapshot);
+                }
+            }
+        }
+
+        private void ProcessQueuedLiteNetSnapshot()
+        {
+            LobbyStateSnapshot? snapshot = null;
+
+            if (_liteNetSnapshotDirty)
+            {
+                lock (_liteNetSnapshotLock)
+                {
+                    snapshot = _liteNetPendingSnapshot;
+                    _liteNetPendingSnapshot = null;
+                    _liteNetSnapshotDirty = false;
+                }
+            }
+
+            if (snapshot != null)
+            {
+                ApplyLiteNetSnapshot(snapshot);
+            }
+        }
+
+        private void SubscribeToLiteNetEvents()
+        {
+            if (_liteNetEventsHooked || !ClientNetworkingService.HasInstance)
+            {
+                return;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            service.Initialize();
+            service.Disconnected += HandleLiteNetClientDisconnected;
+            service.HandshakeCompleted += HandleLiteNetHandshakeCompleted;
+            service.LobbyStateChanged += HandleLiteNetLobbyStateChanged;
+
+            _liteNetSessionContext = service.SessionContext;
+            if (_liteNetSessionContext != null)
+            {
+                _liteNetSessionContext.SessionChanged += HandleLiteNetSessionChanged;
+            }
+
+            _liteNetEventsHooked = true;
+        }
+
+        private void UnsubscribeFromLiteNetEvents()
+        {
+            if (!_liteNetEventsHooked || !ClientNetworkingService.HasInstance)
+            {
+                return;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            service.Disconnected -= HandleLiteNetClientDisconnected;
+            service.HandshakeCompleted -= HandleLiteNetHandshakeCompleted;
+            service.LobbyStateChanged -= HandleLiteNetLobbyStateChanged;
+
+            if (_liteNetSessionContext != null)
+            {
+                _liteNetSessionContext.SessionChanged -= HandleLiteNetSessionChanged;
+                _liteNetSessionContext = null;
+            }
+
+            _liteNetEventsHooked = false;
+        }
+
+        private void HandleLiteNetClientDisconnected(object? sender, ClientDisconnectedEventArgs e)
+        {
+            if (ClientNetworkingService.HasInstance && !ClientNetworkingService.Instance.IsConnected)
+            {
+                HandleLiteNetDisconnection(e.InitiatedDuringConnect ? "Failed to connect." : "Disconnected from host.");
+                return;
+            }
+
+            if (_liteNetModeActive)
+            {
+                HandleLiteNetDisconnection(e.InitiatedDuringConnect ? "Failed to connect." : "Disconnected from host.");
+            }
+        }
+
+        private void HandleLiteNetHandshakeCompleted(object? sender, ClientHandshakeCompletedEventArgs e)
+        {
+            if (!e.Accepted)
+            {
+                var reason = string.IsNullOrWhiteSpace(e.Reason) ? "Connection rejected." : e.Reason;
+                ClientNetworkingMenuUtility.ShowConnectionError(reason);
+                HandleLiteNetDisconnection(reason);
+                return;
+            }
+
+            if (ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.LobbyHandler != null &&
+                ClientNetworkingService.Instance.LobbyHandler.TryGetSnapshot(out var snapshot) && snapshot != null)
+            {
+                QueueLiteNetSnapshot(snapshot);
+            }
+        }
+
+        private void HandleLiteNetLobbyStateChanged(object? sender, ClientLobbyStateChangedEventArgs e)
+        {
+            if (e?.Snapshot != null)
+            {
+                QueueLiteNetSnapshot(e.Snapshot);
+            }
+        }
+
+        private void HandleLiteNetSessionChanged(object? sender, ClientSessionChangedEventArgs e)
+        {
+            _liteNetLocalSessionId = e.CurrentSessionId;
+            UpdateLiteNetReadyUi();
+            UpdateNavigationScheme();
+        }
+
+        private void QueueLiteNetSnapshot(LobbyStateSnapshot snapshot)
+        {
+            lock (_liteNetSnapshotLock)
+            {
+                _liteNetPendingSnapshot = snapshot;
+                _liteNetSnapshotDirty = true;
+            }
+        }
         
         private void UpdateNavigationScheme()
         {
@@ -221,10 +413,13 @@ namespace YARG.Menu.Multiplayer
                 new NavigationScheme.Entry(MenuAction.Red, "Leave Lobby", OnLeaveLobbyClicked)
             };
             
+            // Both LiteNet and Mirror: Host can browse songs immediately
             if (isHost)
             {
                 entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Browse Songs", OnBrowseSongsClicked));
-                if (selectedPlayer != null && !selectedPlayer.IsLocalUser)
+                
+                // Mirror mode: Host can kick players
+                if (!ShouldUseLiteNetFlow && selectedPlayer != null && !selectedPlayer.IsLocalUser)
                 {
                     entries.Add(new NavigationScheme.Entry(MenuAction.Blue, "Kick Player", OnKickPlayerClicked));
                 }
@@ -235,6 +430,11 @@ namespace YARG.Menu.Multiplayer
         
         public void OnPlayerSelected(NetworkPlayerData player)
         {
+            if (ShouldUseLiteNetFlow)
+            {
+                return;
+            }
+
             // Deselect previous player view
             if (selectedPlayerView != null)
             {
@@ -255,6 +455,11 @@ namespace YARG.Menu.Multiplayer
         
         public void OnPlayerDeselected()
         {
+            if (ShouldUseLiteNetFlow)
+            {
+                return;
+            }
+
             // Deselect current player view
             if (selectedPlayerView != null)
             {
@@ -311,6 +516,11 @@ namespace YARG.Menu.Multiplayer
 
         private void OnSharedSongSyncStateChanged(bool ready)
         {
+            if (ShouldUseLiteNetFlow)
+            {
+                return;
+            }
+
             if (isHost && !ready)
             {
                 _waitingForSongSync = true;
@@ -357,6 +567,12 @@ namespace YARG.Menu.Multiplayer
         private void RefreshLobbyInfo()
         {
             Debug.Log("[LobbyRoomMenu] RefreshLobbyInfo called");
+
+            if (TryRefreshLiteNetLobbyInfo())
+            {
+                return;
+            }
+
             EnsureHostAddressPanel();
             
             // Don't crash if called during scene init when LobbyRoomMenu is active by default
@@ -514,6 +730,420 @@ namespace YARG.Menu.Multiplayer
 
             int finalPort = port > 0 ? port : fallbackPort;
             return finalPort > 0 ? $"{address}:{finalPort}" : address;
+        }
+
+        private bool TryRefreshLiteNetLobbyInfo()
+        {
+            if (!ShouldUseLiteNetFlow || !ClientNetworkingService.HasInstance)
+            {
+                return false;
+            }
+
+            var service = ClientNetworkingService.Instance;
+            _liteNetModeActive = true;
+
+            if (!service.IsConnected)
+            {
+                ShowLiteNetPendingState();
+                return true;
+            }
+
+            if (service.TryGetLobbySnapshot(out var snapshot) && snapshot != null)
+            {
+                ApplyLiteNetSnapshot(snapshot);
+            }
+            else
+            {
+                ShowLiteNetPendingState();
+            }
+
+            return true;
+        }
+
+        private void ShowLiteNetPendingState()
+        {
+            _liteNetSnapshot = null;
+            isHost = false;
+            _liteNetReadyAvailable = false;
+            _liteNetLocalReady = false;
+            _liteNetAllPlayersReady = false;
+            _liteNetLocalSessionId = null;
+            _liteNetLocalPlayerView = null;
+
+            if (lobbyNameText != null)
+            {
+                lobbyNameText.text = LiteNetLobbyPlaceholderName;
+            }
+
+            if (hostNameText != null)
+            {
+                hostNameText.text = "Host: Resolving...";
+            }
+
+            if (playerCountText != null)
+            {
+                playerCountText.text = "Waiting for players...";
+            }
+
+            if (connectionInfoText != null)
+            {
+                connectionInfoText.text = "Connecting via LiteNetLib...";
+            }
+
+            SetHostSidebarActive(false);
+            ClearPlayerEntries();
+            MoveWaitingTextToContainer();
+            if (waitingForHostText != null)
+            {
+                waitingForHostText.text = "Connecting via LiteNetLib...";
+                waitingForHostText.gameObject.SetActive(true);
+            }
+            UpdateNavigationScheme();
+        }
+
+        private void ApplyLiteNetSnapshot(LobbyStateSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                return;
+            }
+
+            _liteNetModeActive = true;
+            _liteNetSnapshot = snapshot;
+
+            var players = snapshot.Players ?? Array.Empty<LobbyPlayer>();
+            var localSession = GetLiteNetSessionId();
+            _liteNetLocalSessionId = localSession;
+            bool viewerIsHost = localSession.HasValue && players.Any(player => player.PlayerId == localSession.Value && player.Role == LobbyRole.Host);
+            isHost = viewerIsHost;
+
+            LobbyPlayer? localPlayer = null;
+            if (localSession.HasValue)
+            {
+                localPlayer = players.FirstOrDefault(player => player.PlayerId == localSession.Value);
+            }
+
+            _liteNetReadyAvailable = localPlayer != null && localPlayer.Role != LobbyRole.Spectator;
+            _liteNetLocalReady = localPlayer?.IsReady ?? false;
+
+            // Handle lobby status changes (song selection sync for clients)
+            HandleLobbyStatusChange(snapshot, viewerIsHost);
+
+            if (lobbyNameText != null)
+            {
+                string suffix = snapshot.LobbyId != Guid.Empty ? snapshot.LobbyId.ToString("N").Substring(0, 8) : "00000000";
+                lobbyNameText.text = $"{LiteNetLobbyPlaceholderName} ({suffix})";
+            }
+
+            var hostPlayer = players.FirstOrDefault(player => player.Role == LobbyRole.Host);
+            if (hostNameText != null)
+            {
+                string hostDisplay = hostPlayer != null && !string.IsNullOrWhiteSpace(hostPlayer.DisplayName)
+                    ? hostPlayer.DisplayName
+                    : "Unknown";
+                hostNameText.text = $"Host: {hostDisplay}";
+            }
+
+            if (playerCountText != null)
+            {
+                int activePlayers = players.Count(player => player.Role != LobbyRole.Spectator);
+                playerCountText.text = activePlayers == 1 ? "1 Player" : $"{activePlayers} Players";
+            }
+
+            if (connectionInfoText != null)
+            {
+                // Show song selection status if applicable
+                if (snapshot.Status == LobbyStatus.SelectingSong && snapshot.Selection != null)
+                {
+                    connectionInfoText.text = $"Song selected: {snapshot.Selection.SongId}";
+                }
+                else
+                {
+                    connectionInfoText.text = "Connected via LiteNetLib client";
+                }
+            }
+
+            SetHostSidebarActive(false);
+
+            RefreshLiteNetPlayerList(players, viewerIsHost, localSession);
+            RecalculateLiteNetReadySummary(players);
+            UpdateControlsForRole();
+            UpdateLiteNetReadyUi();
+            UpdateNavigationScheme();
+        }
+
+        private void HandleLobbyStatusChange(LobbyStateSnapshot snapshot, bool isHost)
+        {
+            var newStatus = snapshot.Status;
+            var newSongId = snapshot.Selection?.SongId;
+
+            // Check if status or song selection has changed
+            bool statusChanged = newStatus != _previousLobbyStatus;
+            bool songChanged = !string.Equals(newSongId, _previousSongSelectionId, StringComparison.Ordinal);
+
+            _previousLobbyStatus = newStatus;
+            _previousSongSelectionId = newSongId;
+
+            // Only process for non-host clients (host already navigated)
+            if (isHost)
+            {
+                return;
+            }
+
+            // Handle song selection sync for clients
+            if (newStatus == LobbyStatus.SelectingSong && snapshot.Selection != null && songChanged)
+            {
+                Debug.Log($"[LobbyRoomMenu] Client received song selection: {snapshot.Selection.SongId}");
+                
+                // Try to find the song and set up for gameplay
+                if (TrySetupSongFromSelection(snapshot.Selection))
+                {
+                    ToastManager.ToastInformation($"Host selected a song!");
+                    
+                    // Navigate to difficulty select
+                    if (MenuManager.Instance != null && MenuManager.Instance.CurrentMenu == MenuManager.Menu.LobbyRoom)
+                    {
+                        MenuManager.Instance.PushMenu(MenuManager.Menu.DifficultySelect);
+                    }
+                }
+                else
+                {
+                    ToastManager.ToastWarning("Host selected a song you don't have!");
+                }
+            }
+        }
+
+        private bool TrySetupSongFromSelection(SongSelectionState selection)
+        {
+            if (selection == null || string.IsNullOrEmpty(selection.SongId))
+            {
+                return false;
+            }
+
+            // Try to find the song by hash
+            var songHash = YARG.Core.Song.HashWrapper.FromString(selection.SongId);
+            if (!YARG.Song.SongContainer.SongsByHash.TryGetValue(songHash, out var songList) || songList.Count == 0)
+            {
+                Debug.LogWarning($"[LobbyRoomMenu] Could not find song with hash: {selection.SongId}");
+                return false;
+            }
+
+            var songEntry = songList[0];
+
+            // Set up global state for gameplay
+            GlobalVariables.State.PlayingAShow = true;
+            GlobalVariables.State.ShowSongs = new System.Collections.Generic.List<YARG.Core.Song.SongEntry> { songEntry };
+            GlobalVariables.State.CurrentSong = songEntry;
+            GlobalVariables.State.ShowIndex = 0;
+
+            Debug.Log($"[LobbyRoomMenu] Set up song for client: {songEntry.Name}");
+            return true;
+        }
+
+        private void RefreshLiteNetPlayerList(System.Collections.Generic.IReadOnlyList<LobbyPlayer> players, bool viewerIsHost, Guid? localSession)
+        {
+            if (playerListContainer == null)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] playerListContainer is null!");
+                return;
+            }
+
+            ClearPlayerEntries();
+            _liteNetLocalPlayerView = null;
+
+            if (players == null || players.Count == 0)
+            {
+                MoveWaitingTextToContainer();
+                return;
+            }
+
+            for (int i = 0; i < players.Count; i++)
+            {
+                var player = players[i];
+                bool isLocal = localSession.HasValue && player.PlayerId == localSession.Value;
+                var view = CreatePlayerView(player, isLocal, viewerIsHost);
+                // Ready state removed - no ready-up system
+                if (isLocal && view != null)
+                {
+                    _liteNetLocalPlayerView = view;
+                }
+
+                if (i < players.Count - 1)
+                {
+                    CreateDivider();
+                }
+            }
+
+            MoveWaitingTextToContainer();
+        }
+
+        private void RecalculateLiteNetReadySummary(System.Collections.Generic.IReadOnlyList<LobbyPlayer> players)
+        {
+            _liteNetAllPlayersReady = false;
+
+            if (players == null)
+            {
+                return;
+            }
+
+            bool anyActive = false;
+            bool allReady = true;
+
+            foreach (var player in players)
+            {
+                if (player.Role == LobbyRole.Spectator)
+                {
+                    continue;
+                }
+
+                anyActive = true;
+                if (!player.IsReady)
+                {
+                    allReady = false;
+                }
+            }
+
+            _liteNetAllPlayersReady = anyActive && allReady;
+        }
+
+        private void UpdateLiteNetReadyUi()
+        {
+            if (waitingForHostText == null)
+            {
+                return;
+            }
+
+            if (!ShouldUseLiteNetFlow)
+            {
+                waitingForHostText.gameObject.SetActive(!isHost && !string.IsNullOrEmpty(waitingForHostText.text));
+                return;
+            }
+
+            waitingForHostText.gameObject.SetActive(true);
+
+            string message;
+            // Simplified: No ready-up system, just show waiting message
+            if (isHost)
+            {
+                message = "Press Browse Songs (Y) to select songs";
+            }
+            else
+            {
+                message = "Waiting for host to start song selection...";
+            }
+
+            waitingForHostText.text = message;
+        }
+
+        private void ToggleLiteNetReadyState()
+        {
+            if (!ShouldUseLiteNetFlow || !_liteNetReadyAvailable)
+            {
+                return;
+            }
+
+            if (!ClientNetworkingService.HasInstance || !ClientNetworkingService.Instance.IsConnected)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] Cannot toggle ready state - not connected.");
+                return;
+            }
+
+            bool nextState = !_liteNetLocalReady;
+
+            try
+            {
+                ClientNetworkingService.Instance.SendReadyState(nextState);
+                _liteNetLocalReady = nextState;
+
+                if (_liteNetSnapshot?.Players != null)
+                {
+                    bool othersReady = true;
+                    foreach (var player in _liteNetSnapshot.Players)
+                    {
+                        if (player.Role == LobbyRole.Spectator)
+                        {
+                            continue;
+                        }
+
+                        if (_liteNetLocalSessionId.HasValue && player.PlayerId == _liteNetLocalSessionId.Value)
+                        {
+                            continue;
+                        }
+
+                        if (!player.IsReady)
+                        {
+                            othersReady = false;
+                            break;
+                        }
+                    }
+
+                    _liteNetAllPlayersReady = nextState && othersReady;
+                }
+                else if (!nextState)
+                {
+                    _liteNetAllPlayersReady = false;
+                }
+
+                // Ready state UI removed
+
+                UpdateLiteNetReadyUi();
+                UpdateNavigationScheme();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyRoomMenu] Failed to send ready state: {ex.Message}");
+            }
+        }
+
+        private void HandleLiteNetDisconnection(string reason)
+        {
+            if (!string.IsNullOrEmpty(reason))
+            {
+                Debug.LogWarning($"[LobbyRoomMenu] LiteNetLib disconnect: {reason}");
+                if (DialogManager.Instance == null || !DialogManager.Instance.IsDialogShowing)
+                {
+                    ClientNetworkingMenuUtility.ShowConnectionError(reason);
+                }
+            }
+
+            lock (_liteNetSnapshotLock)
+            {
+                _liteNetPendingSnapshot = null;
+                _liteNetSnapshotDirty = false;
+            }
+
+            _liteNetSnapshot = null;
+            _liteNetModeActive = false;
+            isHost = false;
+            _liteNetReadyAvailable = false;
+            _liteNetLocalReady = false;
+            _liteNetAllPlayersReady = false;
+            _liteNetLocalSessionId = null;
+            _liteNetLocalPlayerView = null;
+            UpdateNavigationScheme();
+            ReturnToLobbyBrowserMenu();
+        }
+
+        private void ReturnToLobbyBrowserMenu()
+        {
+            if (_isQuitting || MenuManager.Instance == null)
+            {
+                return;
+            }
+
+            if (MenuManager.Instance.CurrentMenu == MenuManager.Menu.OnlineMultiplayer ||
+                MenuManager.Instance.CurrentMenu == MenuManager.Menu.MainMenu)
+            {
+                return;
+            }
+
+            while (MenuManager.Instance.MenuStackCount > 1 &&
+                   MenuManager.Instance.CurrentMenu != MenuManager.Menu.OnlineMultiplayer &&
+                   MenuManager.Instance.CurrentMenu != MenuManager.Menu.MainMenu)
+            {
+                Debug.Log($"[LobbyRoomMenu] Popping menu: {MenuManager.Instance.CurrentMenu}");
+                MenuManager.Instance.PopMenu();
+            }
         }
 
         private bool EnsureHostAddressPanel()
@@ -779,17 +1409,23 @@ namespace YARG.Menu.Multiplayer
 
         private void UpdateControlsForRole()
         {
-            // Only host can browse songs
+            // Host can browse songs (both Mirror and LiteNet modes)
             if (browseSongsButton != null)
             {
-                browseSongsButton.gameObject.SetActive(isHost);
-                Debug.Log($"[LobbyRoomMenu] Browse songs button visible: {isHost}");
+                bool canBrowse = isHost;
+                browseSongsButton.gameObject.SetActive(canBrowse);
+                browseSongsButton.interactable = canBrowse;
+                Debug.Log($"[LobbyRoomMenu] Browse songs button visible: {canBrowse}");
             }
             
             // Only clients see "waiting for host" message
             if (waitingForHostText != null)
             {
-                if (!isHost && string.IsNullOrEmpty(waitingForHostText.text))
+                if (ShouldUseLiteNetFlow)
+                {
+                    UpdateLiteNetReadyUi();
+                }
+                else if (!isHost && string.IsNullOrEmpty(waitingForHostText.text))
                 {
                     waitingForHostText.text = !string.IsNullOrEmpty(_defaultWaitingForHostText)
                         ? _defaultWaitingForHostText
@@ -829,6 +1465,29 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
+        private void ClearPlayerEntries()
+        {
+            playerViews.Clear();
+            selectedPlayerView = null;
+            selectedPlayer = null;
+            _liteNetLocalPlayerView = null;
+
+            if (playerListContainer == null)
+            {
+                return;
+            }
+
+            foreach (Transform child in playerListContainer)
+            {
+                if (waitingForHostText != null && child.gameObject == waitingForHostText.gameObject)
+                {
+                    continue;
+                }
+
+                Destroy(child.gameObject);
+            }
+        }
+
         private void RefreshPlayerList()
         {
             if (playerListContainer == null)
@@ -840,20 +1499,7 @@ namespace YARG.Menu.Multiplayer
             // NOTE: Make sure playerListContainer has a VerticalLayoutGroup component
             // with spacing set to a small value (e.g., 5-10) for proper stacking
             
-            // Clear the player views dictionary
-            playerViews.Clear();
-            selectedPlayerView = null;
-            
-            // Clear existing player entries (but don't destroy the waiting text)
-            foreach (Transform child in playerListContainer)
-            {
-                // Skip destroying the waiting for host text
-                if (waitingForHostText != null && child.gameObject == waitingForHostText.gameObject)
-                {
-                    continue;
-                }
-                Destroy(child.gameObject);
-            }
+            ClearPlayerEntries();
 
             if (YargNetworkManager.Instance == null)
             {
@@ -886,6 +1532,52 @@ namespace YARG.Menu.Multiplayer
             
             // Move waiting for host text to end of player list container
             MoveWaitingTextToContainer();
+        }
+
+        private PlayerView CreatePlayerView(LobbyPlayer lobbyPlayer, bool isLocalPlayer, bool viewerIsHost)
+        {
+            if (playerEntryPrefab == null || playerListContainer == null)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] PlayerEntry prefab or container not assigned!");
+                return null;
+            }
+
+            var entry = Instantiate(playerEntryPrefab, playerListContainer);
+            entry.SetActive(true);
+
+            var rectTransform = entry.GetComponent<RectTransform>();
+            if (rectTransform != null)
+            {
+                rectTransform.localScale = Vector3.one;
+                rectTransform.anchorMin = new Vector2(0, 0.5f);
+                rectTransform.anchorMax = new Vector2(1, 0.5f);
+                rectTransform.pivot = new Vector2(0.5f, 0.5f);
+            }
+
+            var playerView = entry.GetComponent<PlayerView>();
+            if (playerView == null)
+            {
+                playerView = entry.AddComponent<PlayerView>();
+            }
+
+            var button = entry.GetComponent<Button>();
+            if (button == null)
+            {
+                button = entry.AddComponent<Button>();
+            }
+
+            button.onClick.RemoveAllListeners();
+            bool enableReadyToggle = _liteNetReadyAvailable && isLocalPlayer;
+            button.interactable = enableReadyToggle;
+
+            if (enableReadyToggle)
+            {
+                button.onClick.AddListener(ToggleLiteNetReadyState);
+            }
+
+            playerView.Initialize(lobbyPlayer, isLocalPlayer, viewerIsHost);
+
+            return playerView;
         }
 
         private void CreatePlayerView(NetworkPlayerData playerData)
@@ -960,6 +1652,7 @@ namespace YARG.Menu.Multiplayer
             
             // Initialize the view
             playerView.Initialize(playerData, isLocalPlayer, isHost);
+            // Ready state removed - no ready-up system
             
             // Store the player view in the dictionary for selection tracking
             playerViews[playerData] = playerView;
@@ -996,6 +1689,24 @@ namespace YARG.Menu.Multiplayer
 
             Debug.Log("Host starting song selection...");
 
+            // LiteNet mode: Update lobby status and navigate to music library
+            if (ShouldUseLiteNetFlow)
+            {
+                if (!ClientNetworkingService.HasInstance || !ClientNetworkingService.Instance.IsConnected)
+                {
+                    Debug.LogWarning("[LobbyRoomMenu] Cannot start song selection - not connected.");
+                    return;
+                }
+
+                // Navigate to music library for song selection
+                if (MenuManager.Instance != null)
+                {
+                    MenuManager.Instance.PushMenu(MenuManager.Menu.MusicLibrary);
+                }
+                return;
+            }
+
+            // Mirror mode: Use existing flow
             if (YargNetworkManager.Instance == null)
             {
                 Debug.LogWarning("[LobbyRoomMenu] Cannot start song selection - network manager missing");
@@ -1021,7 +1732,7 @@ namespace YARG.Menu.Multiplayer
         public void OnLeaveLobbyClicked()
         {
             // Both host and client show confirmation dialog when leaving lobby entirely
-            if (YargNetworkManager.Instance != null && YargNetworkManager.Instance.isNetworkActive)
+            if (ShouldUseLiteNetFlow || (YargNetworkManager.Instance != null && YargNetworkManager.Instance.isNetworkActive))
             {
                 ShowLeaveLobbyDialog();
             }
@@ -1034,6 +1745,12 @@ namespace YARG.Menu.Multiplayer
         
         public void OnKickPlayerClicked()
         {
+            if (ShouldUseLiteNetFlow)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] LiteNetLib mode does not yet support kicking players.");
+                return;
+            }
+
             if (!isHost)
             {
                 Debug.LogWarning("[LobbyRoomMenu] Only host can kick players!");
@@ -1058,6 +1775,12 @@ namespace YARG.Menu.Multiplayer
         
         private void ShowKickPlayerDialog()
         {
+            if (ShouldUseLiteNetFlow)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] Kick dialog unavailable in LiteNetLib mode.");
+                return;
+            }
+
             if (DialogManager.Instance == null || selectedPlayer == null) return;
             
             string playerName = selectedPlayer.PlayerName;
@@ -1077,6 +1800,12 @@ namespace YARG.Menu.Multiplayer
         
         private void KickPlayer(NetworkPlayerData player)
         {
+            if (ShouldUseLiteNetFlow)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] Kick action unavailable in LiteNetLib mode.");
+                return;
+            }
+
             if (!isHost || player == null)
             {
                 Debug.LogWarning("[LobbyRoomMenu] Cannot kick player - not host or player is null");
@@ -1095,10 +1824,12 @@ namespace YARG.Menu.Multiplayer
         {
             if (DialogManager.Instance == null) return;
             
-            bool isHost = YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost();
+            bool localHost = ShouldUseLiteNetFlow
+                ? isHost
+                : (YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost());
             
-            string title = isHost ? "Close Lobby?" : "Leave Lobby?";
-            string message = isHost
+            string title = localHost ? "Close Lobby?" : "Leave Lobby?";
+            string message = localHost
                 ? "Are you sure you want to close the lobby? All connected players will be disconnected."
                 : "Are you sure you want to leave the lobby? You will be disconnected from the host.";
             
@@ -1106,7 +1837,7 @@ namespace YARG.Menu.Multiplayer
             
             dialog.ClearButtons();
             dialog.AddDialogButton("Cancel", MenuData.Colors.BrightButton, () => DialogManager.Instance.ClearDialog());
-            dialog.AddDialogButton(isHost ? "Close Lobby" : "Leave Lobby", MenuData.Colors.CancelButton, () =>
+            dialog.AddDialogButton(localHost ? "Close Lobby" : "Leave Lobby", MenuData.Colors.CancelButton, () =>
             {
                 DialogManager.Instance.ClearDialog();
                 LeaveLobby();
@@ -1116,6 +1847,24 @@ namespace YARG.Menu.Multiplayer
         private void LeaveLobby()
         {
             Debug.Log("[LobbyRoomMenu] LeaveLobby called");
+
+            if (ShouldUseLiteNetFlow)
+            {
+                MenuManager.Instance?.PopMenu();
+                if (ClientNetworkingService.HasInstance)
+                {
+                    _ = ClientNetworkingService.Instance.DisconnectAsync("Client left lobby");
+                }
+
+                // If we're hosting, stop the server too
+                if (ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning)
+                {
+                    _ = ServerNetworkingService.Instance.StopAsync();
+                }
+
+                HandleLiteNetDisconnection(null);
+                return;
+            }
             
             // If host, sync menu navigation to clients before disconnecting
             if (YargNetworkManager.Instance != null && 
@@ -1143,43 +1892,7 @@ namespace YARG.Menu.Multiplayer
         private void OnLobbyLeft()
         {
             Debug.Log("Lobby left, returning to lobby browser");
-            
-            // Safety checks: Don't run during application quit or if MenuManager is gone
-            if (_isQuitting)
-            {
-                Debug.Log("[LobbyRoomMenu] Application is quitting, skipping OnLobbyLeft");
-                return;
-            }
-            
-            if (MenuManager.Instance == null) 
-            {
-                Debug.Log("[LobbyRoomMenu] MenuManager is null, skipping OnLobbyLeft");
-                return;
-            }
-            
-            // Additional safety: Check if this is still the active menu scene instance
-            // If the current menu is OnlineMultiplayer or MainMenu, we're already in the right place
-            if (MenuManager.Instance.CurrentMenu == MenuManager.Menu.OnlineMultiplayer ||
-                MenuManager.Instance.CurrentMenu == MenuManager.Menu.MainMenu)
-            {
-                Debug.Log($"[LobbyRoomMenu] Already at {MenuManager.Instance.CurrentMenu}, skipping navigation");
-                return;
-            }
-            
-            // Pop back to lobby browser (OnlineMultiplayer) no matter where we are
-            // This handles cases where client is in MusicLibrary, DifficultySelect, or even Gameplay
-            while (MenuManager.Instance != null &&
-                   MenuManager.Instance.CurrentMenu != MenuManager.Menu.OnlineMultiplayer && 
-                   MenuManager.Instance.MenuStackCount > 1)
-            {
-                Debug.Log($"[LobbyRoomMenu] Popping menu: {MenuManager.Instance.CurrentMenu}");
-                MenuManager.Instance.PopMenu();
-            }
-            
-            if (MenuManager.Instance != null)
-            {
-                Debug.Log($"[LobbyRoomMenu] Returned to lobby browser. Current menu: {MenuManager.Instance.CurrentMenu}");
-            }
+            ReturnToLobbyBrowserMenu();
         }
 
         private void OnNetworkError(string error)

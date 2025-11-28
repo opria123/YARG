@@ -9,6 +9,7 @@ using YARG.Helpers.Extensions;
 using YARG.Menu;
 using YARG.Menu.Data;
 using YARG.Networking;
+using YARG.Net.Packets;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -34,14 +35,20 @@ namespace YARG.Menu.Multiplayer
         [SerializeField] private Image highlightImage; // Optional: for highlighting on hover/selection
 
         private NetworkPlayerData _playerData;
+        private LobbyPlayer _liteNetPlayer;
+        private bool _usingLiteNetPlayer;
         private bool _isLocalPlayer;
         private bool _isHost;
         private bool _isSelected = false;
+        private bool _isReady;
+        private string _baseDisplayName = string.Empty;
 
         private Color _defaultPingTextColor;
         private bool _hasCachedPingTextColor;
         private Color _hostBadgeDefaultColor;
         private bool _hasCachedHostBadgeColor;
+        private Color _defaultNameColor;
+        private bool _hasCachedNameColor;
         private string _currentInstrumentIconKey;
 
         private static readonly Color PING_GOOD_COLOR = new(0.3f, 1f, 0.3f);
@@ -50,13 +57,31 @@ namespace YARG.Menu.Multiplayer
         private static readonly Color PING_ZERO_COLOR = Color.white;
         private const float PING_GOOD_THRESHOLD = 50f;
         private const float PING_AVERAGE_THRESHOLD = 100f;
+        private static readonly Color READY_NAME_COLOR = new(0.45f, 1f, 0.55f);
+        private static readonly Color NOT_READY_NAME_COLOR = Color.white;
+
+        private void DetachNetworkPlayerEvents()
+        {
+            if (_playerData != null)
+            {
+                _playerData.OnPlayerNameChangedEvent -= OnPlayerNameChanged;
+                _playerData.OnInstrumentChangedEvent -= OnInstrumentOrDifficultyChanged;
+                _playerData.OnDifficultyChangedEvent -= OnInstrumentOrDifficultyChanged;
+                _playerData.OnReadyStateChangedEvent -= OnReadyStateChanged;
+            }
+        }
 
         public void Initialize(NetworkPlayerData playerData, bool isLocalPlayer, bool viewerIsHost)
         {
+            DetachNetworkPlayerEvents();
+
             _playerData = playerData;
+            _liteNetPlayer = null;
+            _usingLiteNetPlayer = false;
             _isLocalPlayer = isLocalPlayer;
             // Use the synced IsHost property from NetworkPlayerData
             _isHost = playerData.IsHost;
+            UpdateReadyStateInternal(playerData.IsReady);
             
             if (pingText != null && !_hasCachedPingTextColor)
             {
@@ -76,7 +101,7 @@ namespace YARG.Menu.Multiplayer
             if (kickButton != null)
             {
                 kickButton.OnClick.RemoveListener(OnKickClicked);
-                bool canKick = viewerIsHost && !isLocalPlayer && !_isHost;
+                bool canKick = !_usingLiteNetPlayer && viewerIsHost && !isLocalPlayer && !_isHost;
                 kickButton.gameObject.SetActive(canKick);
                 
                 if (canKick)
@@ -99,18 +124,47 @@ namespace YARG.Menu.Multiplayer
                 _playerData.OnPlayerNameChangedEvent += OnPlayerNameChanged;
                 _playerData.OnInstrumentChangedEvent += OnInstrumentOrDifficultyChanged;
                 _playerData.OnDifficultyChangedEvent += OnInstrumentOrDifficultyChanged;
+                _playerData.OnReadyStateChangedEvent += OnReadyStateChanged;
             }
+        }
+
+        public void Initialize(LobbyPlayer playerData, bool isLocalPlayer, bool viewerIsHost)
+        {
+            DetachNetworkPlayerEvents();
+            _playerData = null;
+            _liteNetPlayer = playerData;
+            _usingLiteNetPlayer = true;
+            _isLocalPlayer = isLocalPlayer;
+            _isHost = playerData.Role == LobbyRole.Host;
+            UpdateReadyStateInternal(playerData.IsReady);
+
+            if (pingText != null && !_hasCachedPingTextColor)
+            {
+                _defaultPingTextColor = pingText.color;
+                _hasCachedPingTextColor = true;
+            }
+
+            if (hostBadgeImage != null && !_hasCachedHostBadgeColor)
+            {
+                _hostBadgeDefaultColor = hostBadgeImage.color;
+                _hasCachedHostBadgeColor = true;
+            }
+
+            if (kickButton != null)
+            {
+                kickButton.OnClick.RemoveListener(OnKickClicked);
+                kickButton.gameObject.SetActive(false);
+            }
+
+            UpdateDisplay();
+            UpdateHostVisuals();
         }
 
         private void OnDestroy()
         {
             // Unsubscribe from events
-            if (_playerData != null)
-            {
-                _playerData.OnPlayerNameChangedEvent -= OnPlayerNameChanged;
-                _playerData.OnInstrumentChangedEvent -= OnInstrumentOrDifficultyChanged;
-                _playerData.OnDifficultyChangedEvent -= OnInstrumentOrDifficultyChanged;
-            }
+            DetachNetworkPlayerEvents();
+            _playerData = null;
             
             if (kickButton != null)
             {
@@ -126,6 +180,12 @@ namespace YARG.Menu.Multiplayer
 
         private void UpdateDisplay()
         {
+            if (_usingLiteNetPlayer)
+            {
+                UpdateDisplayFromLiteNetPlayer();
+                return;
+            }
+
             if (_playerData == null) return;
             
             // Update player name
@@ -133,7 +193,7 @@ namespace YARG.Menu.Multiplayer
             {
                 string displayName = _playerData.PlayerName;
                 if (_isLocalPlayer) displayName += " (You)";
-                playerNameText.text = displayName;
+                ApplyDisplayName(displayName);
             }
 
             UpdateHostVisuals();
@@ -142,9 +202,53 @@ namespace YARG.Menu.Multiplayer
             UpdateInstrument();
         }
 
+        private void UpdateDisplayFromLiteNetPlayer()
+        {
+            if (playerNameText != null)
+            {
+                string displayName = _liteNetPlayer.DisplayName ?? "Unknown";
+                if (_isLocalPlayer) displayName += " (You)";
+                ApplyDisplayName(displayName);
+            }
+
+            UpdateHostVisuals();
+
+            if (playerIconImage != null)
+            {
+                playerIconImage.enabled = false;
+                playerIconImage.sprite = null;
+            }
+        }
+
         private void UpdatePing()
         {
-            if (pingText == null || _playerData == null) return;
+            if (pingText == null)
+            {
+                return;
+            }
+
+            if (_usingLiteNetPlayer)
+            {
+                if (_isHost)
+                {
+                    pingText.text = "0ms";
+                    UpdatePingColor(0f);
+                }
+                else
+                {
+                    pingText.text = "?ms";
+                    UpdatePingColor(null);
+                }
+
+                return;
+            }
+
+            if (_playerData == null)
+            {
+                pingText.text = "?ms";
+                UpdatePingColor(null);
+                return;
+            }
             
             float? pingValue = null;
 
@@ -208,6 +312,11 @@ namespace YARG.Menu.Multiplayer
             UpdateInstrument();
         }
 
+        private void OnReadyStateChanged(bool ready)
+        {
+            UpdateReadyStateInternal(ready);
+        }
+
         private void OnKickClicked()
         {
             if (_playerData == null || _playerData.connectionToClient == null)
@@ -232,6 +341,15 @@ namespace YARG.Menu.Multiplayer
         {
             UpdateDisplay();
             UpdatePing();
+        }
+
+        public void ApplyReadyState(bool ready)
+        {
+            UpdateReadyStateInternal(ready);
+            if (string.IsNullOrEmpty(_baseDisplayName))
+            {
+                UpdateDisplay();
+            }
         }
         
         /// <summary>
@@ -296,6 +414,46 @@ namespace YARG.Menu.Multiplayer
             if (playerIcon != null && !playerIcon.activeSelf)
             {
                 playerIcon.SetActive(true);
+            }
+        }
+
+        private void UpdateReadyStateInternal(bool ready)
+        {
+            _isReady = ready;
+            if (!string.IsNullOrEmpty(_baseDisplayName))
+            {
+                UpdateReadyVisuals();
+            }
+        }
+
+        private void ApplyDisplayName(string baseName)
+        {
+            _baseDisplayName = baseName;
+            if (playerNameText != null && !_hasCachedNameColor)
+            {
+                _defaultNameColor = playerNameText.color;
+                _hasCachedNameColor = true;
+            }
+            UpdateReadyVisuals();
+        }
+
+        private void UpdateReadyVisuals()
+        {
+            if (playerNameText == null || string.IsNullOrEmpty(_baseDisplayName))
+            {
+                return;
+            }
+
+            string suffix = _usingLiteNetPlayer || _playerData != null
+                ? (_isReady ? " • Ready" : " • Not Ready")
+                : string.Empty;
+
+            playerNameText.text = string.Concat(_baseDisplayName, suffix);
+
+            if (_hasCachedNameColor)
+            {
+                var targetColor = _isReady ? READY_NAME_COLOR : (_defaultNameColor == default ? NOT_READY_NAME_COLOR : _defaultNameColor);
+                playerNameText.color = targetColor;
             }
         }
 

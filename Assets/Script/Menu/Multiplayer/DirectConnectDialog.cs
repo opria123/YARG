@@ -1,13 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using YARG.Core.Logging;
 using YARG.Networking;
+using YARG.Networking.NewNet;
 using YARG.Menu.Persistent;
 using YARG.Menu.Navigation;
 using YARG.Localization;
+using YARG.Net.Handlers.Client;
+using YARG.Net.Runtime;
+using YARG.Settings;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -108,15 +113,9 @@ namespace YARG.Menu.Multiplayer
                 return;
             }
 
-            if (YargNetworkManager.Instance != null && YargNetworkManager.Instance.IsJoinInProgress)
-            {
-                YargLogger.LogWarning("[DirectConnectDialog] Join already in progress; ignoring duplicate connect click.");
-                return;
-            }
-
             string endpoint = ipAddressInput != null ? ipAddressInput.text : string.Empty;
 
-            string password = "";
+            string password = string.Empty;
             if (hasPasswordToggle != null && hasPasswordToggle.isOn && passwordInput != null)
             {
                 password = passwordInput.text;
@@ -136,27 +135,22 @@ namespace YARG.Menu.Multiplayer
 
             ForceRestoreNavigation();
 
+            if (!ClientNetworkingMenuUtility.IsServiceAvailable)
+            {
+                ClientNetworkingMenuUtility.ShowConnectionError(Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected"));
+                return;
+            }
+
             _isConnecting = true;
             SetConnectInteractable(false);
 
             // Close this dialog first
             gameObject.SetActive(false);
 
-            // Show connecting message only if no dialog is showing
-            if (DialogManager.Instance != null && !DialogManager.Instance.IsDialogShowing)
-            {
-                DialogManager.Instance.ShowMessage(
-                    Localize.Key("Menu", "LobbyBrowser", "ConnectingTitle"),
-                    Localize.KeyFormat(("Menu", "LobbyBrowser", "ConnectingDescription"), normalizedEndpoint)
-                );
-            }
+            ClientNetworkingMenuUtility.ShowConnectingDialog(normalizedEndpoint);
 
-            // Connect
-            if (YargNetworkManager.Instance != null)
-            {
-                YargLogger.LogFormatInfo("[DirectConnectDialog] Attempting direct connect to {0}", normalizedEndpoint);
-                YargNetworkManager.Instance.JoinLobby(normalizedEndpoint, password);
-            }
+            YargLogger.LogFormatInfo("[DirectConnectDialog] Attempting LiteNetLib direct connect to {0}", normalizedEndpoint);
+            BeginNewNetworkingConnect(host, parsedPort, password);
         }
 
         public void OnCancelClicked()
@@ -192,12 +186,7 @@ namespace YARG.Menu.Multiplayer
 
         private int GetDefaultPort()
         {
-            if (YargNetworkManager.Instance != null)
-            {
-                return YargNetworkManager.Instance.SuggestedDirectConnectPort;
-            }
-
-            return NetworkTransportDefaults.DefaultUdpPort;
+            return SettingsManager.Settings?.NetworkPort?.Value ?? NetworkTransportDefaults.DefaultUdpPort;
         }
 
         private void SuppressMenuNavigation()
@@ -237,40 +226,52 @@ namespace YARG.Menu.Multiplayer
 
         private void SubscribeToNetworkEvents()
         {
-            if (YargNetworkManager.Instance == null)
+            if (!ClientNetworkingMenuUtility.IsServiceAvailable)
             {
                 return;
             }
 
-            YargNetworkManager.Instance.OnLobbyJoined += HandleLobbyJoined;
-            YargNetworkManager.Instance.OnLobbyLeft += HandleLobbyLeft;
-            YargNetworkManager.Instance.OnNetworkError += HandleNetworkError;
+            var service = ClientNetworkingService.Instance;
+            service.Connected += HandleNewNetworkingConnected;
+            service.Disconnected += HandleNewNetworkingDisconnected;
+            service.HandshakeCompleted += HandleNewNetworkingHandshakeCompleted;
         }
 
         private void UnsubscribeFromNetworkEvents()
         {
-            if (YargNetworkManager.Instance == null)
+            if (!ClientNetworkingService.HasInstance)
             {
                 return;
             }
 
-            YargNetworkManager.Instance.OnLobbyJoined -= HandleLobbyJoined;
-            YargNetworkManager.Instance.OnLobbyLeft -= HandleLobbyLeft;
-            YargNetworkManager.Instance.OnNetworkError -= HandleNetworkError;
+            var service = ClientNetworkingService.Instance;
+            service.Connected -= HandleNewNetworkingConnected;
+            service.Disconnected -= HandleNewNetworkingDisconnected;
+            service.HandshakeCompleted -= HandleNewNetworkingHandshakeCompleted;
         }
 
-        private void HandleLobbyJoined(YargNetworkManager.LobbyInfo _)
+        private void HandleNewNetworkingConnected(object sender, ClientConnectedEventArgs e)
+        {
+            // Intentionally left blank; success is handled once handshake completes.
+        }
+
+        private void HandleNewNetworkingDisconnected(object sender, ClientDisconnectedEventArgs e)
         {
             HandleConnectionComplete();
         }
 
-        private void HandleLobbyLeft()
+        private void HandleNewNetworkingHandshakeCompleted(object sender, ClientHandshakeCompletedEventArgs e)
         {
-            HandleConnectionComplete();
-        }
+            if (!e.Accepted)
+            {
+                string reason = !string.IsNullOrWhiteSpace(e.Reason)
+                    ? e.Reason
+                    : Localize.Key("Menu", "LobbyBrowser", "StatusNotConnected");
 
-        private void HandleNetworkError(string _)
-        {
+                ClientNetworkingMenuUtility.ShowConnectionError(reason);
+                _ = ClientNetworkingService.Instance.DisconnectAsync(reason);
+            }
+
             HandleConnectionComplete();
         }
 
@@ -282,9 +283,10 @@ namespace YARG.Menu.Multiplayer
 
         private void SynchronizeButtonState()
         {
-            bool joinActive = YargNetworkManager.Instance != null && YargNetworkManager.Instance.IsJoinInProgress;
-            _isConnecting = joinActive;
-            SetConnectInteractable(!joinActive);
+            bool liteNetLibConnected = ClientNetworkingService.HasInstance && ClientNetworkingService.Instance.IsConnected;
+
+            _isConnecting = liteNetLibConnected;
+            SetConnectInteractable(!liteNetLibConnected);
         }
 
         private void SetConnectInteractable(bool interactable)
@@ -292,6 +294,28 @@ namespace YARG.Menu.Multiplayer
             if (connectButton != null)
             {
                 connectButton.interactable = interactable;
+            }
+        }
+
+        private void BeginNewNetworkingConnect(string host, int port, string password)
+        {
+            var parameters = ClientNetworkingMenuUtility.BuildParameters(host, port, password);
+            _ = ConnectWithNewNetworkingAsync(parameters);
+        }
+
+        private async Task ConnectWithNewNetworkingAsync(ClientConnectionParameters parameters)
+        {
+            try
+            {
+                var service = ClientNetworkingService.Instance;
+                service.Initialize();
+                await service.ConnectAsync(parameters);
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogError($"[DirectConnectDialog] LiteNetLib connection failed: {ex.Message}");
+                ClientNetworkingMenuUtility.ShowConnectionError(ex.Message);
+                HandleConnectionComplete();
             }
         }
 

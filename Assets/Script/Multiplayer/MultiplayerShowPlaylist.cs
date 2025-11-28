@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Mirror;
@@ -21,11 +22,27 @@ namespace YARG.Multiplayer
 
         private Playlist _localShowPlaylist;
 
+        private static readonly IReadOnlyList<SongEntry> EmptyQueue = Array.Empty<SongEntry>();
+        private IReadOnlyList<SongEntry> _queueSnapshot = EmptyQueue;
+        private int _currentSongIndex;
+
         public Playlist ShowPlaylist
         {
             get => _localShowPlaylist;
             set => _localShowPlaylist = value;
         }
+
+        public IReadOnlyList<SongEntry> CurrentQueue => _queueSnapshot;
+        public bool IsPlayingSet => GlobalVariables.State.PlayingAShow;
+        public int CurrentSongIndex => _currentSongIndex;
+        public bool HasQueue => _localShowPlaylist != null && _localShowPlaylist.Count > 0;
+
+        public event Action OnQueueChanged;
+        public event Action<PlaylistSongInfo> OnSongAdded;
+        public event Action<PlaylistSongInfo> OnSongRemoved;
+        public event Action OnSetStarted;
+        public event Action OnSetEnded;
+        public event Action<SongEntry> OnSongStarting;
 
         private void Awake()
         {
@@ -35,9 +52,11 @@ namespace YARG.Multiplayer
         private void ApplyPlaylistToGlobalState(bool updateCurrentSong)
         {
             GlobalVariables.State.ShowSongs = _localShowPlaylist.ToList();
+            UpdateQueueSnapshot();
 
             if (!updateCurrentSong)
             {
+                DispatchQueueChanged();
                 return;
             }
 
@@ -45,6 +64,8 @@ namespace YARG.Multiplayer
             {
                 GlobalVariables.State.ShowIndex = 0;
                 GlobalVariables.State.CurrentSong = null;
+                _currentSongIndex = 0;
+                DispatchQueueChanged();
                 return;
             }
 
@@ -53,6 +74,60 @@ namespace YARG.Multiplayer
                 0,
                 GlobalVariables.State.ShowSongs.Count - 1);
             GlobalVariables.State.CurrentSong = GlobalVariables.State.ShowSongs[GlobalVariables.State.ShowIndex];
+            _currentSongIndex = GlobalVariables.State.ShowIndex;
+            DispatchQueueChanged();
+        }
+
+        private void UpdateQueueSnapshot()
+        {
+            _queueSnapshot = _localShowPlaylist != null
+                ? (IReadOnlyList<SongEntry>) _localShowPlaylist.ToList()
+                : EmptyQueue;
+        }
+
+        private void DispatchQueueChanged()
+        {
+            OnQueueChanged?.Invoke();
+            OnPlaylistUpdated?.Invoke();
+        }
+
+        private static SongEntry ResolveSongFromHash(HashWrapper hash)
+        {
+            if (SongContainer.SongsByHash.TryGetValue(hash, out var songList) && songList.Count > 0)
+            {
+                return songList[0];
+            }
+
+            return null;
+        }
+
+        private static string GetSortStringValue(SortString sortString, string fallback = null)
+        {
+            var value = sortString.ToString();
+            return string.IsNullOrEmpty(value) ? fallback : value;
+        }
+
+        private PlaylistSongInfo BuildPlaylistSongInfo(HashWrapper hash, string songName, string artistName, string queuedBy, SongEntry resolvedSong = null)
+        {
+            resolvedSong ??= ResolveSongFromHash(hash);
+
+            if (resolvedSong != null)
+            {
+                songName = GetSortStringValue(resolvedSong.Name, songName);
+                artistName = GetSortStringValue(resolvedSong.Artist, artistName);
+            }
+
+            return new PlaylistSongInfo(hash, songName, artistName, queuedBy, resolvedSong, DateTime.UtcNow);
+        }
+
+        private void NotifySongStarting(SongEntry song)
+        {
+            if (song == null)
+            {
+                return;
+            }
+
+            OnSongStarting?.Invoke(song);
         }
 
         private void OnShowPlaylistChanged(string oldValue, string newValue)
@@ -69,7 +144,6 @@ namespace YARG.Multiplayer
             _hasReceivedInitialSync = true;
             ApplyPlaylistToGlobalState(GlobalVariables.State.PlayingAShow);
             Debug.Log($"[MultiplayerShowPlaylist] After deserialization, playlist has {_localShowPlaylist.Count} songs");
-            OnPlaylistUpdated?.Invoke();
         }
 
         public event System.Action OnPlaylistUpdated;
@@ -117,7 +191,6 @@ namespace YARG.Multiplayer
                 Debug.Log("[MultiplayerShowPlaylist] Host skipping SyncVar wait - using local playlist");
                 _hasReceivedInitialSync = true;
                 ApplyPlaylistToGlobalState(GlobalVariables.State.PlayingAShow);
-                OnPlaylistUpdated?.Invoke();
                 return;
             }
             
@@ -133,9 +206,6 @@ namespace YARG.Multiplayer
                 Debug.Log($"[MultiplayerShowPlaylist] Client playlist now has {_localShowPlaylist.Count} songs");
                 _hasReceivedInitialSync = true;
                 ApplyPlaylistToGlobalState(GlobalVariables.State.PlayingAShow);
-                
-                // Trigger update event so UI refreshes
-                OnPlaylistUpdated?.Invoke();
             }
         }
         
@@ -153,9 +223,6 @@ namespace YARG.Multiplayer
             Debug.Log($"[MultiplayerShowPlaylist] Client playlist now has {_localShowPlaylist.Count} songs");
             _hasReceivedInitialSync = true;
             ApplyPlaylistToGlobalState(GlobalVariables.State.PlayingAShow);
-            
-            // Trigger update event so UI refreshes
-            OnPlaylistUpdated?.Invoke();
         }
 
         /// <summary>
@@ -168,6 +235,60 @@ namespace YARG.Multiplayer
         }
 
         public bool HasReceivedInitialSync => _hasReceivedInitialSync;
+
+        public bool TryAddSong(SongEntry song, string playerName = null)
+        {
+            if (song == null)
+            {
+                Debug.LogWarning("[MultiplayerShowPlaylist] Cannot add null song.");
+                return false;
+            }
+
+            string songName = GetSortStringValue(song.Name, song.Hash.ToString());
+            string artistName = GetSortStringValue(song.Artist, "Unknown Artist");
+            playerName ??= YargNetworkManager.Instance?.PlayerName ?? "Player";
+
+            CmdAddSongToShow(song.Hash.ToString(), playerName, songName, artistName);
+            return true;
+        }
+
+        public bool TryRemoveSong(SongEntry song, string playerName = null)
+        {
+            if (song == null)
+            {
+                Debug.LogWarning("[MultiplayerShowPlaylist] Cannot remove null song.");
+                return false;
+            }
+
+            return TryRemoveSong(
+                song.Hash,
+                playerName,
+                GetSortStringValue(song.Name),
+                GetSortStringValue(song.Artist));
+        }
+
+        public bool TryRemoveSong(HashWrapper hash, string playerName = null, string songName = null, string songArtist = null)
+        {
+            if (!_localShowPlaylist.ContainsSong(hash))
+            {
+                Debug.LogWarning($"[MultiplayerShowPlaylist] Hash {hash} not present in playlist.");
+                return false;
+            }
+
+            var resolvedSong = ResolveSongFromHash(hash);
+            string resolvedName = songName ?? hash.ToString();
+            string resolvedArtist = songArtist ?? "Unknown Artist";
+
+            if (resolvedSong != null)
+            {
+                resolvedName = GetSortStringValue(resolvedSong.Name, resolvedName);
+                resolvedArtist = GetSortStringValue(resolvedSong.Artist, resolvedArtist);
+            }
+            playerName ??= YargNetworkManager.Instance?.PlayerName ?? "Player";
+
+            CmdRemoveSongFromShow(hash.ToString(), playerName, resolvedName, resolvedArtist);
+            return true;
+        }
 
         [Command(requiresAuthority = false)]
         public void CmdAddSongToShow(string songHash, string playerName, string songName, string songArtist)
@@ -183,8 +304,8 @@ namespace YARG.Multiplayer
                 {
                     var song = songList[0];
                     _localShowPlaylist.AddSong(song);
-                    resolvedName = song.Name;
-                    resolvedArtist = song.Artist;
+                    resolvedName = GetSortStringValue(song.Name, resolvedName);
+                    resolvedArtist = GetSortStringValue(song.Artist, resolvedArtist);
                     Debug.Log($"[MultiplayerShowPlaylist] Added song '{resolvedName}' to show playlist (now {_localShowPlaylist.Count} songs)");
                 }
                 else if (_localShowPlaylist.AddSong(hashWrapper))
@@ -209,7 +330,7 @@ namespace YARG.Multiplayer
                 {
                     resolvedArtist = "Unknown Artist";
                 }
-                RpcNotifySongAdded(playerName, resolvedName, resolvedArtist);
+                RpcNotifySongAdded(playerName, resolvedName, resolvedArtist, songHash);
                 
                 Debug.Log($"[MultiplayerShowPlaylist] Synced playlist to clients: {showPlaylistSerialized}");
             }
@@ -236,8 +357,8 @@ namespace YARG.Multiplayer
                 if (SongContainer.SongsByHash.TryGetValue(hashWrapper, out var songList) && songList.Count > 0)
                 {
                     var song = songList[0];
-                    resolvedName = song.Name;
-                    resolvedArtist = song.Artist;
+                    resolvedName = GetSortStringValue(song.Name, resolvedName);
+                    resolvedArtist = GetSortStringValue(song.Artist, resolvedArtist);
                     _localShowPlaylist.RemoveSong(song);
                     Debug.Log($"[MultiplayerShowPlaylist] Removed song '{resolvedName}' from show playlist (now {_localShowPlaylist.Count} songs)");
                 }
@@ -263,7 +384,7 @@ namespace YARG.Multiplayer
                 {
                     resolvedArtist = "Unknown Artist";
                 }
-                RpcNotifySongRemoved(playerName, resolvedName, resolvedArtist);
+                RpcNotifySongRemoved(playerName, resolvedName, resolvedArtist, songHash);
                 
                 Debug.Log($"[MultiplayerShowPlaylist] Synced playlist to clients: {showPlaylistSerialized}");
             }
@@ -306,11 +427,14 @@ namespace YARG.Multiplayer
                     GlobalVariables.State.PlayingAShow = true;
                     GlobalVariables.State.ShowIndex = 0;
                     ApplyPlaylistToGlobalState(updateCurrentSong: true);
+                    NotifySongStarting(GlobalVariables.State.CurrentSong);
                 }
                 else
                 {
                     NavigateToDifficultySelect();
                 }
+
+                OnSetStarted?.Invoke();
 
                 // Navigate all clients to difficulty select with explicit playlist data
                 RpcStartShow(showPlaylistSerialized);
@@ -322,25 +446,48 @@ namespace YARG.Multiplayer
             GlobalVariables.State.PlayingAShow = true;
             GlobalVariables.State.ShowIndex = 0;
             ApplyPlaylistToGlobalState(updateCurrentSong: true);
+            NotifySongStarting(GlobalVariables.State.CurrentSong);
             
-            Debug.Log($"[MultiplayerShowPlaylist] Navigating to difficulty select with {GlobalVariables.State.ShowSongs.Count} songs. First song: {GlobalVariables.State.CurrentSong.Name}");
+            var currentSongName = "<unknown>";
+            if (GlobalVariables.State.CurrentSong != null)
+            {
+                currentSongName = GetSortStringValue(GlobalVariables.State.CurrentSong.Name, currentSongName);
+            }
+            Debug.Log($"[MultiplayerShowPlaylist] Navigating to difficulty select with {GlobalVariables.State.ShowSongs.Count} songs. First song: {currentSongName}");
             YARG.Menu.MenuManager.Instance.PushMenu(YARG.Menu.MenuManager.Menu.DifficultySelect);
         }
 
         [ClientRpc]
-        private void RpcNotifySongAdded(string playerName, string songName, string artist)
+        private void RpcNotifySongAdded(string playerName, string songName, string artist, string songHash)
         {
             var message = $"{playerName} added '{songName}' by {artist}";
             Menu.Persistent.ToastManager.ToastInformation(message);
             Debug.Log($"[MultiplayerShowPlaylist] Toast: {message}");
+
+            var info = BuildPlaylistSongInfo(HashWrapper.FromString(songHash), songName, artist, playerName);
+            OnSongAdded?.Invoke(info);
         }
 
         [ClientRpc]
-        private void RpcNotifySongRemoved(string playerName, string songName, string artist)
+        private void RpcNotifySongRemoved(string playerName, string songName, string artist, string songHash)
         {
             var message = $"{playerName} removed '{songName}' by {artist}";
             Menu.Persistent.ToastManager.ToastInformation(message);
             Debug.Log($"[MultiplayerShowPlaylist] Toast: {message}");
+
+            var info = BuildPlaylistSongInfo(HashWrapper.FromString(songHash), songName, artist, playerName);
+            OnSongRemoved?.Invoke(info);
+        }
+
+        [ClientRpc]
+        private void RpcNotifySetEnded()
+        {
+            if (NetworkServer.active)
+            {
+                return;
+            }
+
+            OnSetEnded?.Invoke();
         }
 
         [ClientRpc]
@@ -363,7 +510,6 @@ namespace YARG.Multiplayer
                 DeserializeShowPlaylist(serializedPlaylist);
                 _hasReceivedInitialSync = true;
                 ApplyPlaylistToGlobalState(GlobalVariables.State.PlayingAShow);
-                OnPlaylistUpdated?.Invoke();
                 Debug.Log($"[MultiplayerShowPlaylist] After RPC deserialization, playlist has {_localShowPlaylist.Count} songs");
             }
 
@@ -374,6 +520,7 @@ namespace YARG.Multiplayer
             }
 
             NavigateToDifficultySelect();
+            OnSetStarted?.Invoke();
         }
 
         /// <summary>
@@ -399,6 +546,8 @@ namespace YARG.Multiplayer
             SyncShowPlaylistToClients();
             Debug.Log("[MultiplayerShowPlaylist] Cleared show playlist");
             ApplyPlaylistToGlobalState(GlobalVariables.State.PlayingAShow);
+            OnSetEnded?.Invoke();
+            RpcNotifySetEnded();
         }
 
         public bool HostRemoveSong(SongEntry song)

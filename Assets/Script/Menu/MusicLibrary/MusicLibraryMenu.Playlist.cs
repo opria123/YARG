@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using YARG.Core.Song;
 using YARG.Core.Input;
 using YARG.Localization;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
+using YARG.Net.Packets;
+using YARG.Networking.NewNet;
 using YARG.Playlists;
 using YARG.Player;
 using YARG.Settings;
@@ -111,74 +114,174 @@ namespace YARG.Menu.MusicLibrary
         }
 
         // Helper methods for multiplayer show playlist management
-        public void AddSongToMultiplayerShow(string songHash)
+        public bool AddSongToMultiplayerShow(SongEntry song)
         {
             EnsureMultiplayerShowPlaylist();
-            if (_multiplayerShowPlaylist != null)
-            {
-                // Check if song is already in the playlist
-                if (_multiplayerShowPlaylist.IsInPlaylist(songHash))
-                {
-                    UnityEngine.Debug.Log($"[MusicLibraryMenu] Song {songHash} already in playlist, skipping add");
-                    return;
-                }
-                
-                // Get the player's name
-                string playerName = "Unknown";
-                if (PlayerContainer.Players.Count > 0)
-                {
-                    playerName = PlayerContainer.Players[0].Profile.Name;
-                }
-                string displayName = songHash;
-                string displayArtist = string.Empty;
-                var hashWrapper = YARG.Core.Song.HashWrapper.FromString(songHash);
-                if (SongContainer.SongsByHash.TryGetValue(hashWrapper, out var songList) && songList.Count > 0)
-                {
-                    displayName = songList[0].Name;
-                    displayArtist = songList[0].Artist;
-                }
-                
-                UnityEngine.Debug.Log($"[MusicLibraryMenu] Calling CmdAddSongToShow for hash: {songHash} from player: {playerName}");
-                _multiplayerShowPlaylist.CmdAddSongToShow(songHash, playerName, displayName, displayArtist);
-            }
-            else
+            if (_multiplayerShowPlaylist == null)
             {
                 UnityEngine.Debug.LogError("[MusicLibraryMenu] Cannot add song - MultiplayerShowPlaylist is null!");
+                return false;
+            }
+
+            if (song == null)
+            {
+                UnityEngine.Debug.LogWarning("[MusicLibraryMenu] Cannot add null song to multiplayer show");
+                return false;
+            }
+
+            if (_multiplayerShowPlaylist.IsInPlaylist(song.Hash.ToString()))
+            {
+                UnityEngine.Debug.Log($"[MusicLibraryMenu] Song {song.Hash} already in playlist, skipping add");
+                return false;
+            }
+
+            string playerName = ResolveQueueingPlayerName();
+            UnityEngine.Debug.Log($"[MusicLibraryMenu] Queuing '{song.Name}' via MultiplayerShowPlaylist");
+            return _multiplayerShowPlaylist.TryAddSong(song, playerName);
+        }
+
+        public bool RemoveSongFromMultiplayerShow(SongEntry song)
+        {
+            EnsureMultiplayerShowPlaylist();
+            if (_multiplayerShowPlaylist == null)
+            {
+                UnityEngine.Debug.LogError("[MusicLibraryMenu] Cannot remove song - MultiplayerShowPlaylist is null!");
+                return false;
+            }
+
+            if (song == null)
+            {
+                UnityEngine.Debug.LogWarning("[MusicLibraryMenu] Cannot remove null song from multiplayer show");
+                return false;
+            }
+
+            string playerName = ResolveQueueingPlayerName();
+            UnityEngine.Debug.Log($"[MusicLibraryMenu] Removing '{song.Name}' from MultiplayerShowPlaylist");
+            return _multiplayerShowPlaylist.TryRemoveSong(song, playerName);
+        }
+
+        private static string ResolveQueueingPlayerName()
+        {
+            if (PlayerContainer.Players.Count > 0)
+            {
+                return PlayerContainer.Players[0].Profile.Name;
+            }
+
+            return Networking.YargNetworkManager.Instance?.PlayerName ?? "Player";
+        }
+
+        /// <summary>
+        /// Checks if we're connected via LiteNet (not Mirror).
+        /// </summary>
+        private bool IsLiteNetMultiplayer
+        {
+            get
+            {
+                if (!ClientNetworkingService.HasInstance)
+                    return false;
+                return ClientNetworkingService.Instance.IsConnected;
             }
         }
 
-        public void RemoveSongFromMultiplayerShow(string songHash)
+        /// <summary>
+        /// Checks if the local player is host in LiteNet mode.
+        /// </summary>
+        private bool IsLiteNetHost
         {
-            EnsureMultiplayerShowPlaylist();
-            if (_multiplayerShowPlaylist != null)
+            get
             {
-                // Get the player's name
-                string playerName = "Unknown";
-                if (PlayerContainer.Players.Count > 0)
-                {
-                    playerName = PlayerContainer.Players[0].Profile.Name;
-                }
-                string displayName = songHash;
-                string displayArtist = string.Empty;
-                var hashWrapper = YARG.Core.Song.HashWrapper.FromString(songHash);
-                if (SongContainer.SongsByHash.TryGetValue(hashWrapper, out var songList) && songList.Count > 0)
-                {
-                    displayName = songList[0].Name;
-                    displayArtist = songList[0].Artist;
-                }
-
-                _multiplayerShowPlaylist.CmdRemoveSongFromShow(songHash, playerName, displayName, displayArtist);
+                if (!IsLiteNetMultiplayer)
+                    return false;
+                // If we're also running the server, we're the host
+                return ServerNetworkingService.HasInstance && ServerNetworkingService.Instance.IsRunning;
             }
         }
 
         public void StartMultiplayerShow()
         {
+            // LiteNet mode: Send song selection to server
+            if (IsLiteNetMultiplayer)
+            {
+                StartLiteNetShow();
+                return;
+            }
+
+            // Mirror mode: Use existing flow
             EnsureMultiplayerShowPlaylist();
             var networkManager = Networking.YargNetworkManager.Instance;
             if (_multiplayerShowPlaylist != null && networkManager != null && networkManager.LocalUserIsHost())
             {
                 _multiplayerShowPlaylist.CmdStartShow();
             }
+        }
+
+        private void StartLiteNetShow()
+        {
+            if (!IsLiteNetHost)
+            {
+                ToastManager.ToastWarning("Only the host can start the show");
+                return;
+            }
+
+            if (ShowPlaylist.Count == 0)
+            {
+                ToastManager.ToastWarning("Add songs to the setlist first!");
+                return;
+            }
+
+            var firstSong = ShowPlaylist.ToList().FirstOrDefault();
+            if (firstSong == null)
+            {
+                ToastManager.ToastError("No valid song in setlist!");
+                return;
+            }
+
+            // Build song selection state from the show playlist
+            var songId = firstSong.Hash.ToString();
+            var assignments = BuildInstrumentAssignments();
+
+            var selection = new SongSelectionState(songId, assignments, false);
+
+            try
+            {
+                ClientNetworkingService.Instance.SendSongSelection(selection);
+                UnityEngine.Debug.Log($"[MusicLibraryMenu] Sent LiteNet song selection: {firstSong.Name} ({songId})");
+                ToastManager.ToastSuccess($"Song selected: {firstSong.Name}");
+
+                // Set local state for gameplay
+                GlobalVariables.State.PlayingAShow = true;
+                GlobalVariables.State.ShowSongs = ShowPlaylist.ToList();
+                GlobalVariables.State.CurrentSong = firstSong;
+                GlobalVariables.State.ShowIndex = 0;
+
+                // Navigate to difficulty select
+                MenuManager.Instance.PushMenu(MenuManager.Menu.DifficultySelect);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[MusicLibraryMenu] Failed to send song selection: {ex.Message}");
+                ToastManager.ToastError("Failed to sync song selection");
+            }
+        }
+
+        private IReadOnlyList<SongInstrumentAssignment> BuildInstrumentAssignments()
+        {
+            var assignments = new List<SongInstrumentAssignment>();
+
+            // Get local player assignments
+            foreach (var player in PlayerContainer.Players)
+            {
+                if (player?.Profile == null)
+                    continue;
+
+                var playerId = ClientNetworkingService.Instance.SessionContext?.SessionId ?? Guid.Empty;
+                var instrument = player.Profile.CurrentInstrument.ToString();
+                var difficulty = player.Profile.CurrentDifficulty.ToString();
+
+                assignments.Add(new SongInstrumentAssignment(playerId, instrument, difficulty));
+            }
+
+            return assignments;
         }
 
         private List<ViewType> CreatePlaylistSelectViewList()
@@ -425,6 +528,23 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
             
+            // LiteNet multiplayer mode
+            if (IsLiteNetMultiplayer)
+            {
+                if (IsLiteNetHost)
+                {
+                    UnityEngine.Debug.Log($"[MusicLibraryMenu] LiteNet host starting show with {ShowPlaylist.Count} songs");
+                    ToastManager.ToastInformation($"Starting show with {ShowPlaylist.Count} songs!");
+                    StartLiteNetShow();
+                }
+                else
+                {
+                    ToastManager.ToastWarning("Only the host can start the show");
+                }
+                return;
+            }
+            
+            // Mirror multiplayer mode
             var networkManager = Networking.YargNetworkManager.Instance;
             bool isMultiplayer = networkManager != null && networkManager.isNetworkActive;
             
@@ -483,13 +603,16 @@ namespace YARG.Menu.MusicLibrary
                 {
                     if (isMultiplayer)
                     {
-                        AddSongToMultiplayerShow(song.Hash.ToString());
+                        if (AddSongToMultiplayerShow(song))
+                        {
+                            i++;
+                        }
                     }
                     else
                     {
                         ShowPlaylist.AddSong(song);
+                        i++;
                     }
-                    i++;
                 }
 
                 if (i > 0)
@@ -518,15 +641,22 @@ namespace YARG.Menu.MusicLibrary
 
             if (CurrentSelection is SongViewType selection)
             {
+                bool added = false;
                 if (isMultiplayer)
                 {
-                    AddSongToMultiplayerShow(selection.SongEntry.Hash.ToString());
+                    added = AddSongToMultiplayerShow(selection.SongEntry);
                 }
                 else
                 {
                     ShowPlaylist.AddSong(selection.SongEntry);
+                    added = true;
                 }
-                
+
+                if (!added)
+                {
+                    return;
+                }
+
                 if (ShowPlaylist.Count == 1)
                 {
                     // We need to rebuild the navigation scheme after adding the first song
@@ -540,6 +670,29 @@ namespace YARG.Menu.MusicLibrary
         private void QuickStartShow()
         {
             // Quick start for multiplayer - starts the show immediately if there are songs
+            
+            // Check for LiteNet multiplayer first
+            if (IsLiteNetMultiplayer)
+            {
+                if (!IsLiteNetHost)
+                {
+                    ToastManager.ToastWarning("Only the host can start the show");
+                    return;
+                }
+                
+                if (ShowPlaylist.Count == 0)
+                {
+                    ToastManager.ToastWarning("Add songs to the setlist first!");
+                    return;
+                }
+                
+                UnityEngine.Debug.Log($"[MusicLibraryMenu] Quick starting LiteNet show with {ShowPlaylist.Count} songs");
+                ToastManager.ToastSuccess($"Starting show with {ShowPlaylist.Count} songs!");
+                StartLiteNetShow();
+                return;
+            }
+            
+            // Mirror multiplayer check
             var networkManager = Networking.YargNetworkManager.Instance;
             bool isMultiplayer = networkManager != null && networkManager.isNetworkActive;
             
