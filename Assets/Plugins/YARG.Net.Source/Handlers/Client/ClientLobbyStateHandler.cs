@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -9,7 +9,8 @@ using YARG.Net.Packets.Dispatch;
 using YARG.Net.Sessions;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers.Client;
+namespace YARG.Net.Handlers.Client
+{
 
 /// <summary>
 /// Caches lobby state snapshots received on the client via <see cref="PacketType.LobbyState"/> packets.
@@ -210,4 +211,5 @@ public sealed class ClientLobbyStateChangedEventArgs : EventArgs
     }
 
     public LobbyStateSnapshot Snapshot { get; }
+}
 }

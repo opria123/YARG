@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 
-namespace YARG.Net.Sessions;
+namespace YARG.Net.Sessions
+{
 
 /// <summary>
 /// Provides configurable limits for a lobby instance.
@@ -22,4 +23,5 @@ public sealed record LobbyConfiguration
     /// Whether spectators are allowed to join the lobby.
     /// </summary>
     public bool AllowSpectators { get; init; } = true;
+}
 }

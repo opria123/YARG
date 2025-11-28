@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Packets.Dispatch;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 public interface IServerRuntime
 {
@@ -20,4 +21,5 @@ public sealed record ServerRuntimeOptions
     public string Address { get; init; } = "0.0.0.0";
     public bool EnableNatPunchThrough { get; init; }
     public IPacketDispatcher? PacketDispatcher { get; init; }
+}
 }

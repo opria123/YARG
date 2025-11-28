@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 public sealed class ClientConnectedEventArgs : EventArgs
 {
@@ -23,4 +24,5 @@ public sealed class ClientDisconnectedEventArgs : EventArgs
 
     public INetConnection Connection { get; }
     public bool InitiatedDuringConnect { get; }
+}
 }

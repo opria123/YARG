@@ -1,11 +1,12 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Packets;
 using YARG.Net.Packets.Dispatch;
 using YARG.Net.Runtime;
 
-namespace YARG.Net.Handlers.Client;
+namespace YARG.Net.Handlers.Client
+{
 
 /// <summary>
 /// Handles <see cref="HandshakeResponsePacket"/> messages on the client and updates session context.
@@ -66,4 +67,5 @@ public sealed class ClientHandshakeCompletedEventArgs : EventArgs
     public bool Accepted { get; }
     public string? Reason { get; }
     public Guid SessionId { get; }
+}
 }

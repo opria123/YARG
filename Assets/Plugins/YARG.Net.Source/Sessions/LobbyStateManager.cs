@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using YARG.Net.Packets;
 
-namespace YARG.Net.Sessions;
+namespace YARG.Net.Sessions
+{
 
 /// <summary>
 /// Maintains lobby membership, readiness, and selection state.
@@ -643,4 +644,5 @@ public sealed class LobbyCountdownEventArgs : EventArgs
     }
 
     public int CountdownSeconds { get; }
+}
 }

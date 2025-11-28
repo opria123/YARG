@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Packets;
@@ -7,7 +7,8 @@ using YARG.Net.Serialization;
 using YARG.Net.Sessions;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers;
+namespace YARG.Net.Handlers
+{
 
 /// <summary>
 /// Handles <see cref="HandshakeRequestPacket"/> messages for server runtimes.
@@ -201,4 +202,5 @@ public sealed class HandshakeRejectedEventArgs : EventArgs
 
     public PacketContext Context { get; }
     public string Reason { get; }
+}
 }

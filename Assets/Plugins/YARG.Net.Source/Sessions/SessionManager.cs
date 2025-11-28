@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Sessions;
+namespace YARG.Net.Sessions
+{
 
 /// <summary>
 /// Tracks active player sessions for a server runtime.
@@ -162,4 +163,5 @@ public enum SessionCreationError
     None = 0,
     AlreadyRegistered,
     ServerFull,
+}
 }

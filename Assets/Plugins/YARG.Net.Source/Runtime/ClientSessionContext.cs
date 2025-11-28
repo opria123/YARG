@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 /// <summary>
 /// Tracks the local client's session identifier once the server accepts the handshake.
@@ -89,4 +90,5 @@ public sealed class ClientSessionChangedEventArgs : EventArgs
     public Guid? PreviousSessionId { get; }
     public Guid? CurrentSessionId { get; }
     public bool HasSession => CurrentSessionId.HasValue;
+}
 }

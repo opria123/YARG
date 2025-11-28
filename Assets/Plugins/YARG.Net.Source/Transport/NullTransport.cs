@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 
-namespace YARG.Net.Transport;
+namespace YARG.Net.Transport
+{
 
 /// <summary>
 /// Minimal placeholder transport so early unit tests can run without LiteNetLib.
@@ -34,4 +35,5 @@ public sealed class NullTransport : INetTransport
     {
         Shutdown();
     }
+}
 }

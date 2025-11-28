@@ -1,7 +1,8 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace YARG.Net.Serialization;
+namespace YARG.Net.Serialization
+{
 
 /// <summary>
 /// Factory helpers for serializer option instances shared across transports.
@@ -23,4 +24,5 @@ public static class NetSerializerOptions
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false));
         return options;
     }
+}
 }

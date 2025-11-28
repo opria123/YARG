@@ -4,6 +4,7 @@
   <Project Path="Unity.Mirror.CodeGen.csproj" />
   <Project Path="Mirror.Components.csproj" />
   <Project Path="Mirror.Editor.csproj" />
+  <Project Path="YARG.Net.csproj" />
   <Project Path="Mirror.Examples.csproj" />
   <Project Path="kcp2k.csproj" />
   <Project Path="Assembly-CSharp-firstpass.csproj" />

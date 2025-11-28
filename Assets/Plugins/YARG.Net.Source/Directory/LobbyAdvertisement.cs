@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Text.Json.Serialization;
 
-namespace YARG.Net.Directory;
+namespace YARG.Net.Directory
+{
 
 /// <summary>
 /// Payload sent by hosts to advertise their lobby to the introducer service.
@@ -33,4 +34,5 @@ public sealed record LobbyDirectoryEntry(
     [property: JsonPropertyName("lastHeartbeatUtc")] DateTimeOffset LastHeartbeatUtc)
 {
     public bool IsActive(TimeSpan ttl) => DateTimeOffset.UtcNow - LastHeartbeatUtc <= ttl;
+}
 }

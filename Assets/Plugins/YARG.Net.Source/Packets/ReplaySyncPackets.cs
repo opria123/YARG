@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 
-namespace YARG.Net.Packets;
+namespace YARG.Net.Packets
+{
 
 /// <summary>
 /// Sent by server to all clients to request their replay data after gameplay ends.
@@ -26,3 +27,4 @@ public sealed record ReplaySyncDataPacket(
 /// </summary>
 public sealed record ReplaySyncCompletePacket(
     Guid LobbyId) : IPacketPayload;
+}

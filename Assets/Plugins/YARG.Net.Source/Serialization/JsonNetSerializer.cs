@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Text.Json;
 
-namespace YARG.Net.Serialization;
+namespace YARG.Net.Serialization
+{
 
 /// <summary>
 /// `INetSerializer` backed by <see cref="JsonSerializer"/>.
@@ -30,4 +31,5 @@ public sealed class JsonNetSerializer : INetSerializer
 
         return result!;
     }
+}
 }

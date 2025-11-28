@@ -1,4 +1,5 @@
-﻿namespace YARG.Net.Packets;
+namespace YARG.Net.Packets
+{
 
 /// <summary>
 /// Enumerates the well-known packet categories exchanged between peers.
@@ -22,4 +23,5 @@ public enum PacketType
     ReplaySyncRequest = 40,
     ReplaySyncData = 41,
     ReplaySyncComplete = 42,
+}
 }

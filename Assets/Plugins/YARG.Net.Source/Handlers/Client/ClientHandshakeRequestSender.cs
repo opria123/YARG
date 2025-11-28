@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using YARG.Net.Packets;
 using YARG.Net.Serialization;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers.Client;
+namespace YARG.Net.Handlers.Client
+{
 
 /// <summary>
 /// Emits <see cref="HandshakeRequestPacket"/> messages once a client transport connects.
@@ -53,4 +54,5 @@ public sealed class ClientHandshakeRequestSender
     {
         SendHandshake(connection, ProtocolVersion.Current, playerName, password);
     }
+}
 }

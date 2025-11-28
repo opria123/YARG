@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using YARG.Net.Packets;
 using YARG.Net.Serialization;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Sessions;
+namespace YARG.Net.Sessions
+{
 
 /// <summary>
 /// Bridges handshake/session events to lobby state broadcasts.
@@ -116,4 +117,5 @@ public sealed class ServerLobbyCoordinator : IDisposable
         _lobbyManager.CountdownCancelled -= OnLobbyChanged;
         _disposed = true;
     }
+}
 }

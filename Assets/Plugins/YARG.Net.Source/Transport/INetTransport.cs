@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 
-namespace YARG.Net.Transport;
+namespace YARG.Net.Transport
+{
 
 public interface INetTransport : IDisposable
 {
@@ -13,4 +14,5 @@ public interface INetTransport : IDisposable
     void Start(TransportStartOptions options);
     void Poll(TimeSpan timeout);
     void Shutdown(string? reason = null);
+}
 }

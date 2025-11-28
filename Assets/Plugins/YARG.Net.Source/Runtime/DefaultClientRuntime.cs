@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Handlers.Client;
@@ -6,7 +6,8 @@ using YARG.Net.Packets;
 using YARG.Net.Packets.Dispatch;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 /// <summary>
 /// Default client runtime that drives an <see cref="INetTransport"/> on the Unity side.
@@ -394,4 +395,5 @@ public sealed class DefaultClientRuntime : IClientRuntime
     {
         HandshakeCompleted?.Invoke(this, e);
     }
+}
 }

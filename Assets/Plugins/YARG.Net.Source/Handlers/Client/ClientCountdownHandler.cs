@@ -1,11 +1,12 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Packets;
 using YARG.Net.Packets.Dispatch;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers.Client;
+namespace YARG.Net.Handlers.Client
+{
 
 /// <summary>
 /// Handles countdown packets received on the client.
@@ -57,4 +58,5 @@ public sealed class CountdownReceivedEventArgs : EventArgs
 
     public Guid LobbyId { get; }
     public int SecondsRemaining { get; }
+}
 }

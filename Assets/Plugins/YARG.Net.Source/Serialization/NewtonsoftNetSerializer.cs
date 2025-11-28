@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
 
-namespace YARG.Net.Serialization;
+namespace YARG.Net.Serialization
+{
 
 /// <summary>
 /// <see cref="INetSerializer"/> implementation backed by Newtonsoft.Json for Unity/Mono consumers.
@@ -60,4 +61,5 @@ public sealed class NewtonsoftNetSerializer : INetSerializer
         settings.Converters.Add(new StringEnumConverter { NamingStrategy = contractResolver.NamingStrategy });
         return settings;
     }
+}
 }

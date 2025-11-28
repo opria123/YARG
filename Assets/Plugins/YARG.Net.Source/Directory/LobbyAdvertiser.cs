@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
@@ -6,7 +6,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace YARG.Net.Directory;
+namespace YARG.Net.Directory
+{
 
 /// <summary>
 /// Client interface for advertising a lobby to the introducer service.
@@ -263,4 +264,5 @@ public sealed class LobbyAdvertiser : ILobbyAdvertiser
             // Best effort removal
         }
     }
+}
 }

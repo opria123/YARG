@@ -1,4 +1,5 @@
-﻿namespace YARG.Net.Packets;
+namespace YARG.Net.Packets
+{
 
 /// <summary>
 /// Wraps a strongly typed payload with metadata that helps routers dispatch packets.
@@ -10,4 +11,5 @@ public sealed record PacketEnvelope<TPayload>(PacketType Type, TPayload Payload,
     {
         return new PacketEnvelope<TPayload>(type, payload, version ?? ProtocolVersion.Current);
     }
+}
 }

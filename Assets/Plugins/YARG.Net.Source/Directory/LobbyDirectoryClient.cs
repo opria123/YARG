@@ -1,11 +1,12 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace YARG.Net.Directory;
+namespace YARG.Net.Directory
+{
 
 /// <summary>
 /// HTTP-based client for polling the lobby directory/introducer service.
@@ -208,4 +209,5 @@ public sealed class LobbyDirectoryClient : ILobbyDirectoryClient
             && a.Version == b.Version
             && a.LastHeartbeatUtc == b.LastHeartbeatUtc;
     }
+}
 }

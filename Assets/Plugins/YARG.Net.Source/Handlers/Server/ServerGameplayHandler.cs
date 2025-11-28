@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
@@ -9,7 +9,8 @@ using YARG.Net.Serialization;
 using YARG.Net.Sessions;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers.Server;
+namespace YARG.Net.Handlers.Server
+{
 
 /// <summary>
 /// Handles gameplay-related packets and broadcasts state to all clients.
@@ -321,4 +322,5 @@ public sealed class ReplaySyncCompleteEventArgs : EventArgs
     {
         CollectedData = collectedData;
     }
+}
 }

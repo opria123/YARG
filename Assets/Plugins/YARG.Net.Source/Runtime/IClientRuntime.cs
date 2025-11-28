@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Handlers.Client;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 public interface IClientRuntime
 {
@@ -17,4 +18,5 @@ public interface IClientRuntime
     void RegisterTransport(INetTransport transport);
     void RegisterSessionContext(ClientSessionContext sessionContext);
     ClientSessionContext? SessionContext { get; }
+}
 }

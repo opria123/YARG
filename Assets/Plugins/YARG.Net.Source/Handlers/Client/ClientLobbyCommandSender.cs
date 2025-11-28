@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using YARG.Net.Packets;
 using YARG.Net.Runtime;
 using YARG.Net.Serialization;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers.Client;
+namespace YARG.Net.Handlers.Client
+{
 
 /// <summary>
 /// Helper for sending lobby-related commands from a client to the server.
@@ -81,4 +82,5 @@ public sealed class ClientLobbyCommandSender
 
         return sessionId.Value;
     }
+}
 }

@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Packets;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 /// <summary>
 /// Basic polling-based server runtime that drives an <see cref="INetTransport"/>.
@@ -207,4 +208,5 @@ public sealed class DefaultServerRuntime : IServerRuntime
         var context = new PacketContext(connection, channel, PacketEndpointRole.Server);
         _ = dispatcher.DispatchAsync(payload, context, CancellationToken.None);
     }
+}
 }

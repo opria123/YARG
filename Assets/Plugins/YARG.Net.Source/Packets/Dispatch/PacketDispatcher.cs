@@ -1,11 +1,12 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using YARG.Net.Serialization;
 
-namespace YARG.Net.Packets.Dispatch;
+namespace YARG.Net.Packets.Dispatch
+{
 
 /// <summary>
 /// Routes serialized packets to registered handlers using <see cref="INetSerializer"/>.
@@ -91,4 +92,5 @@ public sealed class PacketDispatcher : IPacketDispatcher
             throw new JsonException("Failed to parse packet envelope for dispatch.", ex);
         }
     }
+}
 }

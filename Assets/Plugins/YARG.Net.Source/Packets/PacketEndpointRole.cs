@@ -1,7 +1,9 @@
-﻿namespace YARG.Net.Packets;
+namespace YARG.Net.Packets
+{
 
 public enum PacketEndpointRole
 {
     Server,
     Client,
+}
 }

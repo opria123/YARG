@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
-namespace YARG.Net.Packets;
+namespace YARG.Net.Packets
+{
 
 public sealed record LobbyStatePacket(Guid LobbyId, IReadOnlyList<LobbyPlayer> Players, LobbyStatus Status, SongSelectionState? Selection) : IPacketPayload;
 
@@ -22,4 +23,5 @@ public enum LobbyRole
     Host,
     Member,
     Spectator,
+}
 }

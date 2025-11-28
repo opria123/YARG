@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 
-namespace YARG.Net.Transport;
+namespace YARG.Net.Transport
+{
 
 /// <summary>
 /// Represents a logical peer connected to the transport.
@@ -12,4 +13,5 @@ public interface INetConnection
 
     void Disconnect(string? reason = null);
     void Send(ReadOnlySpan<byte> payload, ChannelType channel = ChannelType.ReliableOrdered);
+}
 }

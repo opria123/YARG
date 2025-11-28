@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using YARG.Net.Handlers.Client;
 using YARG.Net.Packets.Dispatch;
 using YARG.Net.Serialization;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Runtime;
+namespace YARG.Net.Runtime
+{
 
 /// <summary>
 /// Helper for wiring up the default client runtime, packet dispatcher, and session-aware helpers.
@@ -57,3 +58,4 @@ public sealed record ClientNetworkingClient(
     ClientGameplayHandler GameplayHandler,
     ClientLobbyCommandSender CommandSender,
     ClientHandshakeRequestSender HandshakeSender);
+}

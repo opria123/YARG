@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -8,7 +8,8 @@ using System.Threading;
 using LiteNetLib;
 using LiteNetLib.Utils;
 
-namespace YARG.Net.Transport;
+namespace YARG.Net.Transport
+{
 
 /// <summary>
 /// LiteNetLib-backed implementation of <see cref="INetTransport"/> for production networking.
@@ -175,4 +176,5 @@ public sealed class LiteNetLibTransport : INetTransport, INetEventListener
     {
         request.AcceptIfKey(string.Empty);
     }
+}
 }

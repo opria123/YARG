@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Text;
 using LiteNetLib;
 
-namespace YARG.Net.Transport;
+namespace YARG.Net.Transport
+{
 
 internal sealed class LiteNetLibConnection : INetConnection
 {
@@ -54,4 +55,5 @@ internal sealed class LiteNetLibConnection : INetConnection
         var buffer = payload.ToArray();
         _peer.Send(buffer, method);
     }
+}
 }

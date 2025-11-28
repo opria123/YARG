@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,7 +9,8 @@ using YARG.Net.Serialization;
 using YARG.Net.Sessions;
 using YARG.Net.Transport;
 
-namespace YARG.Net.Handlers.Client;
+namespace YARG.Net.Handlers.Client
+{
 
 /// <summary>
 /// Handles gameplay-related packets on the client side.
@@ -356,4 +357,5 @@ public sealed class ClientReplaySyncCompleteEventArgs : EventArgs
     {
         LobbyId = lobbyId;
     }
+}
 }

@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace YARG.Net.Directory;
+namespace YARG.Net.Directory
+{
 
 /// <summary>
 /// Client interface for querying available lobbies from the introducer service.
@@ -47,4 +48,5 @@ public sealed class LobbyDirectoryChangedEventArgs : EventArgs
     }
 
     public IReadOnlyList<LobbyDirectoryEntry> Lobbies { get; }
+}
 }

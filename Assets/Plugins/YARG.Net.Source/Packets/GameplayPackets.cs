@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
-namespace YARG.Net.Packets;
+namespace YARG.Net.Packets
+{
 
 public sealed record GameplayCountdownPacket(Guid SessionId, int SecondsRemaining) : IPacketPayload;
 
@@ -83,4 +84,5 @@ public enum GameplayEndReason
     AllPlayersFailed,
     HostEnded,
     Disconnected,
+}
 }

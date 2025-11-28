@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
@@ -6,7 +6,8 @@ using YARG.Net.Packets;
 using YARG.Net.Packets.Dispatch;
 using YARG.Net.Sessions;
 
-namespace YARG.Net.Handlers.Server;
+namespace YARG.Net.Handlers.Server
+{
 
 /// <summary>
 /// Handles lobby-related commands sent by clients (ready toggles, song selection).
@@ -85,4 +86,5 @@ public sealed class ServerLobbyCommandHandler
 
         return true;
     }
+}
 }
