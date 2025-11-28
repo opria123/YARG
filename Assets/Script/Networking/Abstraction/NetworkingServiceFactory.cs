@@ -94,10 +94,15 @@ namespace YARG.Networking.Abstraction
 
         private static INetworkingService CreateMirrorAdapter()
         {
-            // Step 3 will implement this - for now return null
-            // This will look for YargNetworkManager.Instance and wrap it
-            Debug.LogWarning("[NetworkingServiceFactory] Mirror adapter not yet implemented");
-            return null;
+            // Wait for YargNetworkManager to be initialized
+            if (YargNetworkManager.Instance == null)
+            {
+                Debug.LogError("[NetworkingServiceFactory] YargNetworkManager.Instance is null. Cannot create Mirror adapter.");
+                return null;
+            }
+
+            Debug.Log("[NetworkingServiceFactory] Creating MirrorNetworkingAdapter");
+            return new MirrorNetworkingAdapter();
         }
 
         private static INetworkingService CreateLiteNetAdapter()
