@@ -19,6 +19,7 @@ using YARG.Core.Replays.Analyzer;
 using YARG.Core.Song;
 using YARG.Localization;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Menu.MusicLibrary;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
@@ -488,18 +489,20 @@ namespace YARG.Menu.ScoreScreen
 
         private void InitializeMultiplayerReady()
         {
-            if (YargNetworkManager.Instance == null || !YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 _isMultiplayer = false;
                 return;
             }
 
             _isMultiplayer = true;
-            _isHost = YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost();
+            _isHost = networkService.IsHosting;
             _advancing = false;
 
             _networkPlayers.Clear();
 
+            // Note: GetAllPlayers() is still Mirror-specific, needs abstraction
             var players = YargNetworkManager.Instance.GetAllPlayers();
             foreach (var player in players)
             {

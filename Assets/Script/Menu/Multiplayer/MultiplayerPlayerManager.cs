@@ -5,6 +5,7 @@ using YARG.Core;
 using YARG.Core.Game;
 using YARG.Input;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Player;
 
 namespace YARG.Menu.Multiplayer
@@ -34,18 +35,20 @@ namespace YARG.Menu.Multiplayer
             var players = new List<YargPlayer>();
             _playerNetworkLookup.Clear();
 
-            if (YargNetworkManager.Instance == null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null)
             {
-                Debug.LogWarning("[MultiplayerPlayerManager] YargNetworkManager.Instance is NULL!");
+                Debug.LogWarning("[MultiplayerPlayerManager] NetworkingServiceFactory.Instance is NULL!");
                 return players;
             }
 
-            if (!YargNetworkManager.Instance.isNetworkActive)
+            if (!networkService.IsNetworkActive)
             {
                 Debug.LogWarning("[MultiplayerPlayerManager] Network is not active!");
                 return players;
             }
 
+            // Note: GetAllPlayers() is still Mirror-specific, needs abstraction
             var networkPlayers = YargNetworkManager.Instance.GetAllPlayers();
             Debug.Log($"[MultiplayerPlayerManager] Found {networkPlayers.Count} NetworkPlayerData objects");
 

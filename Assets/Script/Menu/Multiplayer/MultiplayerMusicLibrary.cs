@@ -3,6 +3,7 @@ using UnityEngine.UI;
 using TMPro;
 using YARG.Core.Song;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 
@@ -26,7 +27,8 @@ namespace YARG.Menu.Multiplayer
         private void Start()
         {
             // Check if we're in multiplayer mode
-            if (YargNetworkManager.Instance == null || !YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 // Not in multiplayer, hide panel
                 if (multiplayerPanel != null)
@@ -36,7 +38,7 @@ namespace YARG.Menu.Multiplayer
                 return;
             }
 
-            _isHost = YargNetworkManager.Instance.LocalUserIsHost();
+            _isHost = networkService.IsHosting;
 
             // Show multiplayer panel
             if (multiplayerPanel != null)
@@ -63,6 +65,7 @@ namespace YARG.Menu.Multiplayer
             }
 
             // Subscribe to song selection events
+            // Note: OnSongSelected is still Mirror-specific, needs abstraction layer support
             if (YargNetworkManager.Instance != null)
             {
                 YargNetworkManager.Instance.OnSongSelected += OnSongSelected;
