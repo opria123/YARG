@@ -1001,7 +1001,8 @@ namespace YARG.Menu.DifficultySelect
         private void SetLocalPlayerReadyState(int playerIndex, bool ready)
         {
             // Send ready state to network
-            if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null && networkService.IsNetworkActive)
             {
                 var localNetworkPlayer = GetLocalNetworkPlayer(playerIndex);
                 if (localNetworkPlayer != null)
@@ -1035,9 +1036,10 @@ namespace YARG.Menu.DifficultySelect
                 DialogManager.Instance.ClearDialog();
                 
                 // Client disconnects from network
-                if (Networking.YargNetworkManager.Instance != null)
+                var networkService = NetworkingServiceFactory.Instance;
+                if (networkService != null)
                 {
-                    Networking.YargNetworkManager.Instance.LeaveLobby();
+                    networkService.LeaveLobby();
                 }
                 
                 // Go back to main menu or lobby browser
@@ -1087,8 +1089,10 @@ namespace YARG.Menu.DifficultySelect
                 modifierText, false, () => { });
             
             // Show "Waiting for other players..." text if in multiplayer and not all players ready
-            if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null && networkService.IsNetworkActive)
             {
+                // Note: GetAllPlayers() is Mirror-specific, needs abstraction
                 var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
                 int readyCount = 0;
                 foreach (var p in allPlayers)
@@ -1123,12 +1127,14 @@ namespace YARG.Menu.DifficultySelect
         {
             if (_readyStatusText == null) return;
             // Check if in multiplayer
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 _readyStatusText.gameObject.SetActive(false);
                 return;
             }
             
+            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
             var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
             int readyCount = 0;
             int totalCount = 0;
@@ -1300,11 +1306,13 @@ namespace YARG.Menu.DifficultySelect
         
         private void SubscribeToNetworkPlayerEvents()
         {
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 return;
             }
             
+            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
             var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
             foreach (var player in allPlayers)
             {
@@ -1319,13 +1327,14 @@ namespace YARG.Menu.DifficultySelect
         
         private void UnsubscribeFromNetworkPlayerEvents()
         {
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 return;
             }
             
             // Unsubscribe from player left event
-            if (Networking.YargNetworkManager.Instance != null)
+            if (networkService != null)
             {
                 Networking.YargNetworkManager.Instance.OnPlayerLeft -= OnPlayerLeftLobby;
             }
@@ -1376,19 +1385,21 @@ namespace YARG.Menu.DifficultySelect
         
         private void CheckAndAutoStart()
         {
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 return;
             }
             
             // Only check on host
-            if (!Networking.YargNetworkManager.Instance.LocalUserIsHost())
+            if (!networkService.IsHosting)
             {
                 _pendingGameplayStart = false;
                 return;
             }
             
             // Check if all players are ready
+            // Note: AreAllPlayersReady() is Mirror-specific, needs abstraction
             if (Networking.YargNetworkManager.Instance.AreAllPlayersReady())
             {
                 if (_pendingGameplayStart)
@@ -1449,7 +1460,8 @@ namespace YARG.Menu.DifficultySelect
             }
             
             // Only show player list container when in multiplayer
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 ClearMultiplayerPlayerEntries();
                 _multiplayerPlayerListContainer.SetActive(false);
@@ -1458,6 +1470,7 @@ namespace YARG.Menu.DifficultySelect
             
             _multiplayerPlayerListContainer.SetActive(true);
             
+            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
             var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
             Debug.Log($"[DifficultySelectMenu] Found {allPlayers.Count} players in network");
             var currentPlayers = new HashSet<Networking.NetworkPlayerData>(allPlayers.Where(p => p != null));
@@ -1865,11 +1878,13 @@ namespace YARG.Menu.DifficultySelect
         
         private Networking.NetworkPlayerData GetLocalNetworkPlayer(int playerIndex)
         {
-            if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
             {
                 return null;
             }
             
+            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
             var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
             foreach (var player in allPlayers)
             {
