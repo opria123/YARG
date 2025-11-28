@@ -1,3 +1,6 @@
 [submodule "Assets/Plugins/YARG.Core"]
 	path = YARG.Core
 	url = https://github.com/opria123/YARG.Core
+[submodule "Assets/Plugins/YARG.Networking"]
+	path = Assets/Plugins/YARG.Networking
+	url = ..\\YARG.Networking
