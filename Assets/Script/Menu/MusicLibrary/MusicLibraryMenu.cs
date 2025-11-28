@@ -16,6 +16,7 @@ using YARG.Menu.ListMenu;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Multiplayer;
+using YARG.Networking.Abstraction;
 using YARG.Player;
 using YARG.Playlists;
 using YARG.Settings;
@@ -147,7 +148,7 @@ namespace YARG.Menu.MusicLibrary
             if (_songQueue == null)
             {
                 _songQueue = FindObjectOfType<YARG.Multiplayer.MultiplayerSongQueue>();
-                if (_songQueue == null && YARG.Networking.YargNetworkManager.Instance != null && YARG.Networking.YargNetworkManager.Instance.isNetworkActive)
+                if (_songQueue == null && NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive)
                 {
                     var go = new GameObject("MultiplayerSongQueue");
                     _songQueue = go.AddComponent<YARG.Multiplayer.MultiplayerSongQueue>();
@@ -231,7 +232,7 @@ namespace YARG.Menu.MusicLibrary
             SetNavigationScheme();
 
             // Initialize multiplayer show playlist if in multiplayer
-            if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
+            if (NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive)
             {
                 EnsureMultiplayerShowPlaylist();
             }
@@ -370,7 +371,7 @@ namespace YARG.Menu.MusicLibrary
             }
 
             // Check if we're in multiplayer mode
-            bool isMultiplayer = Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive;
+            bool isMultiplayer = NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive;
             
             if (ShowPlaylist.Count == 0)
             {
@@ -655,9 +656,10 @@ namespace YARG.Menu.MusicLibrary
             StemSettings.ApplySettings = true;
             
             // Sync menu navigation in multiplayer
-            if (Networking.YargNetworkManager.Instance != null && 
-                Networking.YargNetworkManager.Instance.isNetworkActive &&
-                Networking.YargNetworkManager.Instance.LocalUserIsHost())
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null && 
+                networkService.IsNetworkActive &&
+                networkService.IsHosting)
             {
                 Debug.Log("[MusicLibraryMenu] Host exiting library - syncing to clients");
                 Networking.YargNetworkManager.Instance.RequestSyncMenuNavigation(popMenu: true);
@@ -668,7 +670,7 @@ namespace YARG.Menu.MusicLibrary
                 if (MenuManager.Instance != null && !MenuManager.Instance.IsMenuInStack(MenuManager.Menu.LobbyRoom))
                 {
                     Debug.Log("[MusicLibraryMenu] LobbyRoom menu missing from stack - closing lobby directly");
-                    Networking.YargNetworkManager.Instance.LeaveLobby();
+                    networkService.LeaveLobby();
                 }
             }
             

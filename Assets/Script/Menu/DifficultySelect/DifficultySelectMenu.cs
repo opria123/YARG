@@ -18,6 +18,7 @@ using YARG.Localization;
 using YARG.Menu.Data;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
+using YARG.Networking.Abstraction;
 using YARG.Player;
 using YARG.Song;
 
@@ -157,7 +158,7 @@ namespace YARG.Menu.DifficultySelect
             }
             
             // Update multiplayer player list with delay to allow NetworkPlayerData objects to spawn
-            if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
+            if (NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive)
             {
                 StartCoroutine(DelayedUpdateMultiplayerPlayerList());
             }
