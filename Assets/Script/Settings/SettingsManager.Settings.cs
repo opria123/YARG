@@ -120,6 +120,12 @@ namespace YARG.Settings
 
             public IntSetting NetworkPort { get; } = new(7777, 1024, 65535, NetworkPortCallback);
 
+            /// <summary>
+            /// Feature flag to enable experimental LiteNet networking implementation.
+            /// When false (default), uses Mirror networking. When true, uses YARG.Networking (LiteNet).
+            /// </summary>
+            public ToggleSetting UseExperimentalNetworking { get; } = new(false);
+
             #endregion
 
             #region Songs
