@@ -4,6 +4,7 @@ using UnityEngine;
 using YARG.Core.Game;
 using YARG.Core.Logging;
 using YARG.Core.Song;
+using YARG.Networking.Abstraction;
 using YARG.Player;
 using YARG.Playlists;
 using YARG.Scores;
@@ -156,8 +157,8 @@ namespace YARG.Menu.MusicLibrary
             MusicLibraryMenu.ResetMainLibraryIndex();
 
             // Check if we're in multiplayer mode
-            bool isMultiplayer = YARG.Networking.YargNetworkManager.Instance != null && 
-                                 YARG.Networking.YargNetworkManager.Instance.isNetworkActive;
+            bool isMultiplayer = NetworkingServiceFactory.Instance != null && 
+                                 NetworkingServiceFactory.Instance.IsNetworkActive;
 
             if (isMultiplayer)
             {
@@ -220,8 +221,8 @@ namespace YARG.Menu.MusicLibrary
         public override void RemoveFromPlaylist(Playlist playlist)
         {
             // Check if we're in multiplayer mode and this is the show playlist
-            bool isMultiplayer = YARG.Networking.YargNetworkManager.Instance != null && 
-                                 YARG.Networking.YargNetworkManager.Instance.isNetworkActive;
+            bool isMultiplayer = NetworkingServiceFactory.Instance != null && 
+                                 NetworkingServiceFactory.Instance.IsNetworkActive;
 
             if (isMultiplayer && playlist.Ephemeral && _musicLibrary.ShowPlaylist == playlist)
             {

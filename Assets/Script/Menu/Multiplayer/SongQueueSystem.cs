@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using YARG.Core.Song;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -36,8 +37,8 @@ namespace YARG.Menu.Multiplayer
         public int QueueCount => _songQueue.Count;
         public bool IsPlayingSet => _isPlayingSet;
         public bool HasNextSong => _currentSongIndex < _songQueue.Count - 1;
-        public bool IsQueueMode => YargNetworkManager.Instance != null && 
-                                   YargNetworkManager.Instance.CurrentLobby != null;
+        public bool IsQueueMode => NetworkingServiceFactory.Instance != null && 
+                                   NetworkingServiceFactory.Instance.CurrentLobby != null;
 
         // Events
         public event System.Action OnQueueChanged;
@@ -61,17 +62,19 @@ namespace YARG.Menu.Multiplayer
         private void Start()
         {
             // Subscribe to network events
-            if (YargNetworkManager.Instance != null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null)
             {
-                YargNetworkManager.Instance.OnLobbyLeft += OnLobbyLeft;
+                networkService.OnLobbyLeft += OnLobbyLeft;
             }
         }
 
         private void OnDestroy()
         {
-            if (YargNetworkManager.Instance != null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null)
             {
-                YargNetworkManager.Instance.OnLobbyLeft -= OnLobbyLeft;
+                networkService.OnLobbyLeft -= OnLobbyLeft;
             }
 
             if (Instance == this)
@@ -94,7 +97,7 @@ namespace YARG.Menu.Multiplayer
             // Get current player name if not specified
             if (string.IsNullOrEmpty(playerName))
             {
-                playerName = YargNetworkManager.Instance?.CurrentLobby?.hostName ?? "Player";
+                playerName = NetworkingServiceFactory.Instance?.CurrentLobby?.HostName ?? "Player";
             }
 
             var queuedSong = new QueuedSong(song, playerName);
@@ -339,8 +342,8 @@ namespace YARG.Menu.Multiplayer
 
         private bool IsHost()
         {
-            return YargNetworkManager.Instance != null &&
-                   YargNetworkManager.Instance.LocalUserIsHost();
+            return NetworkingServiceFactory.Instance != null &&
+                   NetworkingServiceFactory.Instance.IsHosting;
         }
 
         private void OnLobbyLeft()

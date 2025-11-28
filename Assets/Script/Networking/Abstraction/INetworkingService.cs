@@ -45,6 +45,11 @@ namespace YARG.Networking.Abstraction
         bool IsDedicatedServer { get; }
 
         /// <summary>
+        /// Whether networking is active (hosting or connected to a lobby).
+        /// </summary>
+        bool IsNetworkActive { get; }
+
+        /// <summary>
         /// Whether the local player is connected to a remote lobby (not hosting).
         /// </summary>
         bool IsConnected { get; }

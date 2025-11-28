@@ -54,6 +54,8 @@ namespace YARG.Networking.Abstraction
 
         public bool IsDedicatedServer => _isDedicatedServer;
 
+        public bool IsNetworkActive => _isHosting || _isConnected;
+
         public bool IsConnected => _isConnected;
 
         public bool IsJoinInProgress => _isJoinInProgress;

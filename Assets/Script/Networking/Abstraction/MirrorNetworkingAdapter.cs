@@ -59,6 +59,8 @@ namespace YARG.Networking.Abstraction
 
         public bool IsDedicatedServer => _mirrorManager?.IsDedicatedServer ?? false;
 
+        public bool IsNetworkActive => _mirrorManager?.isNetworkActive ?? false;
+
         public bool IsConnected => _mirrorManager?.IsConnected ?? false;
 
         public bool IsJoinInProgress => _mirrorManager?.IsJoinInProgress ?? false;
