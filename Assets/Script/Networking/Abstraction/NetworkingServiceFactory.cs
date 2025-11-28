@@ -36,15 +36,17 @@ namespace YARG.Networking.Abstraction
                 return;
             }
 
-            // For now, always use Mirror adapter (Step 3 will implement this)
-            // In the future, this will check SettingsManager.Settings.UseExperimentalNetworking
-            _instance = CreateMirrorAdapter();
+            // Check feature flag to determine which implementation to use
+            bool useLiteNet = YARG.Settings.SettingsManager.Settings.UseExperimentalNetworking.Value;
+            
+            _instance = useLiteNet ? CreateLiteNetAdapter() : CreateMirrorAdapter();
             
             if (_instance != null)
             {
                 _instance.Initialize();
                 _isInitialized = true;
-                Debug.Log($"[NetworkingServiceFactory] Initialized with {_instance.GetType().Name}");
+                string implName = useLiteNet ? "LiteNet (Experimental)" : "Mirror";
+                Debug.Log($"[NetworkingServiceFactory] Initialized with {implName} implementation");
             }
             else
             {

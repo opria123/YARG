@@ -4,6 +4,7 @@ using TMPro;
 using YARG.Core.Input;
 using YARG.Core.Logging;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Localization;
@@ -27,12 +28,13 @@ namespace YARG.Menu.Multiplayer
         private void Start()
         {
             // Subscribe to network events
-            if (YargNetworkManager.Instance != null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null)
             {
-                YargNetworkManager.Instance.OnLobbyCreated += OnLobbyCreated;
-                YargNetworkManager.Instance.OnLobbyJoined += OnLobbyJoined;
-                YargNetworkManager.Instance.OnLobbyLeft += OnLobbyLeft;
-                YargNetworkManager.Instance.OnNetworkError += OnNetworkError;
+                networkService.OnLobbyCreated += OnLobbyCreated;
+                networkService.OnLobbyJoined += OnLobbyJoined;
+                networkService.OnLobbyLeft += OnLobbyLeft;
+                networkService.OnNetworkError += OnNetworkError;
             }
 
             UpdateConnectionStatus();
@@ -61,12 +63,13 @@ namespace YARG.Menu.Multiplayer
         private void OnDestroy()
         {
             // Unsubscribe from events
-            if (YargNetworkManager.Instance != null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null)
             {
-                YargNetworkManager.Instance.OnLobbyCreated -= OnLobbyCreated;
-                YargNetworkManager.Instance.OnLobbyJoined -= OnLobbyJoined;
-                YargNetworkManager.Instance.OnLobbyLeft -= OnLobbyLeft;
-                YargNetworkManager.Instance.OnNetworkError -= OnNetworkError;
+                networkService.OnLobbyCreated -= OnLobbyCreated;
+                networkService.OnLobbyJoined -= OnLobbyJoined;
+                networkService.OnLobbyLeft -= OnLobbyLeft;
+                networkService.OnNetworkError -= OnNetworkError;
             }
         }
 
@@ -109,9 +112,9 @@ namespace YARG.Menu.Multiplayer
             MenuManager.Instance.PopMenu();
         }
 
-        private void OnLobbyCreated(YargNetworkManager.LobbyInfo lobby)
+        private void OnLobbyCreated(LobbyInfo lobby)
         {
-            YargLogger.LogInfo($"[OnlineMultiplayerMenu] Lobby created: {lobby.lobbyName}");
+            YargLogger.LogInfo($"[OnlineMultiplayerMenu] Lobby created: {lobby.LobbyName}");
             UpdateConnectionStatus();
             
             // Don't show dialog or navigate here - the host's own OnLobbyJoined will handle it
@@ -120,7 +123,7 @@ namespace YARG.Menu.Multiplayer
 
         private bool _hasJoinedLobby = false;
 
-        private void OnLobbyJoined(YargNetworkManager.LobbyInfo lobby)
+        private void OnLobbyJoined(LobbyInfo lobby)
         {
             // Prevent multiple calls (Mirror can trigger this multiple times)
             if (_hasJoinedLobby)
@@ -130,7 +133,7 @@ namespace YARG.Menu.Multiplayer
             }
             
             _hasJoinedLobby = true;
-            YargLogger.LogInfo($"[OnlineMultiplayerMenu] Joined lobby: {lobby.lobbyName}");
+            YargLogger.LogInfo($"[OnlineMultiplayerMenu] Joined lobby: {lobby.LobbyName}");
             UpdateConnectionStatus();
             
             // Dismiss any connecting dialogs
@@ -177,14 +180,14 @@ namespace YARG.Menu.Multiplayer
         {
             if (connectionStatusText == null) return;
 
-            var networkManager = YargNetworkManager.Instance;
+            var networkService = NetworkingServiceFactory.Instance;
 
-            if (networkManager != null && networkManager.LocalUserIsHost())
+            if (networkService != null && networkService.IsHosting)
             {
                 connectionStatusText.text = Localize.Key("Menu", "LobbyBrowser", "StatusHosting");
                 connectionStatusText.color = Color.green;
             }
-            else if (networkManager != null && networkManager.CurrentLobby != null)
+            else if (networkService != null && networkService.CurrentLobby != null)
             {
                 // Check if we're connected by seeing if we have a current lobby
                 connectionStatusText.text = Localize.Key("Menu", "LobbyBrowser", "StatusConnected");
