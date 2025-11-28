@@ -107,9 +107,8 @@ namespace YARG.Networking.Abstraction
 
         private static INetworkingService CreateLiteNetAdapter()
         {
-            // Step 4 will implement this
-            Debug.LogWarning("[NetworkingServiceFactory] LiteNet adapter not yet implemented");
-            return null;
+            Debug.Log("[NetworkingServiceFactory] Creating LiteNetNetworkingAdapter");
+            return new LiteNetNetworkingAdapter();
         }
     }
 }
