@@ -4,6 +4,7 @@ using UnityEngine;
 using YARG.Core;
 using YARG.Core.Game;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Player;
 
 namespace YARG.Menu.Multiplayer
@@ -85,10 +86,25 @@ namespace YARG.Menu.Multiplayer
 
         private void RefreshNetworkState()
         {
-            var manager = YargNetworkManager.Instance;
             bool wasMultiplayer = _isMultiplayer;
             bool wasHost = _isHost;
+            
+            // Check LiteNet first
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
+            {
+                _isMultiplayer = true;
+                _isHost = liteNetAdapter.IsHosting;
 
+                if (!wasMultiplayer || wasHost != _isHost)
+                {
+                    Debug.Log($"[MultiplayerDifficultySync] Multiplayer active: {_isMultiplayer}, Host: {_isHost} (LiteNet)");
+                }
+                return;
+            }
+
+            // Fall back to Mirror
+            var manager = YargNetworkManager.Instance;
             if (manager != null && manager.isNetworkActive)
             {
                 _isMultiplayer = true;
@@ -170,7 +186,34 @@ namespace YARG.Menu.Multiplayer
                 GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay);
                 return;
             }
+            
+            // Check if using LiteNet
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
+            {
+                if (_isHost)
+                {
+                    // Host: check if all players are ready via LiteNet
+                    if (liteNetAdapter.AreAllPlayersReady())
+                    {
+                        Debug.Log("[MultiplayerDifficultySync] All players ready - starting gameplay via LiteNet");
+                        liteNetAdapter.StartGameplayForAll();
+                    }
+                    else
+                    {
+                        Debug.Log("[MultiplayerDifficultySync] Waiting for other players... (LiteNet)");
+                        OnWaitingForPlayers?.Invoke("Waiting for other players...");
+                    }
+                }
+                else
+                {
+                    Debug.Log("[MultiplayerDifficultySync] Client ready - waiting for host to start (LiteNet)");
+                    // Client waits for MSG_START_GAMEPLAY from host
+                }
+                return;
+            }
 
+            // Fall back to Mirror
             if (_isHost)
             {
                 // Host checks if all network players are ready

@@ -151,7 +151,10 @@ namespace YARG.Menu.DifficultySelect
             // Subscribe to network player ready events
             SubscribeToNetworkPlayerEvents();
             
-            // Subscribe to player left event to update player list
+            // Subscribe to LiteNet adapter events
+            SubscribeToLiteNetEvents();
+            
+            // Subscribe to player left event to update player list (Mirror)
             if (Networking.YargNetworkManager.Instance != null)
             {
                 Networking.YargNetworkManager.Instance.OnPlayerLeft += OnPlayerLeftLobby;
@@ -945,6 +948,9 @@ namespace YARG.Menu.DifficultySelect
             // Unsubscribe from network player events
             UnsubscribeFromNetworkPlayerEvents();
             
+            // Unsubscribe from LiteNet events
+            UnsubscribeFromLiteNetEvents();
+            
             // Clean up player entries
             foreach (var kvp in _playerEntries)
             {
@@ -1004,15 +1010,25 @@ namespace YARG.Menu.DifficultySelect
             var networkService = NetworkingServiceFactory.Instance;
             if (networkService != null && networkService.IsNetworkActive)
             {
-                var localNetworkPlayer = GetLocalNetworkPlayer(playerIndex);
-                if (localNetworkPlayer != null)
+                // Try LiteNet first
+                if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
                 {
-                    localNetworkPlayer.CmdSetReady(ready);
-                    Debug.Log($"[DifficultySelect] Set local player {playerIndex} ready state to: {ready}");
+                    liteNetAdapter.SetPlayerReady(ready);
+                    Debug.Log($"[DifficultySelect] Set local player {playerIndex} ready state to: {ready} (LiteNet)");
                 }
                 else
                 {
-                    Debug.LogWarning($"[DifficultySelect] Could not find local network player for index {playerIndex} to set ready state.");
+                    // Fall back to Mirror
+                    var localNetworkPlayer = GetLocalNetworkPlayer(playerIndex);
+                    if (localNetworkPlayer != null)
+                    {
+                        localNetworkPlayer.CmdSetReady(ready);
+                        Debug.Log($"[DifficultySelect] Set local player {playerIndex} ready state to: {ready} (Mirror)");
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[DifficultySelect] Could not find local network player for index {playerIndex} to set ready state.");
+                    }
                 }
             }
 
@@ -1092,8 +1108,7 @@ namespace YARG.Menu.DifficultySelect
             var networkService = NetworkingServiceFactory.Instance;
             if (networkService != null && networkService.IsNetworkActive)
             {
-                // Note: GetAllPlayers() is Mirror-specific, needs abstraction
-                var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+                var allPlayers = GetAllNetworkPlayers();
                 int readyCount = 0;
                 foreach (var p in allPlayers)
                 {
@@ -1134,8 +1149,7 @@ namespace YARG.Menu.DifficultySelect
                 return;
             }
             
-            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
-            var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+            var allPlayers = GetAllNetworkPlayers();
             int readyCount = 0;
             int totalCount = 0;
             int localPlayerCount = 0;
@@ -1312,8 +1326,7 @@ namespace YARG.Menu.DifficultySelect
                 return;
             }
             
-            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
-            var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+            var allPlayers = GetAllNetworkPlayers();
             foreach (var player in allPlayers)
             {
                 if (player != null)
@@ -1334,12 +1347,12 @@ namespace YARG.Menu.DifficultySelect
             }
             
             // Unsubscribe from player left event
-            if (networkService != null)
+            if (Networking.YargNetworkManager.Instance != null)
             {
                 Networking.YargNetworkManager.Instance.OnPlayerLeft -= OnPlayerLeftLobby;
             }
             
-            var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+            var allPlayers = GetAllNetworkPlayers();
             foreach (var player in allPlayers)
             {
                 if (player != null)
@@ -1349,6 +1362,75 @@ namespace YARG.Menu.DifficultySelect
                     player.OnDifficultyChangedEvent -= OnNetworkPlayerDifficultyChanged;
                 }
             }
+        }
+        
+        private void SubscribeToLiteNetEvents()
+        {
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                liteNetAdapter.OnPlayerReadyStateChanged += OnLiteNetPlayerReadyChanged;
+                liteNetAdapter.OnPlayerJoined += OnLiteNetPlayerJoined;
+                liteNetAdapter.OnPlayerLeft += OnLiteNetPlayerLeft;
+                liteNetAdapter.OnAllPlayersReady += OnLiteNetAllPlayersReady;
+                liteNetAdapter.OnStartGameplay += OnLiteNetStartGameplay;
+                Debug.Log("[DifficultySelectMenu] Subscribed to LiteNet events");
+            }
+        }
+        
+        private void UnsubscribeFromLiteNetEvents()
+        {
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                liteNetAdapter.OnPlayerReadyStateChanged -= OnLiteNetPlayerReadyChanged;
+                liteNetAdapter.OnPlayerJoined -= OnLiteNetPlayerJoined;
+                liteNetAdapter.OnPlayerLeft -= OnLiteNetPlayerLeft;
+                liteNetAdapter.OnAllPlayersReady -= OnLiteNetAllPlayersReady;
+                liteNetAdapter.OnStartGameplay -= OnLiteNetStartGameplay;
+            }
+        }
+        
+        private void OnLiteNetPlayerReadyChanged(string playerName, bool isReady)
+        {
+            Debug.Log($"[DifficultySelectMenu] LiteNet: Player '{playerName}' ready state changed to {isReady}");
+            UpdateReadyStatus();
+            UpdateMultiplayerPlayerList();
+            
+            // If current player is ready, refresh their UI to update the waiting message
+            if (_readyPlayerIndices.Contains(_playerIndex))
+            {
+                UpdateForPlayer();
+            }
+            
+            // Check if all players are ready and auto-start
+            CheckAndAutoStart();
+        }
+        
+        private void OnLiteNetPlayerJoined(Networking.NetworkPlayerData player)
+        {
+            Debug.Log($"[DifficultySelectMenu] LiteNet: Player joined: {player?.PlayerName}");
+            UpdateMultiplayerPlayerList();
+            UpdateReadyStatus();
+        }
+        
+        private void OnLiteNetPlayerLeft(Networking.NetworkPlayerData player)
+        {
+            Debug.Log($"[DifficultySelectMenu] LiteNet: Player left: {player?.PlayerName}");
+            UpdateMultiplayerPlayerList();
+            UpdateReadyStatus();
+        }
+        
+        private void OnLiteNetAllPlayersReady()
+        {
+            Debug.Log("[DifficultySelectMenu] LiteNet: All players ready!");
+            UpdateReadyStatus();
+        }
+        
+        private void OnLiteNetStartGameplay()
+        {
+            Debug.Log("[DifficultySelectMenu] LiteNet: Starting gameplay!");
+            // The LiteNet adapter handles the scene load
         }
         
         private void OnPlayerLeftLobby(Networking.NetworkPlayerData player)
@@ -1399,8 +1481,7 @@ namespace YARG.Menu.DifficultySelect
             }
             
             // Check if all players are ready
-            // Note: AreAllPlayersReady() is Mirror-specific, needs abstraction
-            if (Networking.YargNetworkManager.Instance.AreAllPlayersReady())
+            if (AreAllNetworkPlayersReady())
             {
                 if (_pendingGameplayStart)
                 {
@@ -1423,7 +1504,16 @@ namespace YARG.Menu.DifficultySelect
         {
             yield return new WaitForSeconds(1.0f);
             
-            // Start gameplay for all players
+            // Check if using LiteNet
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsHosting)
+            {
+                Debug.Log("[DifficultySelect] Starting gameplay for all players via LiteNet");
+                liteNetAdapter.StartGameplayForAll();
+                yield break;
+            }
+            
+            // Fall back to Mirror
             var manager = Networking.YargNetworkManager.Instance;
             if (manager == null)
             {
@@ -1470,8 +1560,7 @@ namespace YARG.Menu.DifficultySelect
             
             _multiplayerPlayerListContainer.SetActive(true);
             
-            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
-            var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+            var allPlayers = GetAllNetworkPlayers();
             Debug.Log($"[DifficultySelectMenu] Found {allPlayers.Count} players in network");
             var currentPlayers = new HashSet<Networking.NetworkPlayerData>(allPlayers.Where(p => p != null));
             
@@ -1884,8 +1973,7 @@ namespace YARG.Menu.DifficultySelect
                 return null;
             }
             
-            // Note: GetAllPlayers() is Mirror-specific, needs abstraction
-            var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+            var allPlayers = GetAllNetworkPlayers();
             foreach (var player in allPlayers)
             {
                 if (player != null && player.IsLocalUser && player.PlayerIndex == playerIndex)
@@ -1916,6 +2004,58 @@ namespace YARG.Menu.DifficultySelect
             }
 
             Debug.LogWarning("[DifficultySelect] No local host NetworkPlayerData found to issue start request");
+            return false;
+        }
+        
+        /// <summary>
+        /// Gets all network players from either Mirror or LiteNet depending on which is active.
+        /// </summary>
+        private List<Networking.NetworkPlayerData> GetAllNetworkPlayers()
+        {
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
+            {
+                return new List<Networking.NetworkPlayerData>();
+            }
+            
+            // Try LiteNet first (if it's the active implementation)
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                return liteNetAdapter.GetAllPlayers();
+            }
+            
+            // Fall back to Mirror
+            if (Networking.YargNetworkManager.Instance != null)
+            {
+                return Networking.YargNetworkManager.Instance.GetAllPlayers();
+            }
+            
+            return new List<Networking.NetworkPlayerData>();
+        }
+        
+        /// <summary>
+        /// Checks if all network players are ready.
+        /// </summary>
+        private bool AreAllNetworkPlayersReady()
+        {
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
+            {
+                return false;
+            }
+            
+            // Try LiteNet first
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                return liteNetAdapter.AreAllPlayersReady();
+            }
+            
+            // Fall back to Mirror
+            if (Networking.YargNetworkManager.Instance != null)
+            {
+                return Networking.YargNetworkManager.Instance.AreAllPlayersReady();
+            }
+            
             return false;
         }
     }

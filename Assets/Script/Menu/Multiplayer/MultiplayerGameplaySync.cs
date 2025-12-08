@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Mirror;
 using UnityEngine;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -45,6 +46,8 @@ namespace YARG.Menu.Multiplayer
             public readonly int SoloNotesHit;
             public readonly int SoloLastBonus;
             public readonly int SoloTotalBonus;
+            public readonly int SustainsHeld;
+            public readonly float WhammyValue;
             public readonly double SongTime;
             public readonly double ClientNetworkTime;
 
@@ -53,7 +56,7 @@ namespace YARG.Menu.Multiplayer
                 int hoposStrummed, int overhits, int ghostInputs, int ghostsHit, int accentsHit, int dynamicsBonus,
                 int bandBonusScore, int vocalsTicksHit, int vocalsTicksMissed, float vocalsPhraseTicksHit,
                 int vocalsPhraseTicksTotal, bool soloActive, int soloSequence, int soloNoteCount, int soloNotesHit,
-                int soloLastBonus, int soloTotalBonus, double songTime, double clientNetworkTime)
+                int soloLastBonus, int soloTotalBonus, int sustainsHeld, float whammyValue, double songTime, double clientNetworkTime)
             {
                 Score = score;
                 Combo = combo;
@@ -82,6 +85,8 @@ namespace YARG.Menu.Multiplayer
                 SoloNotesHit = soloNotesHit;
                 SoloLastBonus = soloLastBonus;
                 SoloTotalBonus = soloTotalBonus;
+                SustainsHeld = sustainsHeld;
+                WhammyValue = whammyValue;
                 SongTime = songTime;
                 ClientNetworkTime = clientNetworkTime;
             }
@@ -169,12 +174,28 @@ namespace YARG.Menu.Multiplayer
                     return true;
                 }
 
+                // Sustain state changed
+                if (SustainsHeld != other.SustainsHeld)
+                {
+                    return true;
+                }
+
+                // Whammy value changed (use small epsilon to avoid sending for tiny fluctuations)
+                if (Mathf.Abs(WhammyValue - other.WhammyValue) > 0.05f)
+                {
+                    return true;
+                }
+
                 return false;
             }
         }
 
         private bool _isMultiplayer;
+        private bool _useLiteNet;
+        private bool _firstSnapshotLogged;
+        private int _submitCallCount; // Debug counter
         private readonly Dictionary<NetworkPlayerData, SnapshotState> _snapshotStates = new();
+        private SnapshotState _liteNetFallbackState; // Used when NetworkPlayerData is null for LiteNet
 
         private sealed class SnapshotState
         {
@@ -185,8 +206,16 @@ namespace YARG.Menu.Multiplayer
 
         private void Start()
         {
-            // Check if we're in multiplayer mode
-            if (YargNetworkManager.Instance == null || !YargNetworkManager.Instance.isNetworkActive)
+            // Check if we're in multiplayer mode (either Mirror or LiteNet)
+            // NOTE: Check LiteNet first - if LiteNet is active, consider Mirror inactive
+            // This prevents false positives from Mirror singleton existing in scene
+            bool isLiteNetActive = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            // Only consider Mirror active if LiteNet is NOT active
+            bool isMirrorActive = !isLiteNetActive && 
+                                  YargNetworkManager.Instance != null && 
+                                  YargNetworkManager.Instance.isNetworkActive;
+            
+            if (!isMirrorActive && !isLiteNetActive)
             {
                 _isMultiplayer = false;
                 Destroy(this);
@@ -194,7 +223,18 @@ namespace YARG.Menu.Multiplayer
             }
 
             _isMultiplayer = true;
+            _useLiteNet = isLiteNetActive; // If LiteNet is active, use it (Mirror check now excludes LiteNet)
 
+            if (_useLiteNet)
+            {
+                // For LiteNet, we don't need to validate NetworkPlayerData here since
+                // the adapter manages players differently
+                Debug.Log("[MultiplayerGameplaySync] Initialized for LiteNet - using local authority gameplay snapshots");
+                ResetSnapshotCache();
+                return;
+            }
+
+            // Mirror path - validate players
             var allPlayers = YargNetworkManager.Instance.GetAllPlayers();
             bool foundLocalPlayer = false;
 
@@ -216,7 +256,7 @@ namespace YARG.Menu.Multiplayer
 
             ResetSnapshotCache();
 
-            Debug.Log("[MultiplayerGameplaySync] Initialized - using local authority gameplay snapshots");
+            Debug.Log("[MultiplayerGameplaySync] Initialized (Mirror) - using local authority gameplay snapshots");
         }
 
         private void ResetSnapshotCache()
@@ -244,14 +284,58 @@ namespace YARG.Menu.Multiplayer
             int hoposStrummed, int overhits, int ghostInputs, int ghostsHit, int accentsHit, int dynamicsBonus,
             int bandBonusScore, int vocalsTicksHit, int vocalsTicksMissed, float vocalsPhraseTicksHit,
             int vocalsPhraseTicksTotal, bool soloActive, int soloSequence, int soloNoteCount, int soloNotesHit,
-            int soloLastBonus, int soloTotalBonus, double songTime, double clientNetworkTime, bool forceSend = false)
+            int soloLastBonus, int soloTotalBonus, int sustainsHeld, float whammyValue, double songTime, double clientNetworkTime, bool forceSend = false)
         {
-            if (!_isMultiplayer || networkPlayerData == null || !networkPlayerData.IsLocalUser)
+            _submitCallCount++;
+            
+            // First-call debug and periodic trace
+            if (!_firstSnapshotLogged)
+            {
+                Debug.Log($"[MultiplayerGameplaySync] SubmitLocalSnapshot called first time - _isMultiplayer={_isMultiplayer}, _useLiteNet={_useLiteNet}, networkPlayerData={(networkPlayerData != null ? networkPlayerData.PlayerName : "null")}");
+                _firstSnapshotLogged = true;
+            }
+            else if (_submitCallCount % 300 == 0)
+            {
+                // Log every 300 calls (~5 seconds at 60fps)
+                Debug.Log($"[MultiplayerGameplaySync] SubmitLocalSnapshot call #{_submitCallCount} - score={score}, combo={combo}, notesHit={notesHit}, songTime={songTime:F2}");
+            }
+            
+            if (!_isMultiplayer)
+            {
+                return;
+            }
+            
+            // For LiteNet, we don't require NetworkPlayerData - we just send the snapshot
+            // For Mirror, we need valid NetworkPlayerData with IsLocalUser
+            bool skipDueToNetworkData = false;
+            if (_useLiteNet)
+            {
+                // Continue with LiteNet path - networkPlayerData might be null and that's OK
+            }
+            else if (networkPlayerData == null || !networkPlayerData.IsLocalUser)
+            {
+                skipDueToNetworkData = true;
+            }
+            
+            if (skipDueToNetworkData)
             {
                 return;
             }
 
-            var state = GetOrCreateState(networkPlayerData);
+            // Get snapshot state - use fallback for LiteNet when NetworkPlayerData is null
+            SnapshotState state;
+            if (_useLiteNet && networkPlayerData == null)
+            {
+                if (_liteNetFallbackState == null)
+                {
+                    _liteNetFallbackState = new SnapshotState();
+                }
+                state = _liteNetFallbackState;
+            }
+            else
+            {
+                state = GetOrCreateState(networkPlayerData);
+            }
 
             int sanitizedScore = Math.Max(0, score);
             int sanitizedCombo = Math.Max(0, combo);
@@ -322,6 +406,7 @@ namespace YARG.Menu.Multiplayer
             }
 
             float clampedStarPower = Mathf.Clamp01(starPowerAmount);
+            float clampedWhammy = Mathf.Clamp01(whammyValue);
 
             var snapshot = new GameplaySnapshot(sanitizedScore, sanitizedCombo, sanitizedStreak, starPowerActive,
                 clampedStarPower, sanitizedStarPowerPhrasesHit, sanitizedTotalStarPowerPhrases, sanitizedNotesHit,
@@ -330,9 +415,10 @@ namespace YARG.Menu.Multiplayer
                 sanitizedBandBonusScore, sanitizedVocalsTicksHit, sanitizedVocalsTicksMissed,
                 sanitizedVocalsPhraseTicksHit, sanitizedVocalsPhraseTicksTotal, soloActive, sanitizedSoloSequence,
                 sanitizedSoloNoteCount, sanitizedSoloNotesHit, sanitizedSoloLastBonus, sanitizedSoloTotalBonus,
-                songTime, clientNetworkTime);
+                sustainsHeld, clampedWhammy, songTime, clientNetworkTime);
 
             bool shouldSend = forceSend || !state.HasLastSnapshot;
+            string rateLimitReason = "";
 
             if (!shouldSend && state.HasLastSnapshot)
             {
@@ -342,28 +428,70 @@ namespace YARG.Menu.Multiplayer
                 if (changed)
                 {
                     shouldSend = elapsed >= MIN_CHANGED_SNAPSHOT_INTERVAL;
+                    if (!shouldSend) rateLimitReason = $"changed but elapsed={elapsed:F3}<{MIN_CHANGED_SNAPSHOT_INTERVAL}";
                 }
                 else
                 {
                     shouldSend = elapsed >= MAX_UNCHANGED_SNAPSHOT_INTERVAL;
+                    if (!shouldSend) rateLimitReason = $"unchanged elapsed={elapsed:F3}<{MAX_UNCHANGED_SNAPSHOT_INTERVAL}";
                 }
             }
 
             if (!shouldSend)
             {
+                // Log occasionally when rate limited
+                if (_submitCallCount % 600 == 0 && !string.IsNullOrEmpty(rateLimitReason))
+                {
+                    Debug.Log($"[MultiplayerGameplaySync] Snapshot rate-limited (call #{_submitCallCount}): {rateLimitReason}");
+                }
                 return;
             }
 
             state.Sequence++;
-            networkPlayerData.CmdSubmitGameplaySnapshot(snapshot.Score, snapshot.Combo, snapshot.Streak,
-                snapshot.StarPowerActive, snapshot.StarPowerAmount, snapshot.StarPowerPhrasesHit,
-                snapshot.TotalStarPowerPhrases, snapshot.NotesHit, snapshot.NotesMissed, snapshot.Overstrums,
-                snapshot.HoposStrummed, snapshot.Overhits, snapshot.GhostInputs, snapshot.GhostsHit,
-                snapshot.AccentsHit, snapshot.DynamicsBonus, snapshot.BandBonusScore, snapshot.VocalsTicksHit,
-                snapshot.VocalsTicksMissed, snapshot.VocalsPhraseTicksHit, snapshot.VocalsPhraseTicksTotal,
-                snapshot.SoloActive, snapshot.SoloSequence, snapshot.SoloNoteCount, snapshot.SoloNotesHit,
-                snapshot.SoloLastBonus, snapshot.SoloTotalBonus, snapshot.SongTime, snapshot.ClientNetworkTime,
-                state.Sequence);
+            
+            // Send via LiteNet if active, otherwise use Mirror
+            if (_useLiteNet)
+            {
+                var liteNetAdapter = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
+                if (liteNetAdapter != null)
+                {
+                    // Debug log first snapshot and then periodically
+                    if (state.Sequence == 1 || state.Sequence % 60 == 0)
+                    {
+                        Debug.Log($"[MultiplayerGameplaySync] Sending LiteNet snapshot #{state.Sequence} (score={snapshot.Score}, combo={snapshot.Combo}, notesHit={snapshot.NotesHit}, songTime={snapshot.SongTime:F2})");
+                    }
+                    
+                    liteNetAdapter.SendGameplaySnapshot(
+                        snapshot.Score, snapshot.Combo, snapshot.Streak,
+                        snapshot.StarPowerActive, snapshot.StarPowerAmount,
+                        snapshot.StarPowerPhrasesHit, snapshot.TotalStarPowerPhrases,
+                        snapshot.NotesHit, snapshot.NotesMissed,
+                        snapshot.Overstrums, snapshot.HoposStrummed, snapshot.Overhits, snapshot.GhostInputs,
+                        snapshot.GhostsHit, snapshot.AccentsHit, snapshot.DynamicsBonus, snapshot.BandBonusScore,
+                        snapshot.VocalsTicksHit, snapshot.VocalsTicksMissed,
+                        snapshot.VocalsPhraseTicksHit, snapshot.VocalsPhraseTicksTotal,
+                        snapshot.SoloActive, snapshot.SoloSequence, snapshot.SoloNoteCount, snapshot.SoloNotesHit,
+                        snapshot.SoloLastBonus, snapshot.SoloTotalBonus,
+                        snapshot.SustainsHeld, snapshot.WhammyValue,
+                        snapshot.SongTime);
+                }
+                else
+                {
+                    Debug.LogWarning("[MultiplayerGameplaySync] LiteNet adapter is null!");
+                }
+            }
+            else
+            {
+                networkPlayerData.CmdSubmitGameplaySnapshot(snapshot.Score, snapshot.Combo, snapshot.Streak,
+                    snapshot.StarPowerActive, snapshot.StarPowerAmount, snapshot.StarPowerPhrasesHit,
+                    snapshot.TotalStarPowerPhrases, snapshot.NotesHit, snapshot.NotesMissed, snapshot.Overstrums,
+                    snapshot.HoposStrummed, snapshot.Overhits, snapshot.GhostInputs, snapshot.GhostsHit,
+                    snapshot.AccentsHit, snapshot.DynamicsBonus, snapshot.BandBonusScore, snapshot.VocalsTicksHit,
+                    snapshot.VocalsTicksMissed, snapshot.VocalsPhraseTicksHit, snapshot.VocalsPhraseTicksTotal,
+                    snapshot.SoloActive, snapshot.SoloSequence, snapshot.SoloNoteCount, snapshot.SoloNotesHit,
+                    snapshot.SoloLastBonus, snapshot.SoloTotalBonus, snapshot.SongTime, snapshot.ClientNetworkTime,
+                    state.Sequence);
+            }
 
             state.LastSnapshot = snapshot;
             state.HasLastSnapshot = true;

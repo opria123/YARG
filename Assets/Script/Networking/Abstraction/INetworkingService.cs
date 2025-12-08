@@ -145,6 +145,38 @@ namespace YARG.Networking.Abstraction
         Task<LobbyInfo?> ProbeLobby(string address, int port);
 
         #endregion
+        
+        #region Discovery
+
+        /// <summary>
+        /// Start discovery to find lobbies on the network.
+        /// </summary>
+        void StartDiscovery();
+        
+        /// <summary>
+        /// Stop discovery.
+        /// </summary>
+        void StopDiscovery();
+        
+        /// <summary>
+        /// Send a discovery request to a specific address and port.
+        /// </summary>
+        /// <param name="address">IP address or hostname</param>
+        /// <param name="port">Port number (0 to use default)</param>
+        void SendDiscoveryRequest(string address, int port = 0);
+        
+        /// <summary>
+        /// Configure the discovery port.
+        /// </summary>
+        /// <param name="port">The port to use for discovery (same as game port for single-port forwarding)</param>
+        void SetDiscoveryPort(int port);
+        
+        /// <summary>
+        /// Get the current discovery port.
+        /// </summary>
+        int DiscoveryPort { get; }
+
+        #endregion
 
         #region Player Management
 
@@ -157,6 +189,48 @@ namespace YARG.Networking.Abstraction
         /// Get all connected players with their data.
         /// </summary>
         Dictionary<object, List<NetworkPlayerData>> GetConnectedPlayers();
+
+        /// <summary>
+        /// Kick a player from the lobby (host only).
+        /// </summary>
+        /// <param name="playerData">The player to kick</param>
+        void KickPlayer(NetworkPlayerData playerData);
+
+        /// <summary>
+        /// Get all players in the lobby (flattened list from all connections).
+        /// </summary>
+        /// <returns>List of all NetworkPlayerData</returns>
+        List<NetworkPlayerData> GetAllPlayers();
+
+        /// <summary>
+        /// Get the local player data.
+        /// </summary>
+        /// <returns>The local player's NetworkPlayerData, or null if not available</returns>
+        NetworkPlayerData GetLocalPlayer();
+
+        /// <summary>
+        /// Set the local player's ready state.
+        /// </summary>
+        /// <param name="isReady">Ready state to set</param>
+        void SetPlayerReady(bool isReady);
+
+        /// <summary>
+        /// Check if all players in the lobby are ready.
+        /// </summary>
+        /// <returns>True if all players are ready</returns>
+        bool AreAllPlayersReady();
+
+        /// <summary>
+        /// Reset all players' ready states to false without firing events.
+        /// Used when entering score screen to ensure clean state before subscribing to events.
+        /// </summary>
+        void ResetAllPlayersReadyState();
+
+        /// <summary>
+        /// Event fired when any player's ready state changes.
+        /// Parameters: playerName, isReady
+        /// </summary>
+        event Action<string, bool> OnPlayerReadyStateChanged;
 
         #endregion
 
@@ -176,6 +250,12 @@ namespace YARG.Networking.Abstraction
         /// Begin multiplayer gameplay for the selected song.
         /// </summary>
         void StartMultiplayerGameplay();
+
+        /// <summary>
+        /// Advance from the score screen after all players are ready.
+        /// Called by host to proceed to next song or back to lobby.
+        /// </summary>
+        void AdvanceAfterScoreScreen();
 
         #endregion
 

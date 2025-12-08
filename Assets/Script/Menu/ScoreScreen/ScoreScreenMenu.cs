@@ -20,6 +20,7 @@ using YARG.Core.Song;
 using YARG.Localization;
 using YARG.Networking;
 using YARG.Networking.Abstraction;
+using YARG.Net.Sessions;
 using YARG.Menu.MusicLibrary;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
@@ -80,6 +81,20 @@ namespace YARG.Menu.ScoreScreen
         private NetworkPlayerData _localNetworkPlayer;
         private readonly List<NetworkPlayerData> _networkPlayers = new();
         private TextMeshProUGUI _readyStatusLabel;
+        
+        // Track received remote player score results
+        private readonly Dictionary<string, RemotePlayerScoreResult> _remoteScoreResults = new();
+        
+        private struct RemotePlayerScoreResult
+        {
+            public string PlayerName;
+            public bool IsHighScore;
+            public bool IsFullCombo;
+            public int Score;
+            public int MaxCombo;
+            public int NotesHit;
+            public int NotesMissed;
+        }
 
         private void OnEnable()
         {
@@ -94,11 +109,18 @@ namespace YARG.Menu.ScoreScreen
             }
 
             var scoreScreenStats = GlobalVariables.State.ScoreScreenStats.Value;
+            
+            // Subscribe to remote score results for LiteNet multiplayer
+            SubscribeToRemoteScoreResults();
 
 #if UNITY_EDITOR || YARG_NIGHTLY_BUILD || YARG_TEST_BUILD
             // Do analysis of replay before showing any score data
             // This will make it so that if the analysis takes a while the screen is blank
             // (kinda like a loading screen)
+            // 
+            // NOTE: In multiplayer, unison bonuses are coordinated across the network,
+            // so the replay analysis (which uses a single EngineManager for all players)
+            // should produce consistent results with networked gameplay.
             try
             {
                 if (!AnalyzeReplay(song, scoreScreenStats.ReplayInfo))
@@ -145,6 +167,9 @@ namespace YARG.Menu.ScoreScreen
 
             // Put the scores in!
             CreateScoreCards(scoreScreenStats);
+            
+            // Apply any remote score results that were received before/during card creation
+            ApplyStoredRemoteScoreResults();
 
             _sourceIcon.sprite = SongSources.SourceToIcon(song.Source);
 
@@ -157,6 +182,8 @@ namespace YARG.Menu.ScoreScreen
         private void OnDisable()
         {
             CleanupMultiplayerReady();
+            UnsubscribeFromRemoteScoreResults();
+            _remoteScoreResults.Clear();
 
             MusicLibraryMenu.CurrentlyPlaying = GlobalVariables.State.CurrentSong;
             if (!GlobalVariables.State.PlayingAShow && !_restartingSong)
@@ -502,8 +529,15 @@ namespace YARG.Menu.ScoreScreen
 
             _networkPlayers.Clear();
 
-            // Note: GetAllPlayers() is still Mirror-specific, needs abstraction
-            var players = YargNetworkManager.Instance.GetAllPlayers();
+            // CRITICAL: Reset all player ready states BEFORE subscribing to events
+            // This prevents stale ready states from immediately triggering the all-ready check
+            // when events are subscribed. Without this, players who were ready in difficulty select
+            // would still appear ready when entering the score screen.
+            Debug.Log("[ScoreScreenMenu] InitializeMultiplayerReady - resetting all player ready states before subscribing");
+            networkService.ResetAllPlayersReadyState();
+
+            // Use abstraction layer for getting all players
+            var players = networkService.GetAllPlayers();
             foreach (var player in players)
             {
                 if (player == null)
@@ -520,10 +554,8 @@ namespace YARG.Menu.ScoreScreen
                 }
             }
 
-            if (_localNetworkPlayer != null && _localNetworkPlayer.IsReady)
-            {
-                _localNetworkPlayer.CmdSetReady(false);
-            }
+            // No need to explicitly set local player to not-ready since we just reset everyone above
+            // This also avoids firing an event that could cause issues
 
             CreateReadyStatusLabel();
             UpdateReadyStatusLabel();
@@ -562,6 +594,240 @@ namespace YARG.Menu.ScoreScreen
                 _readyStatusLabel = null;
             }
         }
+        
+        #region Remote Score Results
+        
+        private LiteNetNetworkingAdapter _liteNetAdapter;
+        
+        private void SubscribeToRemoteScoreResults()
+        {
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
+            {
+                return;
+            }
+            
+            _liteNetAdapter = networkService as LiteNetNetworkingAdapter;
+            if (_liteNetAdapter != null)
+            {
+                _liteNetAdapter.OnScoreResultsReceived += HandleRemoteScoreResults;
+                
+                // Process any cached results that arrived before we subscribed
+                // (score results are often sent during scene transition before the score screen loads)
+                var cachedResults = _liteNetAdapter.GetCachedScoreResults();
+                foreach (var kvp in cachedResults)
+                {
+                    var result = kvp.Value;
+                    Debug.Log($"[ScoreScreenMenu] Processing cached score result: player={kvp.Key}, highScore={result.IsHighScore}, FC={result.IsFullCombo}");
+                    HandleRemoteScoreResults(kvp.Key, result.IsHighScore, result.IsFullCombo, result.Score, result.MaxCombo, result.NotesHit, result.NotesMissed);
+                }
+            }
+        }
+        
+        private void UnsubscribeFromRemoteScoreResults()
+        {
+            if (_liteNetAdapter != null)
+            {
+                _liteNetAdapter.OnScoreResultsReceived -= HandleRemoteScoreResults;
+                _liteNetAdapter = null;
+            }
+        }
+        
+        private void HandleRemoteScoreResults(string playerName, bool isHighScore, bool isFullCombo, int score, int maxCombo, int notesHit, int notesMissed)
+        {
+            Debug.Log($"[ScoreScreenMenu] Received remote score results: player={playerName}, highScore={isHighScore}, FC={isFullCombo}, score={score}");
+            
+            // Store the result for any late-arriving data
+            _remoteScoreResults[playerName] = new RemotePlayerScoreResult
+            {
+                PlayerName = playerName,
+                IsHighScore = isHighScore,
+                IsFullCombo = isFullCombo,
+                Score = score,
+                MaxCombo = maxCombo,
+                NotesHit = notesHit,
+                NotesMissed = notesMissed
+            };
+            
+            // Update the score card for this player if it already exists
+            UpdateScoreCardForRemotePlayer(playerName, isHighScore, isFullCombo);
+        }
+        
+        /// <summary>
+        /// Updates an existing score card with remote player achievement data.
+        /// </summary>
+        private void UpdateScoreCardForRemotePlayer(string playerName, bool isHighScore, bool isFullCombo)
+        {
+            foreach (var card in _scoreCards)
+            {
+                if (card.Player?.Profile?.Name == playerName)
+                {
+                    // Skip cards that belong to local players - they already have correct data from local gameplay.
+                    // Remote players have no bindings (null), while local players have bindings assigned.
+                    // This check is critical when players have the same name (e.g., same profile on different machines).
+                    if (card.Player.Bindings != null)
+                    {
+                        Debug.Log($"[ScoreScreenMenu] Skipping score card for '{playerName}' - this is a local player (has bindings)");
+                        continue;
+                    }
+                    
+                    // Found a remote player's card - update its display
+                    Debug.Log($"[ScoreScreenMenu] Updating score card for remote player '{playerName}': highScore={isHighScore}, FC={isFullCombo}");
+                    
+                    // Get the underlying MonoBehaviour to access the colorizer and tag
+                    var cardComponent = card as MonoBehaviour;
+                    Debug.Log($"[ScoreScreenMenu] cardComponent as MonoBehaviour: {(cardComponent != null ? cardComponent.name : "NULL")}");
+                    
+                    if (cardComponent != null)
+                    {
+                        var colorizer = cardComponent.GetComponent<ScoreCardColorizer>();
+                        Debug.Log($"[ScoreScreenMenu] colorizer found: {colorizer != null}");
+                        
+                        if (colorizer != null)
+                        {
+                            // Update the card appearance based on achievements
+                            // Use hardcoded strings to match local player ScoreCard behavior
+                            if (isFullCombo)
+                            {
+                                Debug.Log($"[ScoreScreenMenu] Setting card color to GOLD for FC");
+                                colorizer.SetCardColor(ScoreCardColorizer.ScoreCardColor.Gold);
+                                SetScoreCardTag(cardComponent, "Full Combo");
+                            }
+                            else if (isHighScore)
+                            {
+                                Debug.Log($"[ScoreScreenMenu] Setting card color to BLUE for high score");
+                                colorizer.SetCardColor(ScoreCardColorizer.ScoreCardColor.Blue);
+                                SetScoreCardTag(cardComponent, "High Score");
+                            }
+                            else
+                            {
+                                Debug.Log($"[ScoreScreenMenu] No special achievement, not updating card appearance");
+                            }
+                        }
+                        else
+                        {
+                            Debug.LogWarning($"[ScoreScreenMenu] ScoreCardColorizer not found on card component!");
+                        }
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[ScoreScreenMenu] Card could not be cast to MonoBehaviour!");
+                    }
+                    // Found and updated the remote player's card - done
+                    return;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Sets the tag text on a score card via reflection since the method is private.
+        /// </summary>
+        private void SetScoreCardTag(MonoBehaviour cardComponent, string tagText)
+        {
+            Debug.Log($"[ScoreScreenMenu] SetScoreCardTag called with tagText='{tagText}'");
+            
+            // Try to find and invoke the ShowTag method via reflection
+            // The method is defined in ScoreCard<T> base class
+            System.Reflection.MethodInfo showTagMethod = null;
+            
+            var currentType = cardComponent.GetType();
+            while (currentType != null && currentType != typeof(MonoBehaviour))
+            {
+                Debug.Log($"[ScoreScreenMenu] Searching type for ShowTag: {currentType.Name}");
+                
+                showTagMethod = currentType.GetMethod("ShowTag", 
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+                
+                if (showTagMethod != null)
+                {
+                    Debug.Log($"[ScoreScreenMenu] Found ShowTag method in type: {currentType.Name}");
+                    break;
+                }
+                
+                currentType = currentType.BaseType;
+            }
+            
+            if (showTagMethod != null)
+            {
+                try
+                {
+                    showTagMethod.Invoke(cardComponent, new object[] { tagText });
+                    Debug.Log($"[ScoreScreenMenu] Successfully invoked ShowTag with '{tagText}'");
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogError($"[ScoreScreenMenu] Failed to invoke ShowTag: {ex.Message}");
+                }
+            }
+            else
+            {
+                Debug.LogWarning($"[ScoreScreenMenu] Could not find ShowTag method via reflection");
+                
+                // Fallback: try to access the fields directly
+                System.Reflection.FieldInfo tagField = null;
+                System.Reflection.FieldInfo tagTextField = null;
+                
+                currentType = cardComponent.GetType();
+                while (currentType != null && currentType != typeof(MonoBehaviour))
+                {
+                    tagField = currentType.GetField("_tagGameObject", 
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+                    tagTextField = currentType.GetField("_tagText", 
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+                    
+                    if (tagField != null && tagTextField != null)
+                        break;
+                    
+                    currentType = currentType.BaseType;
+                }
+                
+                if (tagField != null && tagTextField != null)
+                {
+                    var tagObject = tagField.GetValue(cardComponent) as GameObject;
+                    var tagTextComponent = tagTextField.GetValue(cardComponent) as TextMeshProUGUI;
+                    
+                    if (tagObject != null && tagTextComponent != null)
+                    {
+                        tagObject.SetActive(true);
+                        tagTextComponent.text = tagText;
+                        Debug.Log($"[ScoreScreenMenu] Successfully set tag via field access to '{tagText}'");
+                    }
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Checks if we have received high score/FC data for a remote player.
+        /// </summary>
+        public bool TryGetRemoteScoreResult(string playerName, out bool isHighScore, out bool isFullCombo)
+        {
+            if (_remoteScoreResults.TryGetValue(playerName, out var result))
+            {
+                isHighScore = result.IsHighScore;
+                isFullCombo = result.IsFullCombo;
+                return true;
+            }
+            
+            isHighScore = false;
+            isFullCombo = false;
+            return false;
+        }
+        
+        /// <summary>
+        /// Applies all stored remote score results to the score cards.
+        /// Called after score cards are created to update their appearance.
+        /// </summary>
+        private void ApplyStoredRemoteScoreResults()
+        {
+            foreach (var kvp in _remoteScoreResults)
+            {
+                var result = kvp.Value;
+                Debug.Log($"[ScoreScreenMenu] Applying stored remote score result: player={result.PlayerName}, highScore={result.IsHighScore}, FC={result.IsFullCombo}");
+                UpdateScoreCardForRemotePlayer(result.PlayerName, result.IsHighScore, result.IsFullCombo);
+            }
+        }
+        
+        #endregion
 
         private void CreateReadyStatusLabel()
         {
@@ -642,13 +908,21 @@ namespace YARG.Menu.ScoreScreen
                 return;
             }
 
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null)
+            {
+                return;
+            }
+
             bool targetState = !_localNetworkPlayer.IsReady;
-            _localNetworkPlayer.CmdSetReady(targetState);
+            networkService.SetPlayerReady(targetState);
             UpdateNavigationScheme(true);
         }
 
-        private void HandleReadyStateChanged(bool _)
+        private void HandleReadyStateChanged(bool newReadyState)
         {
+            Debug.Log($"[ScoreScreenMenu] HandleReadyStateChanged called with newReadyState={newReadyState}, _isMultiplayer={_isMultiplayer}, _isHost={_isHost}, _advancing={_advancing}");
+            
             if (!_isMultiplayer)
             {
                 return;
@@ -657,25 +931,31 @@ namespace YARG.Menu.ScoreScreen
             UpdateReadyStatusLabel();
             UpdateNavigationScheme(true);
 
-            if (!_isHost || _advancing || YargNetworkManager.Instance == null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (!_isHost || _advancing || networkService == null)
             {
+                Debug.Log($"[ScoreScreenMenu] HandleReadyStateChanged early return - isHost={_isHost}, advancing={_advancing}, networkService null={networkService == null}");
                 return;
             }
 
-            if (YargNetworkManager.Instance.AreAllPlayersReady())
+            // Only check if all players are ready when someone BECOMES ready
+            // If someone went to not-ready (newReadyState == false), don't bother checking
+            if (!newReadyState)
+            {
+                Debug.Log($"[ScoreScreenMenu] HandleReadyStateChanged - player went to not-ready, skipping all-ready check");
+                return;
+            }
+
+            bool allReady = networkService.AreAllPlayersReady();
+            Debug.Log($"[ScoreScreenMenu] HandleReadyStateChanged - AreAllPlayersReady returned {allReady}");
+            
+            if (allReady)
             {
                 _advancing = true;
                 ToastManager.ToastSuccess(Localize.Key("Menu.ScoreScreen.AllReady"));
 
-                if (NetworkServer.active)
-                {
-                    YargNetworkManager.Instance.AdvanceAfterScoreScreen();
-                }
-                else if (!RequestServerAdvanceAfterScore())
-                {
-                    Debug.LogWarning("[ScoreScreenMenu] Failed to relay score advance request to server");
-                    _advancing = false;
-                }
+                // Use abstraction layer to advance - it handles both Mirror and LiteNet
+                networkService.AdvanceAfterScoreScreen();
             }
         }
 
@@ -728,27 +1008,6 @@ namespace YARG.Menu.ScoreScreen
             buttons.Add(_scrollDownEntry);
 
             Navigator.Instance.PushScheme(new(buttons, true));
-        }
-
-        private bool RequestServerAdvanceAfterScore()
-        {
-            if (YargNetworkManager.Instance == null)
-            {
-                return false;
-            }
-
-            foreach (var player in YargNetworkManager.Instance.GetAllPlayers())
-            {
-                if (player != null && player.IsLocalUser && player.IsHost)
-                {
-                    Debug.Log("[ScoreScreenMenu] Requesting dedicated server to advance after score");
-                    player.CmdRequestAdvanceAfterScore();
-                    return true;
-                }
-            }
-
-            Debug.LogWarning("[ScoreScreenMenu] No local host NetworkPlayerData found to advance after score");
-            return false;
         }
     }
 }

@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using System.Collections.Generic;
 using YARG.Core;
 
@@ -30,8 +31,14 @@ namespace YARG.Gameplay.HUD
 
         private void Start()
         {
-            // Check if we're in multiplayer mode
-            if (YargNetworkManager.Instance == null || !YargNetworkManager.Instance.isNetworkActive)
+            // Check if we're in multiplayer mode (LiteNet or Mirror)
+            // NOTE: Check LiteNet first - if LiteNet is active, consider Mirror inactive
+            bool isLiteNetActive = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            bool isMirrorActive = !isLiteNetActive && 
+                                  YargNetworkManager.Instance != null && 
+                                  YargNetworkManager.Instance.isNetworkActive;
+            
+            if (!isLiteNetActive && !isMirrorActive)
             {
                 _isMultiplayer = false;
                 if (multiplayerPanel != null)
@@ -47,9 +54,17 @@ namespace YARG.Gameplay.HUD
                 multiplayerPanel.SetActive(true);
             }
 
-            Debug.Log("[MultiplayerHUD] Initializing multiplayer HUD");
+            // For LiteNet, the HUD works differently (we use player simulations)
+            // Only initialize Mirror-style HUD for Mirror
+            if (isLiteNetActive)
+            {
+                Debug.Log("[MultiplayerHUD] LiteNet mode - using player simulation for remote displays");
+                return;
+            }
 
-            // Create displays for all players
+            Debug.Log("[MultiplayerHUD] Mirror mode - initializing multiplayer HUD");
+
+            // Create displays for all players (Mirror only)
             RefreshPlayerList();
         }
 

@@ -7,6 +7,7 @@ using YARG.Core.Engine.Guitar;
 using YARG.Core.Engine.Keys;
 using YARG.Core.Engine.Vocals;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Gameplay.Player
 {
@@ -36,6 +37,8 @@ namespace YARG.Gameplay.Player
         private uint _lastSnapshotSequence;
 
         private bool _lastStarPowerActive;
+        private int _lastSustainsHeld;
+        private float _lastWhammyValue;
 
         private SoloSection? _remoteSoloSection;
         private bool _hasRemoteSoloSection;
@@ -104,6 +107,24 @@ namespace YARG.Gameplay.Player
                 if (_trackPlayer != null)
                 {
                     _trackPlayer.ApplyRemoteStarPowerState(_lastStarPowerActive);
+                }
+            }
+
+            // Apply sustain and whammy state for guitar players
+            if (_basePlayer is FiveFretGuitarPlayer fiveFretPlayer)
+            {
+                int currentSustains = _networkPlayerData.SustainsHeld;
+                if (currentSustains != _lastSustainsHeld)
+                {
+                    fiveFretPlayer.ApplyRemoteSustainState(_lastSustainsHeld, currentSustains);
+                    _lastSustainsHeld = currentSustains;
+                }
+
+                float currentWhammy = _networkPlayerData.WhammyValue;
+                if (Mathf.Abs(currentWhammy - _lastWhammyValue) > 0.01f)
+                {
+                    fiveFretPlayer.ApplyRemoteWhammyValue(currentWhammy);
+                    _lastWhammyValue = currentWhammy;
                 }
             }
 
@@ -390,6 +411,8 @@ namespace YARG.Gameplay.Player
             _resolvedMisses = 0;
             _lastSnapshotSequence = 0;
             _lastStarPowerActive = false;
+            _lastSustainsHeld = 0;
+            _lastWhammyValue = 0f;
             _hasRemoteSoloSection = false;
             _lastSoloSequence = -1;
             _wasSoloActive = false;
@@ -400,7 +423,11 @@ namespace YARG.Gameplay.Player
         {
             double remoteTime = Math.Max(0d, _networkPlayerData.LastGameplaySongTime);
 
-            double snapshotDelta = NetworkTime.time - _networkPlayerData.LastGameplayNetworkTime;
+            // Use appropriate time source: Mirror uses NetworkTime.time, LiteNet uses realtime clock
+            bool useLiteNet = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            double currentNetworkTime = useLiteNet ? Time.realtimeSinceStartupAsDouble : NetworkTime.time;
+            
+            double snapshotDelta = currentNetworkTime - _networkPlayerData.LastGameplayNetworkTime;
             if (!double.IsNaN(snapshotDelta) && snapshotDelta > 0d)
             {
                 remoteTime += Math.Min(snapshotDelta, MAX_SNAPSHOT_PREDICTION_SECONDS);

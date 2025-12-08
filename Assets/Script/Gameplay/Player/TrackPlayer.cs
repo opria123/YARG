@@ -989,6 +989,15 @@ namespace YARG.Gameplay.Player
             {
                 note.SetMissState(true, true);
                 OnNoteMissed(cursor, note);
+                
+                // For remote players, check if this was a star power note that was missed.
+                // If so, strip the star power flags from all notes in the phrase and trigger
+                // the visual update so the SP highlight is removed from remaining notes.
+                if (IsRemotePlayer && note.IsStarPower)
+                {
+                    StripStarPowerFromPhrase(note);
+                    OnStarPowerPhraseMissed(note);
+                }
             }
 
             if (IsRemotePlayer)
@@ -1094,6 +1103,62 @@ namespace YARG.Gameplay.Player
         protected virtual void OnCountdownChange(double countdownLength, double endTime)
         {
             TrackView.UpdateCountdown(countdownLength, endTime);
+        }
+
+        /// <summary>
+        /// Strips the star power flag from a note and all notes in its phrase.
+        /// This mirrors what the engine does when a star power phrase is missed.
+        /// </summary>
+        protected void StripStarPowerFromPhrase(TNote note)
+        {
+            // Strip star power from the note and all its children
+            note.Flags &= ~NoteFlags.StarPower;
+            foreach (var childNote in note.ChildNotes)
+            {
+                childNote.Flags &= ~NoteFlags.StarPower;
+            }
+
+            // Look back until finding the start of the phrase
+            if (!note.IsStarPowerStart)
+            {
+                var prevNote = note.PreviousNote;
+                while (prevNote != null && prevNote.IsStarPower)
+                {
+                    prevNote.Flags &= ~NoteFlags.StarPower;
+                    foreach (var childNote in prevNote.ChildNotes)
+                    {
+                        childNote.Flags &= ~NoteFlags.StarPower;
+                    }
+
+                    if (prevNote.IsStarPowerStart)
+                    {
+                        break;
+                    }
+
+                    prevNote = prevNote.PreviousNote;
+                }
+            }
+
+            // Look forward until finding the end of the phrase
+            if (!note.IsStarPowerEnd)
+            {
+                var nextNote = note.NextNote;
+                while (nextNote != null && nextNote.IsStarPower)
+                {
+                    nextNote.Flags &= ~NoteFlags.StarPower;
+                    foreach (var childNote in nextNote.ChildNotes)
+                    {
+                        childNote.Flags &= ~NoteFlags.StarPower;
+                    }
+
+                    if (nextNote.IsStarPowerEnd)
+                    {
+                        break;
+                    }
+
+                    nextNote = nextNote.NextNote;
+                }
+            }
         }
 
         protected virtual void OnStarPowerPhraseMissed(TNote note)

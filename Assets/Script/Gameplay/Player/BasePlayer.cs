@@ -112,6 +112,11 @@ namespace YARG.Gameplay.Player
         private float _noteSpeedDifficultyScale;
 
         protected EngineManager.EngineContainer EngineContainer;
+        
+        /// <summary>
+        /// Gets the engine container for this player. Used for multiplayer unison sync.
+        /// </summary>
+        public EngineManager.EngineContainer PlayerEngineContainer => EngineContainer;
 
         protected override void GameplayAwake()
         {

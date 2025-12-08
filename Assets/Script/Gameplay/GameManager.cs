@@ -162,6 +162,7 @@ namespace YARG.Gameplay
 
         private BandComboType _bandComboType;
         private Menu.Multiplayer.MultiplayerGameplaySync _multiplayerSync;
+        private Menu.Multiplayer.MultiplayerUnisonSync _multiplayerUnisonSync;
 
         private void Awake()
         {
@@ -180,21 +181,51 @@ namespace YARG.Gameplay
             EngineManager = new EngineManager();
             YargLogger.LogFormatInfo("[GameManager] Created new EngineManager with hash: {0}", EngineManager.GetHashCode());
 
-            // Check if we're in multiplayer mode
-            bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                 Networking.YargNetworkManager.Instance.isNetworkActive;
+            // Check if we're in multiplayer mode (Mirror or LiteNet)
+            // NOTE: These must be mutually exclusive - check LiteNet first since it's the preferred transport
+            bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            // Only consider Mirror active if LiteNet is NOT active (prevents false positives from Mirror singleton existing)
+            bool isMirrorMultiplayer = !isLiteNetMultiplayer && 
+                                       Networking.YargNetworkManager.Instance != null && 
+                                       Networking.YargNetworkManager.Instance.isNetworkActive;
+            bool isMultiplayer = isMirrorMultiplayer || isLiteNetMultiplayer;
 
             if (isMultiplayer)
             {
                 // In multiplayer, mark that we need to create players in Start() after network objects spawn
-                // Initialize multiplayer sync component now
+                // Initialize multiplayer sync components now
                 _multiplayerSync = gameObject.AddComponent<Menu.Multiplayer.MultiplayerGameplaySync>();
-                Debug.Log("[GameManager] Multiplayer sync component added - will create players in Start()");
+                _multiplayerUnisonSync = gameObject.AddComponent<Menu.Multiplayer.MultiplayerUnisonSync>();
+                Debug.Log($"[GameManager] Multiplayer sync components added - will create players in Start() (Mirror: {isMirrorMultiplayer}, LiteNet: {isLiteNetMultiplayer})");
                 
                 // Register disconnect event handlers for multiplayer gameplay
-                Networking.YargNetworkManager.Instance.OnClientDisconnected += OnClientDisconnectedDuringGameplay;
-                Networking.YargNetworkManager.Instance.OnLobbyLeft += OnLobbyLeftDuringGameplay;
-                Debug.Log("[GameManager] Registered disconnect event handlers for multiplayer");
+                if (isMirrorMultiplayer)
+                {
+                    Networking.YargNetworkManager.Instance.OnClientDisconnected += OnClientDisconnectedDuringGameplay;
+                    Networking.YargNetworkManager.Instance.OnLobbyLeft += OnLobbyLeftDuringGameplay;
+                    Debug.Log("[GameManager] Registered disconnect event handlers for multiplayer (Mirror)");
+                }
+                
+                // Register LiteNet event handlers for multiplayer gameplay
+                if (isLiteNetMultiplayer)
+                {
+                    var liteNetAdapter = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance as YARG.Networking.Abstraction.LiteNetNetworkingAdapter;
+                    if (liteNetAdapter != null)
+                    {
+                        liteNetAdapter.OnRestartGameplayRequested += OnLiteNetRestartGameplayRequested;
+                        liteNetAdapter.OnPlayerLeftDuringGameplay += OnLiteNetPlayerLeftDuringGameplay;
+                        liteNetAdapter.OnQuitToLibraryRequested += OnLiteNetQuitToLibraryRequested;
+                        
+                        // Host needs to handle player disconnects directly (OnPlayerLeftDuringGameplay is only for clients)
+                        if (liteNetAdapter.IsHosting)
+                        {
+                            liteNetAdapter.OnPlayerLeft += OnLiteNetPlayerLeft;
+                            Debug.Log("[GameManager] Registered OnPlayerLeft handler for host");
+                        }
+                        
+                        Debug.Log("[GameManager] Registered event handlers for multiplayer (LiteNet)");
+                    }
+                }
             }
             else
             {
@@ -244,7 +275,7 @@ namespace YARG.Gameplay
                 Navigator.Instance.NavigationEvent -= OnNavigationEvent;
             }
 
-            // Unsubscribe from disconnect events
+            // Unsubscribe from Mirror disconnect events
             if (Networking.YargNetworkManager.Instance != null)
             {
                 if (Networking.YargNetworkManager.Instance.isNetworkActive)
@@ -253,6 +284,16 @@ namespace YARG.Gameplay
                 }
                 Networking.YargNetworkManager.Instance.OnClientDisconnected -= OnClientDisconnectedDuringGameplay;
                 Networking.YargNetworkManager.Instance.OnLobbyLeft -= OnLobbyLeftDuringGameplay;
+            }
+            
+            // Unsubscribe from LiteNet events
+            var liteNetAdapter = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance as YARG.Networking.Abstraction.LiteNetNetworkingAdapter;
+            if (liteNetAdapter != null)
+            {
+                liteNetAdapter.OnRestartGameplayRequested -= OnLiteNetRestartGameplayRequested;
+                liteNetAdapter.OnPlayerLeftDuringGameplay -= OnLiteNetPlayerLeftDuringGameplay;
+                liteNetAdapter.OnQuitToLibraryRequested -= OnLiteNetQuitToLibraryRequested;
+                liteNetAdapter.OnPlayerLeft -= OnLiteNetPlayerLeft;
             }
 
             // Unsubscribe from other events (null checks for duplicate GameManager case)
@@ -263,6 +304,7 @@ namespace YARG.Gameplay
             if (EngineManager != null)
             {
                 EngineManager.OnSongFailed -= OnSongFailed;
+                EngineManager.OnUnisonPhraseHit -= OnUnisonPhraseHit;
             }
 
             //Restore stem volumes to their original state
@@ -297,9 +339,12 @@ namespace YARG.Gameplay
                     !DialogManager.Instance.IsDialogShowing &&
                     !PlayerHasFailed)
                 {
-                    // Check if we're in multiplayer
-                    bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                         Networking.YargNetworkManager.Instance.isNetworkActive;
+                    // Check if we're in multiplayer (LiteNet or Mirror)
+                    bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+                    bool isMirrorMultiplayer = !isLiteNetMultiplayer && 
+                                               Networking.YargNetworkManager.Instance != null && 
+                                               Networking.YargNetworkManager.Instance.isNetworkActive;
+                    bool isMultiplayer = isLiteNetMultiplayer || isMirrorMultiplayer;
                     
                     if (isMultiplayer)
                     {
@@ -385,15 +430,41 @@ namespace YARG.Gameplay
             }
 
             double songTime = _songRunner.SongTime;
-            double clientNetworkTime = NetworkTime.time;
-
+            
+            // Check if we're using LiteNet (which handles player locality differently)
+            bool useLiteNet = Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            
+            // Use appropriate time source for network time
+            // Mirror uses NetworkTime.time which requires Mirror to be active
+            // For LiteNet, use Unity's realtime clock
+            double clientNetworkTime = useLiteNet ? Time.realtimeSinceStartupAsDouble : NetworkTime.time;
+            
+            int localPlayerCount = 0;
             foreach (var player in _players)
             {
                 var networkData = player.NetworkPlayerData;
-                if (networkData == null || !networkData.IsLocalUser)
+                
+                // Determine if this is a local player
+                // For Mirror: check NetworkPlayerData.IsLocalUser
+                // For LiteNet: check if player has local bindings (a "real" local player with input)
+                bool isLocalPlayer;
+                if (useLiteNet)
+                {
+                    // For LiteNet, a local player is one with bindings (can receive input)
+                    isLocalPlayer = player.Player?.Bindings != null && !player.Player.IsReplay;
+                }
+                else
+                {
+                    // For Mirror, use NetworkPlayerData
+                    isLocalPlayer = networkData != null && networkData.IsLocalUser;
+                }
+                
+                if (!isLocalPlayer)
                 {
                     continue;
                 }
+                
+                localPlayerCount++;
 
                 var baseStats = player.BaseStats;
 
@@ -483,13 +554,22 @@ namespace YARG.Gameplay
                     soloTotalBonus = soloSnapshot.TotalBonus;
                 }
 
+                // Collect sustain and whammy state for guitar players
+                int sustainsHeld = 0;
+                float whammyValue = 0f;
+                if (player is FiveFretGuitarPlayer fiveFretPlayer)
+                {
+                    sustainsHeld = fiveFretPlayer.SustainsHeldBitmask;
+                    whammyValue = fiveFretPlayer.WhammyFactor;
+                }
+
                 _multiplayerSync.SubmitLocalSnapshot(networkData, player.Score, player.Combo, baseStats.MaxCombo,
                     baseStats.IsStarPowerActive, starPowerAmount, baseStats.StarPowerPhrasesHit,
                     baseStats.TotalStarPowerPhrases, player.NotesHit, notesMissed, overstrums, hoposStrummed,
                     overhits, ghostInputs, ghostsHit, accentsHit, dynamicsBonus, bandBonusScore, vocalsTicksHit,
                     vocalsTicksMissed, vocalsPhraseTicksHit, vocalsPhraseTicksTotal, soloActive, soloSequence,
-                    soloNoteCount, soloNotesHit, soloLastBonus, soloTotalBonus, songTime, clientNetworkTime,
-                    forceSend);
+                    soloNoteCount, soloNotesHit, soloLastBonus, soloTotalBonus, sustainsHeld, whammyValue,
+                    songTime, clientNetworkTime, forceSend);
             }
         }
 
@@ -540,17 +620,33 @@ namespace YARG.Gameplay
 
         public void Pause(bool showMenu = true)
         {
-            _songRunner.Pause();
-            PauseCore(showMenu);
+            // Check if we're in LiteNet multiplayer - if so, don't actually pause gameplay
+            bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            
+            if (isLiteNetMultiplayer)
+            {
+                // In multiplayer, show the pause menu but don't stop gameplay
+                // This keeps the song synced across all players
+                PauseCore(showMenu, freezeGameplay: false);
+            }
+            else
+            {
+                _songRunner.Pause();
+                PauseCore(showMenu);
+            }
         }
 
         private void PauseCore(bool showMenu, bool freezeGameplay = true)
         {
             if (showMenu)
             {
-                // Check if we're in multiplayer (check this first before other modes)
-                bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                     Networking.YargNetworkManager.Instance.isNetworkActive;
+                // Check if we're in multiplayer (LiteNet or Mirror)
+                // NOTE: Check LiteNet first - if LiteNet is active, consider Mirror inactive
+                bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+                bool isMirrorMultiplayer = !isLiteNetMultiplayer && 
+                                           Networking.YargNetworkManager.Instance != null && 
+                                           Networking.YargNetworkManager.Instance.isNetworkActive;
+                bool isMultiplayer = isLiteNetMultiplayer || isMirrorMultiplayer;
                 
                 if (!GlobalVariables.State.PlayingWithReplay && ReplayInfo != null)
                 {
@@ -563,7 +659,16 @@ namespace YARG.Gameplay
                 else if (isMultiplayer)
                 {
                     // Multiplayer pause takes priority over practice/setlist modes
-                    _pauseMenu.PushMenu(PauseMenuManager.Menu.MultiplayerPause);
+                    // Fall back to QuickPlayPause if MultiplayerPause isn't configured in scene
+                    try
+                    {
+                        _pauseMenu.PushMenu(PauseMenuManager.Menu.MultiplayerPause);
+                    }
+                    catch (System.InvalidOperationException)
+                    {
+                        YargLogger.LogWarning("[GameManager] MultiplayerPause menu not found, using QuickPlayPause");
+                        _pauseMenu.PushMenu(PauseMenuManager.Menu.QuickPlayPause);
+                    }
                 }
                 else if (IsPractice)
                 {
@@ -651,6 +756,13 @@ namespace YARG.Gameplay
 
         public void OverridePause()
         {
+            // In multiplayer, don't force pause - video sync is less important than gameplay sync
+            bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            if (isLiteNetMultiplayer)
+            {
+                return;
+            }
+            
             _songRunner.OverridePause();
             PauseCore(showMenu: false);
         }
@@ -729,6 +841,168 @@ namespace YARG.Gameplay
             // Client goes back to menu
             GlobalVariables.Instance.LoadScene(SceneIndex.Menu);
         }
+        
+        /// <summary>
+        /// Called when the host broadcasts a restart gameplay command (LiteNet).
+        /// Client should restart the current song.
+        /// </summary>
+        private void OnLiteNetRestartGameplayRequested()
+        {
+            // Only handle if we're actually in gameplay
+            if (GlobalVariables.Instance.CurrentScene != SceneIndex.Gameplay)
+            {
+                return;
+            }
+            
+            YargLogger.LogInfo("[GameManager] LiteNet: Received restart gameplay command from host");
+            
+            // Restart the song via PauseMenuManager
+            _pauseMenu?.Restart();
+        }
+        
+        /// <summary>
+        /// Called when a player leaves during gameplay (LiteNet).
+        /// The player's track should be removed but other players continue.
+        /// </summary>
+        private void OnLiteNetPlayerLeftDuringGameplay(string playerName)
+        {
+            // Only handle if we're actually in gameplay
+            if (GlobalVariables.Instance.CurrentScene != SceneIndex.Gameplay)
+            {
+                return;
+            }
+            
+            YargLogger.LogInfo($"[GameManager] LiteNet: Player '{playerName}' left during gameplay");
+            
+            // Show a toast notification that the player left
+            Menu.Persistent.ToastManager.ToastInformation($"{playerName} left the game");
+            
+            // Remove the player's track from the game
+            RemoveDisconnectedPlayer(playerName);
+        }
+        
+        /// <summary>
+        /// Removes a disconnected player's track from gameplay.
+        /// Called when a remote player disconnects during a song.
+        /// </summary>
+        private void RemoveDisconnectedPlayer(string playerName)
+        {
+            if (_players == null || _players.Count == 0)
+            {
+                YargLogger.LogWarning($"[GameManager] Cannot remove player '{playerName}' - no players in list");
+                return;
+            }
+            
+            // Find the player by name (remote players have their name in Player.Profile.Name)
+            // IMPORTANT: Only remove REMOTE players (those without input bindings)
+            // Local players have Bindings != null, remote players have Bindings == null
+            BasePlayer playerToRemove = null;
+            foreach (var player in _players)
+            {
+                if (player == null)
+                {
+                    continue;
+                }
+                
+                // Check if this is a REMOTE player with matching name
+                // Remote players have no input bindings (Bindings == null)
+                bool isRemotePlayer = player.Player?.Bindings == null && !player.Player.IsReplay;
+                if (isRemotePlayer && player.Player?.Profile?.Name == playerName)
+                {
+                    playerToRemove = player;
+                    break;
+                }
+            }
+            
+            if (playerToRemove == null)
+            {
+                YargLogger.LogWarning($"[GameManager] Could not find REMOTE player '{playerName}' to remove (local players are not removed)");
+                return;
+            }
+            
+            YargLogger.LogInfo($"[GameManager] Removing disconnected remote player '{playerName}' track");
+            
+            // Remove from players list
+            _players.Remove(playerToRemove);
+            
+            // If it's a TrackPlayer, remove from rendering system
+            if (playerToRemove is TrackPlayer trackPlayer)
+            {
+                // Remove from highway camera rendering
+                _trackViewManager._highwayCameraRendering.RemoveTrackPlayer(trackPlayer);
+                
+                // Remove the track view
+                _trackViewManager.RemoveTrackView(trackPlayer.TrackView);
+                
+                YargLogger.LogInfo($"[GameManager] Removed track view and camera for '{playerName}'");
+            }
+            
+            // Destroy the player GameObject
+            if (playerToRemove.gameObject != null)
+            {
+                Destroy(playerToRemove.gameObject);
+                YargLogger.LogInfo($"[GameManager] Destroyed player GameObject for '{playerName}'");
+            }
+            
+            YargLogger.LogInfo($"[GameManager] Player '{playerName}' removed, {_players.Count} players remaining");
+        }
+        
+        /// <summary>
+        /// Called when a player disconnects from the LiteNet lobby (host only).
+        /// The host uses this to remove the player's track locally.
+        /// </summary>
+        private void OnLiteNetPlayerLeft(Networking.NetworkPlayerData playerData)
+        {
+            // Only handle if we're actually in gameplay
+            if (GlobalVariables.Instance.CurrentScene != SceneIndex.Gameplay)
+            {
+                return;
+            }
+            
+            if (playerData == null)
+            {
+                return;
+            }
+            
+            string playerName = playerData.PlayerName;
+            YargLogger.LogInfo($"[GameManager] LiteNet Host: Player '{playerName}' disconnected during gameplay");
+            
+            // Show toast notification
+            Menu.Persistent.ToastManager.ToastInformation($"{playerName} left the game");
+            
+            // Remove the player's track
+            RemoveDisconnectedPlayer(playerName);
+        }
+        
+        /// <summary>
+        /// Called when the host broadcasts a quit to library command (LiteNet).
+        /// Client should stop and return to music library.
+        /// </summary>
+        private void OnLiteNetQuitToLibraryRequested()
+        {
+            // Only handle if we're actually in gameplay
+            if (GlobalVariables.Instance.CurrentScene != SceneIndex.Gameplay)
+            {
+                return;
+            }
+            
+            YargLogger.LogInfo("[GameManager] LiteNet: Received quit to library command from host");
+            
+            // Stop the song
+            SetPaused(true);
+            
+            // Set navigation target to music library
+            var liteNetAdapter = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance as YARG.Networking.Abstraction.LiteNetNetworkingAdapter;
+            if (liteNetAdapter != null)
+            {
+                // The host already broadcasted navigate to music library, but set local state too
+                liteNetAdapter.SetBrowsingState(true);
+            }
+            Networking.YargNetworkManager.SetMenuNavigationAfterSceneLoad(Menu.MenuManager.Menu.MusicLibrary);
+            
+            // Go back to menu
+            GlobalVariables.Instance.LoadScene(SceneIndex.Menu);
+        }
 
         public double GetRelativeInputTime(double timeFromInputSystem)
             => _songRunner.GetRelativeInputTime(timeFromInputSystem);
@@ -781,6 +1055,9 @@ namespace YARG.Gameplay
                 ReplayInfo = replayInfo,
             };
 
+            // Send score results to other players in LiteNet multiplayer
+            SendLiteNetScoreResults();
+
             RecordScores(replayInfo);
 
             // Dispose the crowd handler
@@ -793,6 +1070,14 @@ namespace YARG.Gameplay
 
         private void ApplyAuthoritativeNetworkStats()
         {
+            // This method is for Mirror networking only - LiteNet uses different approach via MultiplayerGameplaySync
+            bool isLiteNetActive = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            if (isLiteNetActive)
+            {
+                // LiteNet handles this differently - skip Mirror-specific logic
+                return;
+            }
+            
             if (Networking.YargNetworkManager.Instance == null || !Networking.YargNetworkManager.Instance.isNetworkActive)
             {
                 return;
@@ -927,6 +1212,54 @@ namespace YARG.Gameplay
             }
         }
 
+        /// <summary>
+        /// Sends local player score results to other players via LiteNet networking.
+        /// </summary>
+        private void SendLiteNetScoreResults()
+        {
+            var networkService = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
+            {
+                return;
+            }
+
+            var liteNetAdapter = networkService as YARG.Networking.Abstraction.LiteNetNetworkingAdapter;
+            if (liteNetAdapter == null)
+            {
+                return;
+            }
+
+            foreach (var player in _players)
+            {
+                // Only send results for local (non-remote) players
+                // Remote players have null Bindings
+                if (player.Player.Bindings == null)
+                {
+                    continue;
+                }
+
+                // Skip bots
+                if (player.Player.Profile.IsBot)
+                {
+                    continue;
+                }
+
+                var stats = player.BaseStats;
+                bool isHighScore = player.Score > player.LastHighScore;
+                bool isFullCombo = stats.IsFullCombo;
+
+                liteNetAdapter.SendScoreResults(
+                    player.Player.Profile.Name,
+                    isHighScore,
+                    isFullCombo,
+                    stats.TotalScore,
+                    stats.MaxCombo,
+                    stats.NotesHit,
+                    stats.NotesMissed
+                );
+            }
+        }
+
         private void RecordScores(ReplayInfo replayInfo)
         {
             if (!ScoreContainer.IsBandScoreValid(SongSpeed))
@@ -1040,7 +1373,15 @@ namespace YARG.Gameplay
             for (int i = 0; i < _players.Count; i++)
             {
                 var player = _players[i];
+                
+                // Skip bot players (no inputs recorded)
                 if (player.Player.Profile.IsBot)
+                {
+                    continue;
+                }
+                
+                // Skip remote players (no inputs recorded - they're simulated from network state)
+                if (player.Player.Bindings == null && !player.Player.IsReplay)
                 {
                     continue;
                 }
@@ -1089,8 +1430,12 @@ namespace YARG.Gameplay
                 case MenuAction.Start:
                     if ((!IsPractice || PracticeManager.HasSelectedSection) && !DialogManager.Instance.IsDialogShowing && !PlayerHasFailed)
                     {
-                        bool isMultiplayer = Networking.YargNetworkManager.Instance != null &&
-                                             Networking.YargNetworkManager.Instance.isNetworkActive;
+                        // Check if we're in multiplayer (LiteNet or Mirror)
+                        bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+                        bool isMirrorMultiplayer = !isLiteNetMultiplayer && 
+                                                   Networking.YargNetworkManager.Instance != null &&
+                                                   Networking.YargNetworkManager.Instance.isNetworkActive;
+                        bool isMultiplayer = isLiteNetMultiplayer || isMirrorMultiplayer;
 
                         if (isMultiplayer)
                         {
@@ -1114,11 +1459,18 @@ namespace YARG.Gameplay
 
         private void OnApplicationFocus(bool hasFocus)
         {
+            // Guard against null settings during scene load
+            if (SettingsManager.Settings?.PauseOnFocusLoss == null)
+                return;
+                
             if (!hasFocus && !Paused && SettingsManager.Settings.PauseOnFocusLoss.Value)
             {
-                // Check if we're in multiplayer
-                bool isMultiplayer = Networking.YargNetworkManager.Instance != null && 
-                                     Networking.YargNetworkManager.Instance.isNetworkActive;
+                // Check if we're in multiplayer (LiteNet or Mirror)
+                bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+                bool isMirrorMultiplayer = !isLiteNetMultiplayer && 
+                                           Networking.YargNetworkManager.Instance != null && 
+                                           Networking.YargNetworkManager.Instance.isNetworkActive;
+                bool isMultiplayer = isLiteNetMultiplayer || isMirrorMultiplayer;
                 
                 if (isMultiplayer)
                 {
@@ -1172,13 +1524,28 @@ namespace YARG.Gameplay
 
         private bool IsMultiplayerActive()
         {
-            return _multiplayerSync != null &&
-                   Networking.YargNetworkManager.Instance != null &&
-                   Networking.YargNetworkManager.Instance.isNetworkActive;
+            // Check if we're in multiplayer (LiteNet or Mirror)
+            bool isLiteNetMultiplayer = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            bool isMirrorMultiplayer = !isLiteNetMultiplayer && 
+                                       Networking.YargNetworkManager.Instance != null &&
+                                       Networking.YargNetworkManager.Instance.isNetworkActive;
+            return _multiplayerSync != null && (isLiteNetMultiplayer || isMirrorMultiplayer);
         }
 
         private void HandleMultiplayerSongFailed()
         {
+            // Check which networking backend is active
+            bool isLiteNetActive = YARG.Networking.Abstraction.NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            
+            if (isLiteNetActive)
+            {
+                // TODO: Implement LiteNet failure reporting
+                // For now, just run the failure sequence
+                _ = RunBandFailureSequenceAsync();
+                return;
+            }
+            
+            // Mirror path
             var networkManager = Networking.YargNetworkManager.Instance;
             if (networkManager == null || !networkManager.isNetworkActive)
             {

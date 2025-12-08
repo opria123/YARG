@@ -37,7 +37,7 @@ namespace YARG.Networking.Abstraction
                     LobbyName = mirrorLobby.lobbyName,
                     HostName = mirrorLobby.hostName,
                     CurrentPlayers = mirrorLobby.currentPlayers,
-                    MaxPlayers = mirrorLobby.maxPlayers,
+            MaxPlayers = mirrorLobby.maxPlayers,
                     PrivacyMode = (LobbyPrivacyMode)(int)mirrorLobby.privacyMode,
                     HasPassword = mirrorLobby.hasPassword,
                     Password = mirrorLobby.password,
@@ -78,6 +78,7 @@ namespace YARG.Networking.Abstraction
         public event Action<NetworkPlayerData> OnPlayerJoined;
         public event Action<NetworkPlayerData> OnPlayerLeft;
         public event Action<string> OnNetworkError;
+        public event Action<string, bool> OnPlayerReadyStateChanged;
 
         #endregion
 
@@ -237,14 +238,44 @@ namespace YARG.Networking.Abstraction
             // Mirror's ProbeLobbyAsync returns LobbyInfo? via UniTask
             var mirrorResult = await _mirrorManager.ProbeLobbyAsync(address, port);
             
-            if (mirrorResult.HasValue)
+            if (mirrorResult != null)
             {
-                return ConvertMirrorLobbyInfo(mirrorResult.Value);
+                return ConvertMirrorLobbyInfo(mirrorResult);
             }
 
             return null;
         }
 
+        #endregion
+        
+        #region Discovery
+        
+        public int DiscoveryPort => _mirrorManager?.GetComponent<YargNetworkDiscovery>()?.DiscoveryPort ?? 47777;
+        
+        public void StartDiscovery()
+        {
+            var discovery = _mirrorManager?.GetComponent<YargNetworkDiscovery>();
+            discovery?.StartDiscovery();
+        }
+        
+        public void StopDiscovery()
+        {
+            var discovery = _mirrorManager?.GetComponent<YargNetworkDiscovery>();
+            discovery?.StopDiscovery();
+        }
+        
+        public void SendDiscoveryRequest(string address, int port = 0)
+        {
+            var discovery = _mirrorManager?.GetComponent<YargNetworkDiscovery>();
+            discovery?.SendDiscoveryRequest(address, port);
+        }
+        
+        public void SetDiscoveryPort(int port)
+        {
+            var discovery = _mirrorManager?.GetComponent<YargNetworkDiscovery>();
+            discovery?.ConfigureDiscoveryOptions(true, port);
+        }
+        
         #endregion
 
         #region Player Management
@@ -278,6 +309,80 @@ namespace YARG.Networking.Abstraction
             }
 
             return result;
+        }
+
+        public void KickPlayer(NetworkPlayerData playerData)
+        {
+            if (_mirrorManager == null)
+            {
+                Debug.LogWarning("[MirrorNetworkingAdapter] Cannot kick - network manager not initialized");
+                return;
+            }
+            
+            if (playerData == null || playerData.connectionToClient == null)
+            {
+                Debug.LogWarning("[MirrorNetworkingAdapter] Cannot kick - no connection data");
+                return;
+            }
+            
+            Debug.Log($"[MirrorNetworkingAdapter] Kicking player: {playerData.PlayerName}");
+            _mirrorManager.KickPlayer(playerData.connectionToClient);
+        }
+
+        public List<NetworkPlayerData> GetAllPlayers()
+        {
+            if (_mirrorManager == null)
+            {
+                return new List<NetworkPlayerData>();
+            }
+            return _mirrorManager.GetAllPlayers();
+        }
+
+        public NetworkPlayerData GetLocalPlayer()
+        {
+            if (_mirrorManager == null)
+            {
+                return null;
+            }
+
+            foreach (var player in _mirrorManager.GetAllPlayers())
+            {
+                if (player != null && player.IsLocalUser)
+                {
+                    return player;
+                }
+            }
+            return null;
+        }
+
+        public void SetPlayerReady(bool isReady)
+        {
+            var localPlayer = GetLocalPlayer();
+            if (localPlayer != null)
+            {
+                localPlayer.CmdSetReady(isReady);
+            }
+            else
+            {
+                Debug.LogWarning("[MirrorNetworkingAdapter] Cannot set ready - local player not found");
+            }
+        }
+
+        public bool AreAllPlayersReady()
+        {
+            if (_mirrorManager == null)
+            {
+                return false;
+            }
+            return _mirrorManager.AreAllPlayersReady();
+        }
+
+        public void ResetAllPlayersReadyState()
+        {
+            // For Mirror, we don't need to reset ready states the same way
+            // as LiteNet since Mirror handles sync differently.
+            // Just log for now - Mirror's score screen flow may need different handling
+            Debug.Log("[MirrorNetworkingAdapter] ResetAllPlayersReadyState called (no-op for Mirror)");
         }
 
         #endregion
@@ -315,6 +420,17 @@ namespace YARG.Networking.Abstraction
             }
 
             _mirrorManager.StartMultiplayerGameplay();
+        }
+
+        public void AdvanceAfterScoreScreen()
+        {
+            if (_mirrorManager == null)
+            {
+                Debug.LogError("[MirrorNetworkingAdapter] Cannot advance after score screen: YargNetworkManager is null");
+                return;
+            }
+
+            _mirrorManager.AdvanceAfterScoreScreen();
         }
 
         #endregion

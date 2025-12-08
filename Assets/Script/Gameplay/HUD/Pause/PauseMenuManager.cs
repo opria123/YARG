@@ -44,6 +44,12 @@ namespace YARG.Gameplay.HUD
         private Image _sourceIcon;
         [SerializeField]
         private RawImage _albumCover;
+        
+        [Space]
+        [Header("Dynamic Pause Menu Prefabs")]
+        [SerializeField]
+        [Tooltip("Reference to MultiplayerPause prefab - will be instantiated if not found in scene")]
+        private GameObject _multiplayerPausePrefab;
 
         public bool IsOpen => _openMenus.Count > 0;
 
@@ -52,6 +58,41 @@ namespace YARG.Gameplay.HUD
             // Convert to dictionary with "Menu" as key
             var children = GetComponentsInChildren<PauseMenuObject>(true);
             _menus = children.ToDictionary(i => i.Menu, i => i);
+            
+            // Check if MultiplayerPause is missing
+            if (!_menus.ContainsKey(Menu.MultiplayerPause))
+            {
+                // First try the serialized prefab reference
+                GameObject prefabToUse = _multiplayerPausePrefab;
+                
+                // If no serialized reference, try loading from Resources
+                if (prefabToUse == null)
+                {
+                    Debug.Log("[PauseMenuManager] Loading MultiplayerPause prefab from Resources");
+                    prefabToUse = Resources.Load<GameObject>("Prefabs/Pause/MultiplayerPause");
+                }
+                
+                if (prefabToUse != null)
+                {
+                    Debug.Log("[PauseMenuManager] MultiplayerPause not found in scene, instantiating from prefab");
+                    var instance = Instantiate(prefabToUse, transform);
+                    instance.SetActive(false); // Start inactive like other pause menus
+                    var pauseMenuObj = instance.GetComponent<PauseMenuObject>();
+                    if (pauseMenuObj != null)
+                    {
+                        _menus[Menu.MultiplayerPause] = pauseMenuObj;
+                        Debug.Log("[PauseMenuManager] Successfully instantiated MultiplayerPause from prefab");
+                    }
+                    else
+                    {
+                        Debug.LogError("[PauseMenuManager] MultiplayerPause prefab is missing PauseMenuObject component!");
+                    }
+                }
+                else
+                {
+                    Debug.LogWarning("[PauseMenuManager] MultiplayerPause prefab not found in Resources or scene");
+                }
+            }
         }
 
         private void Start()

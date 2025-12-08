@@ -259,6 +259,9 @@ namespace YARG.Gameplay
 
             // Spawn players
             CreatePlayers();
+            
+            // Setup multiplayer unison synchronization after players are created
+            SetupMultiplayerUnisonSync();
 
             // Set up the crowd stem so it can be restored after muting (if it exists)
             if (_stemStates.TryGetValue(SongStem.Crowd, out var state))
@@ -476,8 +479,16 @@ namespace YARG.Gameplay
                 int index = -1;
                 int highwayIndex = -1;
                 int vocalIndex = -1;
+                
+                YargLogger.LogInfo($"[GameManager.CreatePlayers] Processing {YargPlayers?.Count ?? 0} YargPlayers");
+                
                 foreach (var player in YargPlayers)
                 {
+                    YargLogger.LogInfo($"[GameManager.CreatePlayers] Processing player: {player?.Profile?.Name ?? "NULL"}, " +
+                                       $"IsReplay={player?.IsReplay}, SittingOut={player?.SittingOut}, " +
+                                       $"HasBindings={player?.Bindings != null}, " +
+                                       $"GameMode={player?.Profile?.GameMode}, Instrument={player?.Profile?.CurrentInstrument}");
+                    
                     if (!player.IsReplay && player.Bindings != null)
                     {
                         // Reset microphone (resets channel buffers)
@@ -488,6 +499,7 @@ namespace YARG.Gameplay
                     // Skip if the player is sitting out
                     if (player.SittingOut)
                     {
+                        YargLogger.LogInfo($"[GameManager.CreatePlayers] Skipping player {player.Profile.Name} - SittingOut=true");
                         continue;
                     }
                     index++;
@@ -524,7 +536,13 @@ namespace YARG.Gameplay
                         };
 
                         // Skip if there's no prefab for the game mode
-                        if (prefab == null) continue;
+                        if (prefab == null)
+                        {
+                            YargLogger.LogWarning($"[GameManager.CreatePlayers] Skipping player {player.Profile.Name} - no prefab for GameMode {player.Profile.GameMode}");
+                            continue;
+                        }
+                        
+                        YargLogger.LogInfo($"[GameManager.CreatePlayers] Creating track for player {player.Profile.Name}, highwayIndex={highwayIndex}");
 
                         var playerObject = Instantiate(prefab,
                             new Vector3(highwayIndex * TRACK_SPACING_X, 100f, 0f), prefab.transform.rotation);
@@ -612,6 +630,118 @@ namespace YARG.Gameplay
         }
         
         /// <summary>
+        /// Sets up unison phrase synchronization for multiplayer.
+        /// In networked multiplayer, each client has its own EngineManager that only sees local players.
+        /// This method configures the system to coordinate unison bonuses across the network.
+        /// </summary>
+        private void SetupMultiplayerUnisonSync()
+        {
+            if (_multiplayerUnisonSync == null)
+            {
+                // Not in multiplayer mode - unisons work normally through local EngineManager
+                return;
+            }
+            
+            // Disable automatic unison bonus awarding in the EngineManager
+            // The network layer will handle coordinating bonuses across all players
+            EngineManager.DisableAutomaticUnisonBonuses = true;
+            YargLogger.LogInfo("[GameManager] Disabled automatic unison bonuses for networked multiplayer");
+            
+            // Subscribe to unison phrase hit events from the EngineManager
+            EngineManager.OnUnisonPhraseHit += OnUnisonPhraseHit;
+            
+            // Register local engine containers with the unison sync
+            foreach (var player in _players)
+            {
+                if (player != null && player.PlayerEngineContainer != null)
+                {
+                    _multiplayerUnisonSync.RegisterEngineContainer(player.PlayerEngineContainer);
+                }
+            }
+            
+            // Set the total player count for unison tracking
+            // This includes both local and remote players
+            int totalPlayers = GetTotalNetworkPlayerCount();
+            _multiplayerUnisonSync.SetTotalPlayerCount(totalPlayers);
+            
+            YargLogger.LogInfo($"[GameManager] Multiplayer unison sync initialized with {totalPlayers} total players");
+        }
+        
+        /// <summary>
+        /// Gets the total number of players across the network (for unison tracking).
+        /// </summary>
+        /// <summary>
+        /// Gets the total number of players who can participate in unisons across the network.
+        /// Vocals players are excluded since they don't participate in unisons.
+        /// </summary>
+        private int GetTotalNetworkPlayerCount()
+        {
+            // Count local non-vocal players
+            int localNonVocalCount = 0;
+            foreach (var player in _players)
+            {
+                if (player != null && !(player is VocalsPlayer))
+                {
+                    localNonVocalCount++;
+                }
+            }
+            
+            // For now, we only count local players for unison tracking
+            // In a more complex scenario, we'd need to track remote player instruments
+            // and filter out vocals from those too
+            // TODO: Get instrument info from NetworkPlayerData and filter accordingly
+            
+            // Check if we're in multiplayer and get the total non-vocal player count
+            var liteNetAdapter = Networking.Abstraction.NetworkingServiceFactory.Instance as Networking.Abstraction.LiteNetNetworkingAdapter;
+            if (liteNetAdapter != null && liteNetAdapter.IsNetworkActive)
+            {
+                // In multiplayer, we assume all network players are non-vocal for now
+                // This is a simplification - ideally we'd track instruments per network player
+                var allPlayers = liteNetAdapter.GetAllPlayers();
+                int totalCount = allPlayers?.Count ?? localNonVocalCount;
+                
+                // If all our local players are vocals, return 0 (no unison participants)
+                if (localNonVocalCount == 0)
+                {
+                    YargLogger.LogInfo("[GameManager] All local players are vocals - no unison participation");
+                    return 0;
+                }
+                
+                return totalCount;
+            }
+            
+            // Check Mirror
+            if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
+            {
+                var allPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+                int totalCount = allPlayers?.Count ?? localNonVocalCount;
+                
+                if (localNonVocalCount == 0)
+                {
+                    YargLogger.LogInfo("[GameManager] All local players are vocals - no unison participation");
+                    return 0;
+                }
+                
+                return totalCount;
+            }
+            
+            // Fallback to local non-vocal player count
+            return localNonVocalCount;
+        }
+        
+        /// <summary>
+        /// Called when a local player hits a unison phrase.
+        /// Forwards to the network sync component.
+        /// </summary>
+        private void OnUnisonPhraseHit(double phraseTime, double phraseEndTime)
+        {
+            if (_multiplayerUnisonSync != null)
+            {
+                _multiplayerUnisonSync.OnLocalUnisonPhraseHit(phraseTime, phraseEndTime);
+            }
+        }
+        
+        /// <summary>
         /// Attach RemotePlayerVisualizer to a player for multiplayer network sync.
         /// </summary>
         private void AttachRemotePlayerVisualizer(BasePlayer player, int playerIndex)
@@ -663,13 +793,41 @@ namespace YARG.Gameplay
                     player.Player.Profile.Name, expectsLocalData, mappedNetworkPlayer?.IsLocalUser);
             }
 
+            // Try Mirror first
             var manager = Networking.YargNetworkManager.Instance;
-            if (manager == null)
+            if (manager != null && manager.isNetworkActive)
+            {
+                var networkPlayers = manager.GetAllPlayers();
+                
+                var result = FindNetworkPlayerData(networkPlayers, player, playerIndex, expectsLocalData);
+                if (result != null)
+                {
+                    return result;
+                }
+            }
+            
+            // Try LiteNet if Mirror didn't work
+            var liteNetAdapter = Networking.Abstraction.NetworkingServiceFactory.Instance as Networking.Abstraction.LiteNetNetworkingAdapter;
+            if (liteNetAdapter != null && liteNetAdapter.IsNetworkActive)
+            {
+                var networkPlayers = liteNetAdapter.GetAllPlayers();
+                
+                var result = FindNetworkPlayerData(networkPlayers, player, playerIndex, expectsLocalData);
+                if (result != null)
+                {
+                    return result;
+                }
+            }
+
+            return null;
+        }
+        
+        private static NetworkPlayerData FindNetworkPlayerData(List<NetworkPlayerData> networkPlayers, BasePlayer player, int playerIndex, bool expectsLocalData)
+        {
+            if (networkPlayers == null || networkPlayers.Count == 0)
             {
                 return null;
             }
-
-            var networkPlayers = manager.GetAllPlayers();
 
             if (playerIndex >= 0 && playerIndex < networkPlayers.Count)
             {

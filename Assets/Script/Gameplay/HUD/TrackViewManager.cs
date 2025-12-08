@@ -46,6 +46,22 @@ namespace YARG.Gameplay.HUD
 
             return trackView;
         }
+        
+        /// <summary>
+        /// Removes a track view for a disconnected player.
+        /// </summary>
+        public void RemoveTrackView(TrackView trackView)
+        {
+            if (trackView == null)
+            {
+                return;
+            }
+            
+            _trackViews.Remove(trackView);
+            Destroy(trackView.gameObject);
+            
+            Debug.Log($"[TrackViewManager] Removed track view, {_trackViews.Count} remaining");
+        }
 
         public void CreateVocalTrackView()
         {

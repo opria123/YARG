@@ -160,39 +160,16 @@ namespace YARG.Menu.Multiplayer
             return MenuData.Colors.PrimaryText.WithAlpha(0.45f);
         }
 
-        private static Color ResolvePingIconColor(YargNetworkManager.LobbyInfo lobby)
+        private static Color ResolvePingIconColor(YARG.Networking.Abstraction.LobbyInfo lobby)
         {
             if (lobby == null)
             {
                 return GetOfflinePingColor();
             }
 
-            long lastSeen = lobby.lastSeen;
-            if (lastSeen <= 0)
-            {
-                return GetOfflinePingColor();
-            }
-
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            long delta = Math.Max(0, now - lastSeen);
-
-            if (delta > PING_OFFLINE_THRESHOLD_MS)
-            {
-                return GetOfflinePingColor();
-            }
-
-            float approximatePing = delta / 20f;
-            if (approximatePing < 50f)
-            {
-                return PING_GOOD_COLOR;
-            }
-
-            if (approximatePing < 100f)
-            {
-                return PING_AVERAGE_COLOR;
-            }
-
-            return PING_POOR_COLOR;
+            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
+            // For now, just return online color if we have lobby info
+            return new Color(0.35f, 0.92f, 0.55f);
         }
 
         private void HideAllPingIcons()
@@ -1433,7 +1410,7 @@ namespace YARG.Menu.Multiplayer
                         if (s != null)
                         {
                             if (s.LiveInfo != null)
-                                savedHasPassword = s.LiveInfo.hasPassword;
+                                savedHasPassword = s.LiveInfo.HasPassword;
                             else
                                 savedHasPassword = s.Bookmark != null && !string.IsNullOrEmpty(s.Bookmark.password);
                         }

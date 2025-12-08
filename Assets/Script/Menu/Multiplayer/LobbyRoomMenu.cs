@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using YARG.Core.Input;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Menu.Data;
+using YARG.Menu.MusicLibrary;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 
@@ -60,6 +63,7 @@ namespace YARG.Menu.Multiplayer
         private string _wanAddress = string.Empty;
         private bool _lanVisible;
         private bool _wanVisible;
+        private bool _hostIsBrowsingSongs = false; // Track if host is in music library
 
         private void Start()
         {
@@ -128,11 +132,29 @@ namespace YARG.Menu.Multiplayer
 
             _waitingForSongSync = false;
             
-            // Subscribe to player join/leave events
+            // Subscribe to player join/leave events from Mirror
             if (YargNetworkManager.Instance != null)
             {
                 YargNetworkManager.Instance.OnPlayerJoined += OnPlayerJoinedLobby;
                 YargNetworkManager.Instance.OnPlayerLeft += OnPlayerLeftLobby;
+            }
+            
+            // Also subscribe to abstraction layer events (LiteNet)
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService != null)
+            {
+                networkingService.OnPlayerJoined += OnAbstractionPlayerJoined;
+                networkingService.OnPlayerLeft += OnAbstractionPlayerLeft;
+                networkingService.OnLobbyLeft += OnAbstractionLobbyLeft;
+                networkingService.OnLobbyJoined += OnAbstractionLobbyInfoUpdated;
+                
+                // Subscribe to browsing state changes (LiteNet specific)
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    liteNetAdapter.OnBrowsingStateChanged += OnHostBrowsingStateChanged;
+                    // Initialize with current state
+                    _hostIsBrowsingSongs = liteNetAdapter.IsBrowsingSongs;
+                }
             }
             
             // RefreshLobbyInfo will call UpdateNavigationScheme after setting isHost
@@ -146,11 +168,27 @@ namespace YARG.Menu.Multiplayer
 
         private void OnDisable()
         {
-            // Unsubscribe from player events
+            // Unsubscribe from player events (Mirror)
             if (YargNetworkManager.Instance != null)
             {
                 YargNetworkManager.Instance.OnPlayerJoined -= OnPlayerJoinedLobby;
                 YargNetworkManager.Instance.OnPlayerLeft -= OnPlayerLeftLobby;
+            }
+            
+            // Unsubscribe from abstraction layer events (LiteNet)
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService != null)
+            {
+                networkingService.OnPlayerJoined -= OnAbstractionPlayerJoined;
+                networkingService.OnPlayerLeft -= OnAbstractionPlayerLeft;
+                networkingService.OnLobbyLeft -= OnAbstractionLobbyLeft;
+                networkingService.OnLobbyJoined -= OnAbstractionLobbyInfoUpdated;
+                
+                // Unsubscribe from browsing state changes
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    liteNetAdapter.OnBrowsingStateChanged -= OnHostBrowsingStateChanged;
+                }
             }
             
             // Pop scheme - try/catch in case stack is empty
@@ -229,6 +267,11 @@ namespace YARG.Menu.Multiplayer
                     entries.Add(new NavigationScheme.Entry(MenuAction.Blue, "Kick Player", OnKickPlayerClicked));
                 }
             }
+            else if (_hostIsBrowsingSongs)
+            {
+                // Client can join the host when host is browsing songs
+                entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Join Host", OnJoinHostClicked));
+            }
             
             Navigator.Instance?.PushScheme(new NavigationScheme(entries, true));
         }
@@ -302,6 +345,81 @@ namespace YARG.Menu.Multiplayer
             StartCoroutine(RefreshAfterDelay());
         }
         
+        /// <summary>
+        /// Handler for abstraction layer (LiteNet) player joined events.
+        /// </summary>
+        private void OnAbstractionPlayerJoined(NetworkPlayerData player)
+        {
+            Debug.Log($"[LobbyRoomMenu] Abstraction layer: Player joined: {player?.PlayerName ?? "null"}");
+            RefreshLobbyInfo();
+        }
+        
+        /// <summary>
+        /// Handler for abstraction layer (LiteNet) player left events.
+        /// </summary>
+        private void OnAbstractionPlayerLeft(NetworkPlayerData player)
+        {
+            Debug.Log($"[LobbyRoomMenu] Abstraction layer: Player left: {player?.PlayerName ?? "null"}");
+            StartCoroutine(RefreshAfterDelay());
+        }
+        
+        /// <summary>
+        /// Handler for abstraction layer (LiteNet) lobby left events.
+        /// This is called when the client is kicked or disconnected from the server.
+        /// </summary>
+        private void OnAbstractionLobbyLeft()
+        {
+            Debug.Log("[LobbyRoomMenu] Abstraction layer: Lobby left (kicked or disconnected)");
+            // Reuse the same logic as Mirror's OnLobbyLeft handler
+            OnLobbyLeft();
+        }
+        
+        /// <summary>
+        /// Handler for abstraction layer (LiteNet) lobby info updated events.
+        /// This is called when lobby info changes (e.g., STUN resolves the public IP).
+        /// </summary>
+        private void OnAbstractionLobbyInfoUpdated(LobbyInfo lobby)
+        {
+            Debug.Log($"[LobbyRoomMenu] Abstraction layer: Lobby info updated - {lobby?.LobbyName}");
+            RefreshLobbyInfo();
+        }
+        
+        /// <summary>
+        /// Handler for when the host's browsing state changes.
+        /// Clients use this to know they can join the music library.
+        /// </summary>
+        private void OnHostBrowsingStateChanged(bool isBrowsing)
+        {
+            Debug.Log($"[LobbyRoomMenu] Host browsing state changed: {isBrowsing}");
+            _hostIsBrowsingSongs = isBrowsing;
+            
+            // Update UI to show "Join Host" option for clients
+            UpdateWaitingForHostText();
+            UpdateNavigationScheme();
+        }
+        
+        /// <summary>
+        /// Updates the waiting for host text based on host's browsing state.
+        /// </summary>
+        private void UpdateWaitingForHostText()
+        {
+            if (waitingForHostText == null || isHost)
+                return;
+            
+            if (_hostIsBrowsingSongs)
+            {
+                waitingForHostText.text = "Host is browsing songs - Press <color=#FFFF00>Y</color> to join";
+                waitingForHostText.gameObject.SetActive(true);
+            }
+            else
+            {
+                waitingForHostText.text = !string.IsNullOrEmpty(_defaultWaitingForHostText)
+                    ? _defaultWaitingForHostText
+                    : "Waiting for host...";
+                waitingForHostText.gameObject.SetActive(true);
+            }
+        }
+        
         private System.Collections.IEnumerator RefreshAfterDelay()
         {
             // Wait one frame for the player object to be destroyed
@@ -359,6 +477,78 @@ namespace YARG.Menu.Multiplayer
             Debug.Log("[LobbyRoomMenu] RefreshLobbyInfo called");
             EnsureHostAddressPanel();
             
+            // Try abstraction layer first (LiteNet)
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService != null && networkingService.CurrentLobby != null)
+            {
+                var abstractionLobby = networkingService.CurrentLobby;
+                Debug.Log($"[LobbyRoomMenu] Using abstraction lobby: {abstractionLobby.LobbyName}, Players: {abstractionLobby.CurrentPlayers}/{abstractionLobby.MaxPlayers}");
+                
+                isHost = networkingService.IsHosting;
+                
+                // Update lobby info display
+                if (lobbyNameText != null)
+                    lobbyNameText.text = abstractionLobby.LobbyName;
+                if (hostNameText != null)
+                    hostNameText.text = $"Host: {abstractionLobby.HostName}";
+                if (playerCountText != null)
+                    playerCountText.text = $"{abstractionLobby.CurrentPlayers}/{abstractionLobby.MaxPlayers} Players";
+                
+                // Format endpoints for sidebar display
+                int absPort = abstractionLobby.Port > 0 ? abstractionLobby.Port : NetworkTransportDefaults.DefaultUdpPort;
+                string absLanEndpoint = FormatEndpoint(abstractionLobby.IpAddress, abstractionLobby.Port, absPort);
+                string absWanEndpoint = FormatEndpoint(abstractionLobby.PublicAddress, abstractionLobby.PublicPort, absPort);
+                
+                // Update the host address panel (sidebar with LAN/WAN addresses)
+                bool absHostPanelVisible = UpdateHostAddressPanel(absLanEndpoint, absWanEndpoint);
+                
+                // Update connection info text
+                var abstractionConnectionText = connectionInfoText != null ? connectionInfoText : lobbyCodeText;
+                if (abstractionConnectionText != null)
+                {
+                    string connectLabel = string.Empty;
+                    
+                    if (!string.IsNullOrEmpty(absLanEndpoint))
+                    {
+                        connectLabel = $"Direct Connect (LAN): {absLanEndpoint}";
+                    }
+                    
+                    if (!string.IsNullOrEmpty(absWanEndpoint) && !absWanEndpoint.Equals(absLanEndpoint))
+                    {
+                        if (!string.IsNullOrEmpty(connectLabel))
+                        {
+                            connectLabel += "\n";
+                        }
+                        connectLabel += $"Public Address: {absWanEndpoint}";
+                    }
+                    
+                    if (string.IsNullOrEmpty(connectLabel))
+                    {
+                        connectLabel = "Direct Connect: Resolving...";
+                    }
+                    
+                    // If host panel is visible, just show a brief message
+                    string finalLabel = connectLabel;
+                    if (isHost && absHostPanelVisible)
+                    {
+                        finalLabel = "Direct connect details are shown below.";
+                    }
+                    
+                    abstractionConnectionText.text = finalLabel;
+                    Debug.Log($"[LobbyRoomMenu] Set connection info text to: {finalLabel.Replace('\n', ' ')}");
+                }
+                
+                // Show/hide controls based on role
+                UpdateControlsForRole();
+                RefreshPlayerList();
+                UpdateNavigationScheme();
+                
+                // Force UI update
+                UnityEngine.Canvas.ForceUpdateCanvases();
+                return;
+            }
+            
+            // Fall back to Mirror (original code)
             // Don't crash if called during scene init when LobbyRoomMenu is active by default
             if (YargNetworkManager.Instance == null)
             {
@@ -855,6 +1045,44 @@ namespace YARG.Menu.Multiplayer
                 Destroy(child.gameObject);
             }
 
+            // Try abstraction layer first (LiteNet)
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService != null && networkingService.CurrentLobby != null)
+            {
+                var connectedPlayers = networkingService.GetConnectedPlayers();
+                if (connectedPlayers != null && connectedPlayers.Count > 0)
+                {
+                    var allPlayers = new List<NetworkPlayerData>();
+                    foreach (var kvp in connectedPlayers)
+                    {
+                        if (kvp.Value != null)
+                        {
+                            allPlayers.AddRange(kvp.Value);
+                        }
+                    }
+
+                    if (allPlayers.Count > 0)
+                    {
+                        Debug.Log($"[LobbyRoomMenu] Refreshing player list with {allPlayers.Count} players from abstraction layer");
+                        for (int i = 0; i < allPlayers.Count; i++)
+                        {
+                            CreatePlayerView(allPlayers[i]);
+                            if (i < allPlayers.Count - 1)
+                            {
+                                CreateDivider();
+                            }
+                        }
+                        MoveWaitingTextToContainer();
+                        return;
+                    }
+                    else
+                    {
+                        Debug.Log("[LobbyRoomMenu] No players in abstraction layer yet");
+                    }
+                }
+            }
+
+            // Fall back to Mirror
             if (YargNetworkManager.Instance == null)
             {
                 Debug.LogWarning("[LobbyRoomMenu] YargNetworkManager is null!");
@@ -862,23 +1090,23 @@ namespace YARG.Menu.Multiplayer
             }
 
             // Get all connected players
-            var allPlayers = YargNetworkManager.Instance.GetAllPlayers();
+            var mirrorPlayers = YargNetworkManager.Instance.GetAllPlayers();
             
-            if (allPlayers == null || allPlayers.Count == 0)
+            if (mirrorPlayers == null || mirrorPlayers.Count == 0)
             {
                 Debug.Log("[LobbyRoomMenu] No players to display yet");
                 return;
             }
 
-            Debug.Log($"[LobbyRoomMenu] Refreshing player list with {allPlayers.Count} players");
+            Debug.Log($"[LobbyRoomMenu] Refreshing player list with {mirrorPlayers.Count} players");
 
             // Create a view for each player
-            for (int i = 0; i < allPlayers.Count; i++)
+            for (int i = 0; i < mirrorPlayers.Count; i++)
             {
-                CreatePlayerView(allPlayers[i]);
+                CreatePlayerView(mirrorPlayers[i]);
                 
                 // Add divider after each player except the last one
-                if (i < allPlayers.Count - 1)
+                if (i < mirrorPlayers.Count - 1)
                 {
                     CreateDivider();
                 }
@@ -927,7 +1155,36 @@ namespace YARG.Menu.Multiplayer
             }
 
             // Check if this is the local player
-            bool isLocalPlayer = playerData.IsLocalUser;
+            // For LiteNet players, we can't use IsLocalUser (Mirror dependency), so check if abstraction layer is hosting
+            bool isLocalPlayer;
+            try
+            {
+                var networkingService = NetworkingServiceFactory.Instance;
+                if (networkingService != null && networkingService.CurrentLobby != null)
+                {
+                    // For LiteNet, consider the player local if we're hosting and it's the host player,
+                    // OR if we're not hosting (i.e., we're a client) and the player is NOT the host (i.e., it's us)
+                    // Actually, for clients we need to track which player is "ours" - for now assume the first non-host player
+                    if (networkingService.IsHosting)
+                    {
+                        isLocalPlayer = playerData.IsHost; // On host, local player is the host player
+                    }
+                    else
+                    {
+                        isLocalPlayer = !playerData.IsHost; // On client, local player is the non-host player
+                    }
+                    Debug.Log($"[LobbyRoomMenu] isLocalPlayer detection: IsHosting={networkingService.IsHosting}, playerData.IsHost={playerData.IsHost}, result={isLocalPlayer}");
+                }
+                else
+                {
+                    isLocalPlayer = playerData.IsLocalUser;
+                }
+            }
+            catch
+            {
+                // Fallback: if IsLocalUser throws, assume local if host
+                isLocalPlayer = playerData.IsHost;
+            }
             
             // Set up selection for host (or for all players for future features)
             var button = entry.GetComponent<Button>();
@@ -996,6 +1253,24 @@ namespace YARG.Menu.Multiplayer
 
             Debug.Log("Host starting song selection...");
 
+            // Check if using LiteNet abstraction layer
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService != null && networkingService.CurrentLobby != null && networkingService.IsHosting)
+            {
+                Debug.Log("[LobbyRoomMenu] Using LiteNet - navigating to music library");
+                
+                // Broadcast navigation command to all connected clients
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    liteNetAdapter.BroadcastNavigateToMusicLibrary();
+                }
+                
+                // Navigate host to music library
+                MenuManager.Instance.PushMenu(MenuManager.Menu.MusicLibrary);
+                return;
+            }
+
+            // Fall back to Mirror implementation
             if (YargNetworkManager.Instance == null)
             {
                 Debug.LogWarning("[LobbyRoomMenu] Cannot start song selection - network manager missing");
@@ -1017,11 +1292,48 @@ namespace YARG.Menu.Multiplayer
 
             YargNetworkManager.Instance.RequestStartSongSelection();
         }
+        
+        /// <summary>
+        /// Called when a client presses "Join Host" to navigate to the music library
+        /// when the host is already browsing songs.
+        /// </summary>
+        public void OnJoinHostClicked()
+        {
+            if (isHost)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] OnJoinHostClicked called but we are the host!");
+                return;
+            }
+            
+            if (!_hostIsBrowsingSongs)
+            {
+                Debug.LogWarning("[LobbyRoomMenu] OnJoinHostClicked called but host is not browsing songs!");
+                return;
+            }
+            
+            Debug.Log("[LobbyRoomMenu] Client: Joining host in music library");
+            MenuManager.Instance.PushMenu(MenuManager.Menu.MusicLibrary);
+        }
 
         public void OnLeaveLobbyClicked()
         {
-            // Both host and client show confirmation dialog when leaving lobby entirely
+            // Check if we're in a lobby using either Mirror or LiteNet
+            bool isInLobby = false;
+            
+            // Check Mirror
             if (YargNetworkManager.Instance != null && YargNetworkManager.Instance.isNetworkActive)
+            {
+                isInLobby = true;
+            }
+            
+            // Check LiteNet abstraction layer
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null && networkService.CurrentLobby != null)
+            {
+                isInLobby = true;
+            }
+            
+            if (isInLobby)
             {
                 ShowLeaveLobbyDialog();
             }
@@ -1095,18 +1407,32 @@ namespace YARG.Menu.Multiplayer
         {
             if (DialogManager.Instance == null) return;
             
-            bool isHost = YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost();
+            // Check if user is host using either Mirror or LiteNet
+            bool isHostUser = false;
             
-            string title = isHost ? "Close Lobby?" : "Leave Lobby?";
-            string message = isHost
+            // Check Mirror first
+            if (YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost())
+            {
+                isHostUser = true;
+            }
+            
+            // Check LiteNet abstraction layer
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null && networkService.IsHosting)
+            {
+                isHostUser = true;
+            }
+            
+            string title = isHostUser ? "Close Lobby?" : "Leave Lobby?";
+            string message = isHostUser
                 ? "Are you sure you want to close the lobby? All connected players will be disconnected."
-                : "Are you sure you want to leave the lobby? You will be disconnected from the host.";
+                : "Are you sure you want to leave the lobby?";
             
             var dialog = DialogManager.Instance.ShowMessage(title, message);
             
             dialog.ClearButtons();
             dialog.AddDialogButton("Cancel", MenuData.Colors.BrightButton, () => DialogManager.Instance.ClearDialog());
-            dialog.AddDialogButton(isHost ? "Close Lobby" : "Leave Lobby", MenuData.Colors.CancelButton, () =>
+            dialog.AddDialogButton(isHostUser ? "Close Lobby" : "Leave Lobby", MenuData.Colors.CancelButton, () =>
             {
                 DialogManager.Instance.ClearDialog();
                 LeaveLobby();
@@ -1116,6 +1442,34 @@ namespace YARG.Menu.Multiplayer
         private void LeaveLobby()
         {
             Debug.Log("[LobbyRoomMenu] LeaveLobby called");
+            
+            // Clean up any multiplayer-related global state to prevent issues like
+            // practice mode persisting (similar bug we fixed earlier)
+            CleanupMultiplayerState();
+            
+            // Check if we're using the abstraction layer (LiteNet) first
+            try
+            {
+                var factory = NetworkingServiceFactory.Instance;
+                if (factory != null && factory.CurrentLobby != null)
+                {
+                    Debug.Log("[LobbyRoomMenu] Using abstraction layer (LiteNet) for LeaveLobby");
+                    
+                    // Disconnect first to kill the lobby/connection
+                    factory.LeaveLobby();
+                    
+                    // Then return to the lobby browser menu
+                    MenuManager.Instance?.PopMenu();
+                    return;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[LobbyRoomMenu] Error checking abstraction layer: {ex.Message}");
+            }
+            
+            // Fall back to Mirror networking
+            Debug.Log("[LobbyRoomMenu] Using Mirror for LeaveLobby");
             
             // If host, sync menu navigation to clients before disconnecting
             if (YargNetworkManager.Instance != null && 
@@ -1127,10 +1481,7 @@ namespace YARG.Menu.Multiplayer
                 YargNetworkManager.Instance.RequestSyncMenuNavigation(popMenu: true);
             }
             
-            // Return to menu
-            MenuManager.Instance?.PopMenu();
-            
-            // Then disconnect from network
+            // Disconnect from network first
             if (YargNetworkManager.Instance != null)
             {
                 Debug.Log($"[LobbyRoomMenu] NetworkServer.active: {Mirror.NetworkServer.active}, NetworkClient.isConnected: {Mirror.NetworkClient.isConnected}");
@@ -1138,6 +1489,31 @@ namespace YARG.Menu.Multiplayer
                 // Call LeaveLobby which handles stopping host or client
                 YargNetworkManager.Instance.LeaveLobby();
             }
+            
+            // Then return to the lobby browser menu
+            MenuManager.Instance?.PopMenu();
+        }
+        
+        /// <summary>
+        /// Cleans up multiplayer-related global state when leaving the lobby.
+        /// This prevents issues like practice mode or show state persisting incorrectly.
+        /// </summary>
+        private void CleanupMultiplayerState()
+        {
+            Debug.Log("[LobbyRoomMenu] Cleaning up multiplayer state");
+            
+            // Reset practice mode to ensure it doesn't persist into single-player
+            GlobalVariables.State.IsPractice = false;
+            
+            // Clear show/setlist state
+            GlobalVariables.State.PlayingAShow = false;
+            GlobalVariables.State.ShowSongs?.Clear();
+            GlobalVariables.State.ShowIndex = 0;
+            
+            // Reset library mode to QuickPlay (default for single-player)
+            MusicLibraryMenu.LibraryMode = MusicLibraryMode.QuickPlay;
+            
+            Debug.Log("[LobbyRoomMenu] Multiplayer state cleaned up");
         }
 
         private void OnLobbyLeft()

@@ -33,6 +33,12 @@ namespace YARG.Networking
         [SyncVar(hook = nameof(OnPlayerNameChanged))]
         private string playerName = "Player";
         
+        /// <summary>
+        /// The unique network identifier for this player, persisted across sessions.
+        /// Used to identify players even if they have the same display name.
+        /// </summary>
+        public Guid NetworkPlayerId { get; set; } = Guid.Empty;
+        
         private void Awake()
         {
             // CRITICAL: Explicitly mark as DontDestroyOnLoad to survive scene transitions
@@ -183,6 +189,20 @@ namespace YARG.Networking
         [SyncVar]
         private int soloTotalBonus = 0;
 
+        /// <summary>
+        /// Bitmask indicating which sustain lanes are currently being held by the player.
+        /// For 5-fret guitar: bit 0 = Green (fret 0), bit 1 = Red (fret 1), etc.
+        /// For 6-fret guitar: bits 0-5 for each lane.
+        /// </summary>
+        [SyncVar]
+        private int sustainsHeld = 0;
+
+        /// <summary>
+        /// Current whammy bar position (0 = not pressed, 1 = fully pressed).
+        /// </summary>
+        [SyncVar]
+        private float whammyValue = 0f;
+
         [SyncVar]
         private double lastGameplaySongTime = 0d;
 
@@ -209,6 +229,10 @@ namespace YARG.Networking
         private int _songHashBlobVersion = -1;
         private List<byte[]> _songHashChunks;
         private int _songHashChunksVersion = -1;
+        
+        // LiteNet override for IsLocalUser (set via reflection)
+        private bool _isLocalUserOverride = false;
+        private bool _useLocalUserOverride = false;
 
         // Events
         public event Action<string> OnPlayerNameChangedEvent;
@@ -254,6 +278,8 @@ namespace YARG.Networking
         public int SoloNotesHit => soloNotesHit;
         public int SoloLastBonus => soloLastBonus;
         public int SoloTotalBonus => soloTotalBonus;
+        public int SustainsHeld => sustainsHeld;
+        public float WhammyValue => whammyValue;
         public bool GameplayReady => gameplayReady;
         public double GameplayReadyServerTime => gameplayReadyServerTime;
         public bool HasFailed => hasFailed;
@@ -261,6 +287,12 @@ namespace YARG.Networking
         {
             get
             {
+                // LiteNet override takes precedence
+                if (_useLocalUserOverride)
+                {
+                    return _isLocalUserOverride;
+                }
+                
                 if (isClient && !NetworkServer.active)
                 {
                     return isLocalPlayer || isOwned;
@@ -1351,6 +1383,15 @@ namespace YARG.Networking
             ResetGameplaySnapshotState();
         }
 
+        /// <summary>
+        /// Reset game state directly without network command.
+        /// Used by LiteNet which doesn't use Mirror's Command pattern.
+        /// </summary>
+        public void ResetGameState()
+        {
+            ResetGameplaySnapshotState();
+        }
+
         #endregion
 
         #region SyncVar Hooks
@@ -1414,6 +1455,8 @@ namespace YARG.Networking
             soloNotesHit = 0;
             soloLastBonus = 0;
             soloTotalBonus = 0;
+            sustainsHeld = 0;
+            whammyValue = 0f;
             lastGameplaySnapshotSequence = 0;
             lastGameplaySongTime = 0d;
             lastGameplayNetworkTime = 0d;

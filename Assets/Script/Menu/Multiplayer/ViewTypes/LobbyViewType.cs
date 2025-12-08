@@ -49,7 +49,7 @@ namespace YARG.Menu.Multiplayer
     /// </summary>
     public class DiscoveredLobbyViewType : LobbyViewType
     {
-        private readonly YargNetworkManager.LobbyInfo _lobbyInfo;
+        private readonly YARG.Networking.Abstraction.LobbyInfo _lobbyInfo;
         private readonly LobbyBrowserMenu _menu;
         private readonly LobbyFavorites _favorites;
         
@@ -57,26 +57,27 @@ namespace YARG.Menu.Multiplayer
 
         public override BackgroundType Background => BackgroundType.Normal;
         public override bool ShowFavoriteButton => true;
-        public override bool IsFavorited => _favorites.IsFavorited(_lobbyInfo.ipAddress, _lobbyInfo.port);
+        public override bool IsFavorited => _favorites.IsFavorited(_lobbyInfo.IpAddress, _lobbyInfo.Port);
         public override int Ping
         {
             get
             {
-                long diff = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lobbyInfo.lastSeen);
-                return (int) Math.Min(int.MaxValue, diff);
+                // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
+                // Return 0 for now - proper ping tracking needs to be implemented
+                return 0;
             }
         }
         public override bool CanEdit => GetBookmark() != null;
         
-        public YargNetworkManager.LobbyInfo LobbyInfo => _lobbyInfo;
+        public YARG.Networking.Abstraction.LobbyInfo LobbyInfo => _lobbyInfo;
 
         public override string GetSelectionKey()
         {
             if (_lobbyInfo == null) return null;
-            return string.Concat("disc:", _lobbyInfo.ipAddress, ":", _lobbyInfo.port);
+            return string.Concat("disc:", _lobbyInfo.IpAddress, ":", _lobbyInfo.Port);
         }
         
-        public DiscoveredLobbyViewType(YargNetworkManager.LobbyInfo lobbyInfo, LobbyBrowserMenu menu, LobbyFavorites favorites)
+        public DiscoveredLobbyViewType(YARG.Networking.Abstraction.LobbyInfo lobbyInfo, LobbyBrowserMenu menu, LobbyFavorites favorites)
         {
             _lobbyInfo = lobbyInfo;
             _menu = menu;
@@ -86,28 +87,28 @@ namespace YARG.Menu.Multiplayer
         public override string GetPrimaryText(bool selected)
         {
             // Show lobby name using proper text formatting
-            return FormatAs(_lobbyInfo.lobbyName, TextType.Primary, selected);
+            return FormatAs(_lobbyInfo.LobbyName, TextType.Primary, selected);
         }
         
         public override string GetSecondaryText(bool selected)
         {
             // Show host name using proper text formatting
-            return FormatAs($"Host: {_lobbyInfo.hostName}", TextType.Secondary, selected);
+            return FormatAs($"Host: {_lobbyInfo.HostName}", TextType.Secondary, selected);
         }
         
         public string GetPlayerCountText()
         {
-            var filledColor = _lobbyInfo.currentPlayers >= _lobbyInfo.maxPlayers 
+            var filledColor = _lobbyInfo.CurrentPlayers >= _lobbyInfo.MaxPlayers 
                 ? new Color(1f, 0.3f, 0.3f) // Red when full
                 : MenuData.Colors.PrimaryText;
             
             var currentText = TextColorer.StyleString(
-                ZString.Format("{0}", _lobbyInfo.currentPlayers),
+                ZString.Format("{0}", _lobbyInfo.CurrentPlayers),
                 filledColor,
                 600);
             
             var maxText = TextColorer.StyleString(
-                ZString.Format("/{0}", _lobbyInfo.maxPlayers),
+                ZString.Format("/{0}", _lobbyInfo.MaxPlayers),
                 MenuData.Colors.PrimaryText.WithAlpha(0.5f),
                 400);
             
@@ -116,48 +117,14 @@ namespace YARG.Menu.Multiplayer
         
         public string GetPingText()
         {
-            if (_lobbyInfo.lastSeen <= 0)
-            {
-                return TextColorer.StyleString("Awaiting signal", MenuData.Colors.PrimaryText.WithAlpha(0.45f), 400);
-            }
-
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            long deltaMs = Math.Max(0, now - _lobbyInfo.lastSeen);
-            var delta = TimeSpan.FromMilliseconds(deltaMs);
-
-            string label;
-            Color color;
-
-            if (delta <= TimeSpan.FromSeconds(2))
-            {
-                label = "Live";
-                color = new Color(0.35f, 0.92f, 0.55f);
-            }
-            else if (delta <= TimeSpan.FromSeconds(10))
-            {
-                int seconds = Mathf.Max(1, Mathf.RoundToInt((float) delta.TotalSeconds));
-                label = ZString.Format("{0}s ago", seconds);
-                color = new Color(0.96f, 0.78f, 0.32f);
-            }
-            else if (delta < TimeSpan.FromMinutes(1))
-            {
-                int seconds = Mathf.Max(10, Mathf.RoundToInt((float) delta.TotalSeconds));
-                label = ZString.Format("{0}s ago", seconds);
-                color = new Color(0.96f, 0.58f, 0.32f);
-            }
-            else
-            {
-                int minutes = Mathf.Max(1, Mathf.RoundToInt((float) delta.TotalMinutes));
-                label = minutes == 1 ? "1 min ago" : ZString.Format("{0} mins ago", minutes);
-                color = MenuData.Colors.PrimaryText.WithAlpha(0.55f);
-            }
-
-            return TextColorer.StyleString(label, color, 500);
+            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
+            // For now, just show Live status
+            return TextColorer.StyleString("Live", new Color(0.35f, 0.92f, 0.55f), 400);
         }
         
         public bool HasPassword()
         {
-            return _lobbyInfo.hasPassword;
+            return _lobbyInfo.HasPassword;
         }
         
         public override void OnJoinClick()
@@ -169,11 +136,11 @@ namespace YARG.Menu.Multiplayer
         {
             if (IsFavorited)
             {
-                _favorites.RemoveFavorite(_lobbyInfo.ipAddress, _lobbyInfo.port);
+                _favorites.RemoveFavorite(_lobbyInfo.IpAddress, _lobbyInfo.Port);
             }
             else
             {
-                _favorites.AddFavorite(_lobbyInfo.ipAddress, _lobbyInfo.port, _lobbyInfo.lobbyName, string.Empty);
+                _favorites.AddFavorite(_lobbyInfo.IpAddress, _lobbyInfo.Port, _lobbyInfo.LobbyName, string.Empty);
             }
         }
 
@@ -188,7 +155,7 @@ namespace YARG.Menu.Multiplayer
 
         private LobbyBookmark GetBookmark()
         {
-            return _favorites.FindBookmark(_lobbyInfo.ipAddress, _lobbyInfo.port);
+            return _favorites.FindBookmark(_lobbyInfo.IpAddress, _lobbyInfo.Port);
         }
     }
     
@@ -335,7 +302,7 @@ namespace YARG.Menu.Multiplayer
         internal override LobbyBrowserMenu MenuOwner => _menu;
 
         // Live info from discovery/ping for this saved bookmark (nullable)
-        public YargNetworkManager.LobbyInfo LiveInfo { get; set; }
+        public YARG.Networking.Abstraction.LobbyInfo LiveInfo { get; set; }
 
         public override BackgroundType Background => BackgroundType.Normal;
         public override bool ShowFavoriteButton => true;
@@ -396,17 +363,17 @@ namespace YARG.Menu.Multiplayer
             if (LiveInfo != null)
             {
                 // Show player count when live
-                var filledColor = LiveInfo.currentPlayers >= LiveInfo.maxPlayers
+                var filledColor = LiveInfo.CurrentPlayers >= LiveInfo.MaxPlayers
                     ? new Color(1f, 0.3f, 0.3f)
                     : MenuData.Colors.PrimaryText;
 
                 var currentText = TextColorer.StyleString(
-                    ZString.Format("{0}", LiveInfo.currentPlayers),
+                    ZString.Format("{0}", LiveInfo.CurrentPlayers),
                     filledColor,
                     600);
 
                 var maxText = TextColorer.StyleString(
-                    ZString.Format("/{0}", LiveInfo.maxPlayers),
+                    ZString.Format("/{0}", LiveInfo.MaxPlayers),
                     MenuData.Colors.PrimaryText.WithAlpha(0.5f),
                     400);
 
@@ -420,44 +387,9 @@ namespace YARG.Menu.Multiplayer
         {
             if (LiveInfo != null)
             {
-                // Use discovery lastSeen to show Live/age similar to discovered view
-                if (LiveInfo.lastSeen <= 0)
-                {
-                    return TextColorer.StyleString("Awaiting signal", MenuData.Colors.PrimaryText.WithAlpha(0.45f), 400);
-                }
-
-                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                long deltaMs = Math.Max(0, now - LiveInfo.lastSeen);
-                var delta = TimeSpan.FromMilliseconds(deltaMs);
-
-                string label;
-                Color color;
-
-                if (delta <= TimeSpan.FromSeconds(2))
-                {
-                    label = "ONLINE";
-                    color = new Color(0.35f, 0.92f, 0.55f);
-                }
-                else if (delta <= TimeSpan.FromSeconds(10))
-                {
-                    int seconds = Mathf.Max(1, Mathf.RoundToInt((float) delta.TotalSeconds));
-                    label = ZString.Format("{0}s ago", seconds);
-                    color = new Color(0.96f, 0.78f, 0.32f);
-                }
-                else if (delta < TimeSpan.FromMinutes(1))
-                {
-                    int seconds = Mathf.Max(10, Mathf.RoundToInt((float) delta.TotalSeconds));
-                    label = ZString.Format("{0}s ago", seconds);
-                    color = new Color(0.96f, 0.58f, 0.32f);
-                }
-                else
-                {
-                    int minutes = Mathf.Max(1, Mathf.RoundToInt((float) delta.TotalMinutes));
-                    label = minutes == 1 ? "1 min ago" : ZString.Format("{0} mins ago", minutes);
-                    color = MenuData.Colors.PrimaryText.WithAlpha(0.55f);
-                }
-
-                return TextColorer.StyleString(label, color, 400);
+                // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
+                // For now, just show ONLINE if we have LiveInfo
+                return TextColorer.StyleString("ONLINE", new Color(0.35f, 0.92f, 0.55f), 600);
             }
 
             if (_bookmark.lastConnected <= 0)

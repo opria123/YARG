@@ -373,11 +373,26 @@ namespace YARG.Menu.MusicLibrary
             // Check if we're in multiplayer mode
             bool isMultiplayer = NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive;
             
+            // Check if we're the host (only host can quick start)
+            bool isHost = false;
+            if (isMultiplayer)
+            {
+                var networkingService = NetworkingServiceFactory.Instance;
+                if (networkingService is Networking.Abstraction.LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    isHost = liteNetAdapter.IsHosting;
+                }
+                else if (Networking.YargNetworkManager.Instance != null)
+                {
+                    isHost = Networking.YargNetworkManager.Instance.LocalUserIsHost();
+                }
+            }
+            
             if (ShowPlaylist.Count == 0)
             {
-                // Yellow button behavior: in multiplayer it's for quick-start, otherwise add to set
-                string yellowLabel = isMultiplayer ? "Menu.MusicLibrary.QuickStart" : "Menu.MusicLibrary.AddToSet";
-                System.Action yellowAction = isMultiplayer ? (System.Action)QuickStartShow : AddToPlaylist;
+                // Yellow button behavior: in multiplayer host gets quick-start, clients get add to set
+                string yellowLabel = (isMultiplayer && isHost) ? "Menu.MusicLibrary.QuickStart" : "Menu.MusicLibrary.AddToSet";
+                System.Action yellowAction = (isMultiplayer && isHost) ? (System.Action)QuickStartShow : AddToPlaylist;
                 
                 Navigator.Instance.PushScheme(new NavigationScheme(new()
                 {
@@ -421,9 +436,9 @@ namespace YARG.Menu.MusicLibrary
             }
             else
             {
-                // Yellow button behavior: in multiplayer it's for quick-start, otherwise add to set
-                string yellowLabel = isMultiplayer ? "Menu.MusicLibrary.QuickStart" : "Menu.MusicLibrary.AddToSet";
-                System.Action yellowAction = isMultiplayer ? (System.Action)QuickStartShow : AddToPlaylist;
+                // Yellow button behavior: in multiplayer host gets quick-start, clients get add to set
+                string yellowLabel = (isMultiplayer && isHost) ? "Menu.MusicLibrary.QuickStart" : "Menu.MusicLibrary.AddToSet";
+                System.Action yellowAction = (isMultiplayer && isHost) ? (System.Action)QuickStartShow : AddToPlaylist;
                 
                 // Blue button behavior: in multiplayer go to setlist management, in single player start show
                 string blueLabel = isMultiplayer ? "Menu.MusicLibrary.ViewSetlist" : "Menu.MusicLibrary.StartSet";
@@ -890,6 +905,13 @@ namespace YARG.Menu.MusicLibrary
             _savedIndex = SelectedIndex;
             _savedPlaylist = SelectedPlaylist;
 
+            // If we're in show mode, we have an extra navigation scheme on the stack
+            // that was pushed by EnterShowMode/SetShowNavigationScheme. Pop it first.
+            if (MenuState == MenuState.Show)
+            {
+                Navigator.Instance.PopScheme();
+            }
+
             Navigator.Instance.PopScheme();
 
             _previewCanceller?.Cancel();
@@ -915,6 +937,15 @@ namespace YARG.Menu.MusicLibrary
             _previewContext?.Dispose();
             _reloadState = MusicLibraryReloadState.Partial;
             StemSettings.ApplySettings = true;
+            
+            // Unsubscribe from LiteNet setlist updates
+            var networkingService = Networking.Abstraction.NetworkingServiceFactory.Instance;
+            if (networkingService is Networking.Abstraction.LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                liteNetAdapter.OnSetlistUpdated -= OnLiteNetSetlistUpdated;
+                liteNetAdapter.OnSetlistSongAdded -= OnLiteNetSongAdded;
+                liteNetAdapter.OnSetlistSongRemoved -= OnLiteNetSongRemoved;
+            }
         }
 
         private void Back()

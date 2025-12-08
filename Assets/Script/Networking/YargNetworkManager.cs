@@ -2066,6 +2066,19 @@ namespace YARG.Networking
 
             FinalizeProbeConnection(_activeProbeSessionId);
         }
+        
+        /// <summary>
+        /// Public method to cancel any pending probe connection.
+        /// This should be called when navigating away from the lobby browser
+        /// to ensure no lingering probe connections interfere with gameplay.
+        /// </summary>
+        public void CancelPendingProbe()
+        {
+            if (_probeConnectionPending || _probeConnectionActive || _probeCompletionSource != null)
+            {
+                CancelActiveProbe("Menu navigation cleanup");
+            }
+        }
 
         private void StopActiveClient(string reason, int sessionId = 0)
         {

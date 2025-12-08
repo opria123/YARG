@@ -4,6 +4,7 @@ using YARG.Menu.Data;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Gameplay.HUD
 {
@@ -11,6 +12,7 @@ namespace YARG.Gameplay.HUD
     /// Pause menu for online multiplayer gameplay.
     /// Host can restart, toggle practice, and return all players to library.
     /// Clients can leave lobby (disconnecting all players).
+    /// Supports both Mirror and LiteNet networking backends.
     /// </summary>
     public class MultiplayerPause : GenericPause
     {
@@ -25,12 +27,36 @@ namespace YARG.Gameplay.HUD
         private GameObject _leaveLobbyButton;
         
         private bool _isHost;
+        private bool _useLiteNet;
 
         protected override void OnEnable()
         {
             // Don't call base.OnEnable() - we'll set up our own navigation scheme
             
-            _isHost = YargNetworkManager.Instance != null && YargNetworkManager.Instance.LocalUserIsHost();
+            Debug.Log("[MultiplayerPause] OnEnable called");
+            
+            // Determine which networking backend is active
+            // NOTE: Check LiteNet first - if LiteNet is active, consider Mirror inactive
+            _useLiteNet = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
+            bool isMirrorActive = !_useLiteNet && 
+                                  YargNetworkManager.Instance != null && 
+                                  YargNetworkManager.Instance.isNetworkActive;
+            
+            // Determine if local user is host
+            if (_useLiteNet)
+            {
+                _isHost = NetworkingServiceFactory.Instance?.IsHosting == true;
+            }
+            else if (isMirrorActive)
+            {
+                _isHost = YargNetworkManager.Instance.LocalUserIsHost();
+            }
+            else
+            {
+                _isHost = false;
+            }
+            
+            Debug.Log($"[MultiplayerPause] Networking: LiteNet={_useLiteNet}, Mirror={isMirrorActive}, IsHost={_isHost}");
             
             // Show/hide buttons based on role
             UpdateButtonVisibility();
@@ -64,6 +90,9 @@ namespace YARG.Gameplay.HUD
         
         private void UpdateButtonVisibility()
         {
+            Debug.Log($"[MultiplayerPause] UpdateButtonVisibility: IsHost={_isHost}");
+            Debug.Log($"[MultiplayerPause] Button refs: Restart={_restartButton != null}, Practice={_togglePracticeButton != null}, BackToLibrary={_backToLibraryButton != null}, LeaveLobby={_leaveLobbyButton != null}");
+            
             // Host buttons
             if (_restartButton != null)
                 _restartButton.SetActive(_isHost);
@@ -92,10 +121,18 @@ namespace YARG.Gameplay.HUD
             Debug.Log("[MultiplayerPause] Host restarting song for all players");
             
             // Sync all clients to restart
-            // The scene reload will happen for everyone via GlobalVariables.LoadScene
-            if (YargNetworkManager.Instance != null)
+            if (_useLiteNet)
             {
-                // Send RPC to all clients to reload the gameplay scene
+                // Broadcast restart to all clients via LiteNet
+                var networkService = NetworkingServiceFactory.Instance;
+                if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    liteNetAdapter.BroadcastRestartGameplay();
+                }
+            }
+            else if (YargNetworkManager.Instance != null)
+            {
+                // Send RPC to all clients to reload the gameplay scene (Mirror)
                 YargNetworkManager.Instance.RestartMultiplayerGameplay();
             }
             
@@ -121,11 +158,15 @@ namespace YARG.Gameplay.HUD
             GlobalVariables.State.IsPractice = !GlobalVariables.State.IsPractice;
             
             // Sync practice state to all clients
-            if (YargNetworkManager.Instance != null)
+            if (_useLiteNet)
+            {
+                // For LiteNet, we'd need to implement practice mode sync
+                // For now, just toggle locally (TODO: implement network sync)
+                Debug.Log("[MultiplayerPause] LiteNet practice toggle - currently local only");
+            }
+            else if (YargNetworkManager.Instance != null)
             {
                 YargNetworkManager.Instance.SyncPracticeMode(GlobalVariables.State.IsPractice);
-                
-                // Restart gameplay for all players
                 YargNetworkManager.Instance.RestartMultiplayerGameplay();
             }
             
@@ -147,25 +188,46 @@ namespace YARG.Gameplay.HUD
             
             Debug.Log("[MultiplayerPause] Host returning all players to music library");
             
-            // Set the navigation target for everyone (host and clients)
-            // MenuManager will navigate to MusicLibrary after Menu scene loads
-            YargNetworkManager.SetMenuNavigationAfterSceneLoad(
-                Menu.MenuManager.Menu.OnlineMultiplayer,
-                Menu.MenuManager.Menu.LobbyRoom,
-                Menu.MenuManager.Menu.MusicLibrary);
-            
-            // Tell all clients to quit and return to Menu scene
-            if (YargNetworkManager.Instance != null)
+            if (_useLiteNet)
             {
-                YargNetworkManager.Instance.QuitMultiplayerGameplay();
+                // For LiteNet, broadcast quit to library to all clients
+                var networkService = NetworkingServiceFactory.Instance;
+                if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    // Use BroadcastQuitToLibrary which is specific to quitting gameplay
+                    // This will trigger OnQuitToLibraryRequested on clients
+                    liteNetAdapter.BroadcastQuitToLibrary();
+                    
+                    // Also navigate to music library (this clears setlist and updates state)
+                    liteNetAdapter.BroadcastNavigateToMusicLibrary();
+                }
+                
+                // Quit song for host - this will load Menu scene
+                PauseMenuManager.Quit();
             }
-            
-            // Quit song for host - this will load Menu scene
-            PauseMenuManager.Quit();
+            else
+            {
+                // Mirror path
+                // Set the navigation target for everyone (host and clients)
+                YargNetworkManager.SetMenuNavigationAfterSceneLoad(
+                    Menu.MenuManager.Menu.OnlineMultiplayer,
+                    Menu.MenuManager.Menu.LobbyRoom,
+                    Menu.MenuManager.Menu.MusicLibrary);
+                
+                // Tell all clients to quit and return to Menu scene
+                if (YargNetworkManager.Instance != null)
+                {
+                    YargNetworkManager.Instance.QuitMultiplayerGameplay();
+                }
+                
+                // Quit song for host - this will load Menu scene
+                PauseMenuManager.Quit();
+            }
         }
         
         /// <summary>
-        /// Client action: Disconnects from lobby, bringing all players back to music library.
+        /// Client action: Leaves the lobby and disconnects from gameplay.
+        /// Only affects this client - other players continue playing.
         /// Called from UI button.
         /// </summary>
         public void ClientLeaveLobby()
@@ -196,11 +258,11 @@ namespace YARG.Gameplay.HUD
             
             var dialog = DialogManager.Instance.ShowMessage(
                 "Leave Lobby?",
-                "Are you sure you want to leave the lobby? All players will be returned to the music library.");
+                "Are you sure you want to leave? Your track will be removed from the game and you will be disconnected.");
             
             dialog.ClearButtons();
             dialog.AddDialogButton("Cancel", MenuData.Colors.BrightButton, () => DialogManager.Instance.ClearDialog());
-            dialog.AddDialogButton("Leave Lobby", MenuData.Colors.CancelButton, () =>
+            dialog.AddDialogButton("Leave", MenuData.Colors.CancelButton, () =>
             {
                 DialogManager.Instance.ClearDialog();
                 ExecuteClientLeaveLobby();
@@ -209,19 +271,33 @@ namespace YARG.Gameplay.HUD
         
         private void ExecuteClientLeaveLobby()
         {
-            Debug.Log("[MultiplayerPause] Client leaving lobby - will disconnect all players");
+            Debug.Log("[MultiplayerPause] Client leaving lobby - disconnecting from gameplay");
             
-            // The disconnect will trigger OnClientDisconnectedDuringGameplay on the host,
-            // which will bring all players back to music library.
-            // For this client, OnLobbyLeftDuringGameplay will be triggered,
-            // which will bring them back to lobby browser.
-            if (YargNetworkManager.Instance != null)
+            if (_useLiteNet)
             {
-                YargNetworkManager.Instance.LeaveLobby();
+                // For LiteNet, leave via the networking service
+                // This will trigger OnPlayerLeft on the host, which broadcasts to other clients
+                var networkService = NetworkingServiceFactory.Instance;
+                if (networkService != null)
+                {
+                    networkService.LeaveLobby();
+                }
+                
+                // Return to menu (main menu, not lobby)
+                GlobalVariables.Instance.LoadScene(SceneIndex.Menu);
             }
             else
             {
-                Debug.LogError("[MultiplayerPause] YargNetworkManager.Instance is null!");
+                // Mirror path
+                // The disconnect will be handled by the host which will broadcast to other clients
+                if (YargNetworkManager.Instance != null)
+                {
+                    YargNetworkManager.Instance.LeaveLobby();
+                }
+                else
+                {
+                    Debug.LogError("[MultiplayerPause] YargNetworkManager.Instance is null!");
+                }
             }
         }
     }

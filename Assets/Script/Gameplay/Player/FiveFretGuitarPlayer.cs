@@ -75,6 +75,12 @@ namespace YARG.Gameplay.Player
 
         public float WhammyFactor { get; private set; }
 
+        /// <summary>
+        /// Bitmask indicating which sustain lanes are currently being held.
+        /// Bit 0 = fret 0 (Green), Bit 1 = fret 1 (Red), etc.
+        /// </summary>
+        public int SustainsHeldBitmask { get; private set; }
+
         private int _sustainCount;
 
         private SongStem _stem;
@@ -285,6 +291,19 @@ namespace YARG.Gameplay.Player
 
         private void UpdateFretArray()
         {
+            // For remote players, we use the sustain bitmask to determine which frets are "pressed"
+            // This keeps the glow/pressed effect active while sustaining
+            if (IsRemotePlayer)
+            {
+                for (int fretIndex = 0; fretIndex < 5; fretIndex++)
+                {
+                    int fretBit = 1 << fretIndex;
+                    bool isHeld = (SustainsHeldBitmask & fretBit) != 0;
+                    _fretArray.SetPressed(fretIndex, isHeld);
+                }
+                return;
+            }
+
             for (var fret = GuitarAction.GreenFret; fret <= GuitarAction.OrangeFret; fret++)
             {
                 _fretArray.SetPressed((int) fret, Engine.IsFretHeld(fret));
@@ -439,7 +458,10 @@ namespace YARG.Gameplay.Player
 
                 if (note.Fret != (int) FiveFretGuitarFret.Open)
                 {
-                    _fretArray.SetSustained(note.Fret - 1, true);
+                    int fretIndex = note.Fret - 1;
+                    _fretArray.SetSustained(fretIndex, true);
+                    // Set the bit for this fret in the bitmask
+                    SustainsHeldBitmask |= (1 << fretIndex);
                 }
 
                 _sustainCount++;
@@ -460,7 +482,10 @@ namespace YARG.Gameplay.Player
 
                 if (note.Fret != (int) FiveFretGuitarFret.Open)
                 {
-                    _fretArray.SetSustained(note.Fret - 1, false);
+                    int fretIndex = note.Fret - 1;
+                    _fretArray.SetSustained(fretIndex, false);
+                    // Clear the bit for this fret in the bitmask
+                    SustainsHeldBitmask &= ~(1 << fretIndex);
                 }
 
                 _sustainCount--;
@@ -678,6 +703,105 @@ namespace YARG.Gameplay.Player
                 _activeFrets = newFrets;
                 _fretArray.UpdateFretActiveState(_activeFrets);
             }
+        }
+
+        /// <summary>
+        /// Applies remote player's sustain state to the fret visuals.
+        /// Called by RemotePlayerSimulation when the sustain state changes.
+        /// Note: We only update fret sustained state and handle sustain drops.
+        /// The normal ResolveRemoteNote flow handles hitting notes - we don't interfere with that.
+        /// </summary>
+        /// <param name="oldSustains">Previous sustain bitmask</param>
+        /// <param name="newSustains">New sustain bitmask</param>
+        public void ApplyRemoteSustainState(int oldSustains, int newSustains)
+        {
+            // Check each fret (5-fret guitar has frets 0-4)
+            for (int fretIndex = 0; fretIndex < 5; fretIndex++)
+            {
+                int fretBit = 1 << fretIndex;
+                bool wasHeld = (oldSustains & fretBit) != 0;
+                bool isHeld = (newSustains & fretBit) != 0;
+
+                if (wasHeld != isHeld)
+                {
+                    // Update fret visual states:
+                    // - SetSustained: plays sustain particle effect and sets animator state
+                    // - SetPressed: sets inner material brightness (the "lit up" look when holding)
+                    _fretArray.SetSustained(fretIndex, isHeld);
+                    _fretArray.SetPressed(fretIndex, isHeld);
+
+                    if (isHeld && !wasHeld)
+                    {
+                        // Sustain started (0→1) - play hit animation for the glow effect
+                        // This gives the fret the same visual pop as when hitting a note locally
+                        _fretArray.PlayHitAnimation(fretIndex);
+                    }
+                    else if (!isHeld && wasHeld)
+                    {
+                        // Sustain ended (1→0) - gray out the sustain note
+                        // Fret index is 0-4, but note.Fret is 1-5 (0 = open)
+                        int noteFret = fretIndex + 1;
+                        ApplySustainEndToNoteElements(noteFret);
+                    }
+                }
+            }
+
+            // Update the bitmask for tracking
+            SustainsHeldBitmask = newSustains;
+        }
+
+        /// <summary>
+        /// Applies sustain end state to note elements on a specific fret.
+        /// Called when a remote player releases a sustain.
+        /// </summary>
+        /// <param name="noteFret">The fret number (1-5, or 0 for open)</param>
+        private void ApplySustainEndToNoteElements(int noteFret)
+        {
+            // Iterate through all spawned notes and find active sustain notes on this fret
+            foreach (var poolable in NotePool.AllSpawned)
+            {
+                if (poolable is not FiveFretGuitarNoteElement noteElement)
+                    continue;
+
+                var note = noteElement.NoteRef;
+                if (note == null || !note.IsSustain)
+                    continue;
+
+                // Only affect notes that have been hit (sustain is active)
+                if (!note.WasHit)
+                    continue;
+
+                // Check if this note is on the target fret
+                // Note: For chords, check all notes in the chord
+                bool matchesFret = false;
+                foreach (var childNote in note.AllNotes)
+                {
+                    if (childNote.Fret == noteFret)
+                    {
+                        matchesFret = true;
+                        break;
+                    }
+                }
+
+                if (!matchesFret)
+                    continue;
+
+                // Call SustainEnd to gray out the sustain
+                noteElement.SustainEnd(false);
+            }
+        }
+
+        /// <summary>
+        /// Applies remote player's whammy bar value.
+        /// Called by RemotePlayerSimulation when the whammy value changes.
+        /// </summary>
+        /// <param name="whammyValue">Whammy bar position (0 = not pressed, 1 = fully pressed)</param>
+        public void ApplyRemoteWhammyValue(float whammyValue)
+        {
+            WhammyFactor = Mathf.Clamp01(whammyValue);
+            // Note: We don't call GameManager.ChangeStemWhammyPitch for remote players
+            // because that would affect the local audio mix. The whammy visual effect
+            // is driven by WhammyFactor which can be read by the track visuals.
         }
     }
 }

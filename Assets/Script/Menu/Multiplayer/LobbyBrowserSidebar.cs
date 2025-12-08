@@ -145,7 +145,7 @@ namespace YARG.Menu.Multiplayer
         private Button _directConnectCancelButton;
 
         private LobbyBrowserMenu _menu;
-        private YargNetworkManager.LobbyInfo _currentLobby;
+        private YARG.Networking.Abstraction.LobbyInfo _currentLobby;
         private HostedLobbyPreset _activePreset;
         private LobbyBookmark _activeBookmark;
         private SidebarMode _currentMode = SidebarMode.Empty;
@@ -356,7 +356,7 @@ namespace YARG.Menu.Multiplayer
 
         #region Public API
 
-        public void SetLobby(YargNetworkManager.LobbyInfo lobby, LobbyBookmark bookmarkOverride = null)
+        public void SetLobby(YARG.Networking.Abstraction.LobbyInfo lobby, LobbyBookmark bookmarkOverride = null)
         {
             if (lobby == null)
             {
@@ -370,8 +370,8 @@ namespace YARG.Menu.Multiplayer
             _currentLobby = lobby;
             _activePreset = null;
             _activeBookmark = bookmarkOverride
-                ?? store.GetFavorite(lobby.ipAddress, lobby.port)
-                ?? store.GetRecent(lobby.ipAddress, lobby.port);
+                ?? store.GetFavorite(lobby.IpAddress, lobby.Port)
+                ?? store.GetRecent(lobby.IpAddress, lobby.Port);
 
             ShowMode(SidebarMode.Lobby);
             PopulateLobbyInfo(lobby);
@@ -559,19 +559,19 @@ namespace YARG.Menu.Multiplayer
 
         #region Lobby Info Rendering
 
-        private void PopulateLobbyInfo(YargNetworkManager.LobbyInfo lobby)
+        private void PopulateLobbyInfo(YARG.Networking.Abstraction.LobbyInfo lobby)
         {
             if (_lobbyNameText != null)
-                _lobbyNameText.text = lobby.lobbyName;
+                _lobbyNameText.text = lobby.LobbyName;
 
-            string endpoint = BuildEndpoint(lobby.ipAddress, lobby.port, lobby.publicAddress, lobby.publicPort);
+            string endpoint = BuildEndpoint(lobby.IpAddress, lobby.Port, lobby.PublicAddress, lobby.PublicPort);
             SetHostAddress(endpoint, !string.IsNullOrEmpty(endpoint));
 
             if (_playerCountText != null)
             {
-                bool lobbyFull = lobby.currentPlayers >= lobby.maxPlayers;
+                bool lobbyFull = lobby.CurrentPlayers >= lobby.MaxPlayers;
                 Color countColor = lobbyFull ? new Color(1f, 0.3f, 0.3f) : MenuData.Colors.PrimaryText;
-                string value = ZString.Format("{0}/{1}", lobby.currentPlayers, lobby.maxPlayers);
+                string value = ZString.Format("{0}/{1}", lobby.CurrentPlayers, lobby.MaxPlayers);
                 _playerCountText.text = TextColorer.StyleString(value, countColor, 600);
             }
 
@@ -598,16 +598,16 @@ namespace YARG.Menu.Multiplayer
 
             if (_privacyText != null)
             {
-                string privacyMode = lobby.privacyMode == YargNetworkManager.LobbyPrivacyMode.Private ? "Private" : "Public";
+                string privacyMode = lobby.PrivacyMode == YARG.Networking.Abstraction.LobbyPrivacyMode.Private ? "Private" : "Public";
                 _privacyText.text = ZString.Format("Privacy: {0}", privacyMode);
             }
 
-            bool hasPassword = lobby.hasPassword;
+            bool hasPassword = lobby.HasPassword;
             if (_passwordIcon != null)
                 _passwordIcon.SetActive(hasPassword);
 
-            _currentPrivacyMode = lobby.privacyMode;
-            SetPasswordValue(lobby.password, hasPassword, hasPassword);
+            _currentPrivacyMode = (YargNetworkManager.LobbyPrivacyMode)lobby.PrivacyMode;
+            SetPasswordValue(lobby.Password, hasPassword, hasPassword);
             RefreshEditableButtons();
         }
 
@@ -675,7 +675,7 @@ namespace YARG.Menu.Multiplayer
             RefreshEditableButtons();
         }
 
-        private void UpdatePlayerList(YargNetworkManager.LobbyInfo lobby)
+        private void UpdatePlayerList(YARG.Networking.Abstraction.LobbyInfo lobby)
         {
             ClearPlayerList();
 
@@ -686,11 +686,11 @@ namespace YARG.Menu.Multiplayer
                 if (_noPlayersText != null)
                 {
                     _noPlayersText.gameObject.SetActive(true);
-                    string label = lobby.currentPlayers <= 0
+                    string label = lobby.CurrentPlayers <= 0
                         ? "No players in lobby"
                         : ZString.Format("{0} {1} in lobby",
-                            lobby.currentPlayers,
-                            lobby.currentPlayers == 1 ? "player" : "players");
+                            lobby.CurrentPlayers,
+                            lobby.CurrentPlayers == 1 ? "player" : "players");
                     _noPlayersText.text = label;
                 }
                 return;
@@ -705,17 +705,17 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
-        private List<LobbyPlayerEntry> BuildLobbyPlayerEntries(YargNetworkManager.LobbyInfo lobby)
+        private List<LobbyPlayerEntry> BuildLobbyPlayerEntries(YARG.Networking.Abstraction.LobbyInfo lobby)
         {
             var entries = new List<LobbyPlayerEntry>();
             if (lobby == null)
                 return entries;
 
-            string hostName = string.IsNullOrWhiteSpace(lobby.hostName) ? string.Empty : lobby.hostName.Trim();
+            string hostName = string.IsNullOrWhiteSpace(lobby.HostName) ? string.Empty : lobby.HostName.Trim();
             var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            string[] playerNames = lobby.playerNames;
-            int[] instruments = lobby.playerInstruments;
+            string[] playerNames = lobby.PlayerNames;
+            int[] instruments = lobby.PlayerInstruments;
 
             if (playerNames != null && playerNames.Length > 0)
             {
@@ -754,9 +754,9 @@ namespace YARG.Menu.Multiplayer
                 }
             }
 
-            if (entries.Count == 0 && lobby.currentPlayers > 0)
+            if (entries.Count == 0 && lobby.CurrentPlayers > 0)
             {
-                for (int i = 0; i < lobby.currentPlayers; i++)
+                for (int i = 0; i < lobby.CurrentPlayers; i++)
                 {
                     string baseName = i == 0 && !string.IsNullOrEmpty(hostName)
                         ? hostName
@@ -860,12 +860,10 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
-        private int CalculatePing(YargNetworkManager.LobbyInfo lobby)
+        private int CalculatePing(YARG.Networking.Abstraction.LobbyInfo lobby)
         {
-            long currentTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            long sinceLastSeen = Mathf.Max(0, (int)(currentTime - lobby.lastSeen));
-            if (sinceLastSeen > 5000)
-                return -1;
+            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
+            // Return a dummy ping value for now
             return UnityEngine.Random.Range(10, 120);
         }
 

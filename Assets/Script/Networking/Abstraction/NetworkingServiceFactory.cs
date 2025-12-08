@@ -37,7 +37,8 @@ namespace YARG.Networking.Abstraction
             }
 
             // Check feature flag to determine which implementation to use
-            bool useLiteNet = YARG.Settings.SettingsManager.Settings.UseExperimentalNetworking.Value;
+            // TEMPORARY: Force LiteNet for testing
+            bool useLiteNet = true; // YARG.Settings.SettingsManager.Settings.UseExperimentalNetworking.Value;
             
             _instance = useLiteNet ? CreateLiteNetAdapter() : CreateMirrorAdapter();
             

@@ -124,7 +124,7 @@ namespace YARG.Settings
             /// Feature flag to enable experimental LiteNet networking implementation.
             /// When false (default), uses Mirror networking. When true, uses YARG.Networking (LiteNet).
             /// </summary>
-            public ToggleSetting UseExperimentalNetworking { get; } = new(false);
+            public ToggleSetting UseExperimentalNetworking { get; } = new(true);
 
             #endregion
 

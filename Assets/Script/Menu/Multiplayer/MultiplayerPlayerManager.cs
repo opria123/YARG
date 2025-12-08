@@ -48,9 +48,26 @@ namespace YARG.Menu.Multiplayer
                 return players;
             }
 
-            // Note: GetAllPlayers() is still Mirror-specific, needs abstraction
-            var networkPlayers = YargNetworkManager.Instance.GetAllPlayers();
-            Debug.Log($"[MultiplayerPlayerManager] Found {networkPlayers.Count} NetworkPlayerData objects");
+            // Get players from the appropriate networking implementation
+            List<NetworkPlayerData> networkPlayers;
+            
+            // Check if LiteNet is active first
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                networkPlayers = liteNetAdapter.GetAllPlayers();
+                Debug.Log($"[MultiplayerPlayerManager] Using LiteNet - found {networkPlayers.Count} NetworkPlayerData objects");
+            }
+            else if (YargNetworkManager.Instance != null && YargNetworkManager.Instance.isNetworkActive)
+            {
+                // Fall back to Mirror
+                networkPlayers = YargNetworkManager.Instance.GetAllPlayers();
+                Debug.Log($"[MultiplayerPlayerManager] Using Mirror - found {networkPlayers.Count} NetworkPlayerData objects");
+            }
+            else
+            {
+                Debug.LogWarning("[MultiplayerPlayerManager] No active networking implementation found!");
+                return players;
+            }
 
             foreach (var networkPlayer in networkPlayers)
             {

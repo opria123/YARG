@@ -9,6 +9,7 @@ using YARG.Helpers.Extensions;
 using YARG.Menu;
 using YARG.Menu.Data;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -57,6 +58,8 @@ namespace YARG.Menu.Multiplayer
             _isLocalPlayer = isLocalPlayer;
             // Use the synced IsHost property from NetworkPlayerData
             _isHost = playerData.IsHost;
+            
+            Debug.Log($"[PlayerView] Initialize: name='{playerData.PlayerName}', isHost={_isHost}, isLocalPlayer={isLocalPlayer}, ping={playerData.Ping}");
             
             if (pingText != null && !_hasCachedPingTextColor)
             {
@@ -148,24 +151,31 @@ namespace YARG.Menu.Multiplayer
             
             float? pingValue = null;
 
-            // Only the host shows 0ms (they have no ping to themselves)
-            if (_isHost)
+            // Local players show 0ms - no ping to yourself
+            // This includes both:
+            // - Host viewing themselves (they are local)
+            // - Client viewing themselves (they are local)
+            // Remote players (host viewing client, or client viewing host) show actual ping
+            if (_isLocalPlayer)
             {
                 pingText.text = "0ms";
                 pingValue = 0f;
             }
             else
             {
-                // All other players (including local non-host) show their ping to the server
+                // Remote players show their ping/latency
                 float ping = _playerData.Ping;
-                if (ping > 0f)
+                if (ping >= 0f)
                 {
+                    // Valid ping data (0ms is valid for localhost connections)
                     pingValue = ping;
                     pingText.text = $"{Mathf.RoundToInt(ping)}ms";
                 }
                 else
                 {
-                    pingText.text = "?ms";
+                    // Negative ping (-1) means no ping data yet - show placeholder
+                    pingText.text = "--";
+                    pingValue = null;
                 }
             }
 
@@ -210,18 +220,23 @@ namespace YARG.Menu.Multiplayer
 
         private void OnKickClicked()
         {
-            if (_playerData == null || _playerData.connectionToClient == null)
+            if (_playerData == null)
             {
-                Debug.LogWarning("[PlayerView] Cannot kick player - no connection data");
+                Debug.LogWarning("[PlayerView] Cannot kick player - no player data");
                 return;
             }
             
             Debug.Log($"[PlayerView] Kicking player: {_playerData.PlayerName}");
             
-            // Call kick method on network manager
-            if (YargNetworkManager.Instance != null)
+            // Use abstraction layer to kick player
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService != null && networkingService.IsHosting)
             {
-                YargNetworkManager.Instance.KickPlayer(_playerData.connectionToClient);
+                networkingService.KickPlayer(_playerData);
+            }
+            else
+            {
+                Debug.LogWarning("[PlayerView] Cannot kick - not hosting or networking service unavailable");
             }
         }
 

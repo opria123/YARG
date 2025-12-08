@@ -177,6 +177,36 @@ namespace YARG.Gameplay.Visuals
             AddPlayerParams(trackPlayer.transform.position, trackPlayer.TrackCamera, trackPlayer.Player.CameraPreset.CurveFactor, trackPlayer.ZeroFadePosition, trackPlayer.FadeSize);
             RecalculateCameraBounds();
         }
+        
+        /// <summary>
+        /// Removes a track player from the rendering system.
+        /// Used when a player disconnects during gameplay.
+        /// </summary>
+        public void RemoveTrackPlayer(TrackPlayer trackPlayer)
+        {
+            if (trackPlayer == null || trackPlayer.TrackCamera == null)
+            {
+                return;
+            }
+            
+            int index = _cameras.IndexOf(trackPlayer.TrackCamera);
+            if (index < 0)
+            {
+                Debug.LogWarning($"[HighwayCameraRendering] Could not find camera for track player to remove");
+                return;
+            }
+            
+            _cameras.RemoveAt(index);
+            _highwayPositions.RemoveAt(index);
+            
+            // Recalculate scale and camera bounds
+            Scale = CalculateScale(_cameras.Count);
+            UpdateCameraProjectionMatrices();
+            RecalculateFadeParams();
+            RecalculateCameraBounds();
+            
+            Debug.Log($"[HighwayCameraRendering] Removed track player at index {index}, {_cameras.Count} cameras remaining");
+        }
 
 
         private void Awake()
