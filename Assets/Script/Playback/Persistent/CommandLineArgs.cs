@@ -35,14 +35,17 @@ namespace YARG
 
         private const string PERSISTENT_DATA_PATH_ARG = "-persistent-data-path";
 
+        /// <summary>
+        /// Launch in dedicated server mode. All server configuration is loaded from
+        /// dedicated_server.json in the persistent data path.
+        /// </summary>
         private const string DEDICATED_ARG = "-dedicated";
-        private const string DEDICATED_LOBBY_NAME_ARG = "-lobby-name";
-        private const string DEDICATED_MAX_PLAYERS_ARG = "-max-players";
-        private const string DEDICATED_PRIVACY_ARG = "-privacy";
-        private const string DEDICATED_PASSWORD_ARG = "-password";
-        private const string DEDICATED_PORT_ARG = "-dedicated-port";
-        private const string DEDICATED_DISCOVERY_PORT_ARG = "-dedicated-discovery-port";
-        private const string DEDICATED_DISABLE_DISCOVERY_ARG = "-dedicated-disable-discovery";
+
+        /// <summary>
+        /// Path to the dedicated server config file.
+        /// If not specified, defaults to dedicated_server.json in the persistent data path.
+        /// </summary>
+        private const string CONFIG_ARG = "-config";
 
         public static bool Offline { get; private set; }
 
@@ -52,14 +55,17 @@ namespace YARG
         public static string DownloadLocation   { get; private set; }
         public static string PersistentDataPath { get; private set; }
 
+        /// <summary>
+        /// Whether to launch in dedicated server mode.
+        /// Server configuration is loaded from dedicated_server.json.
+        /// </summary>
         public static bool DedicatedServer { get; private set; }
-        public static string DedicatedLobbyName   { get; private set; }
-        public static string DedicatedMaxPlayers  { get; private set; }
-        public static string DedicatedPrivacyMode { get; private set; }
-        public static string DedicatedPassword    { get; private set; }
-        public static string DedicatedPort        { get; private set; }
-        public static string DedicatedDiscoveryPort { get; private set; }
-        public static bool   DedicatedDisableDiscovery { get; private set; }
+
+        /// <summary>
+        /// Path to the dedicated server config file.
+        /// If not specified, defaults to dedicated_server.json in the persistent data path.
+        /// </summary>
+        public static string DedicatedServerConfigPath { get; private set; }
 
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSplashScreen)]
@@ -105,56 +111,12 @@ namespace YARG
                     case DEDICATED_ARG:
                         DedicatedServer = true;
                         break;
-                    case DEDICATED_LOBBY_NAME_ARG:
+                    case CONFIG_ARG:
                         i++;
                         if (i < args.Length)
                         {
-                            DedicatedLobbyName = args[i];
+                            DedicatedServerConfigPath = args[i];
                         }
-
-                        break;
-                    case DEDICATED_MAX_PLAYERS_ARG:
-                        i++;
-                        if (i < args.Length)
-                        {
-                            DedicatedMaxPlayers = args[i];
-                        }
-
-                        break;
-                    case DEDICATED_PRIVACY_ARG:
-                        i++;
-                        if (i < args.Length)
-                        {
-                            DedicatedPrivacyMode = args[i];
-                        }
-
-                        break;
-                    case DEDICATED_PASSWORD_ARG:
-                        i++;
-                        if (i < args.Length)
-                        {
-                            DedicatedPassword = args[i];
-                        }
-
-                        break;
-                    case DEDICATED_PORT_ARG:
-                        i++;
-                        if (i < args.Length)
-                        {
-                            DedicatedPort = args[i];
-                        }
-
-                        break;
-                    case DEDICATED_DISCOVERY_PORT_ARG:
-                        i++;
-                        if (i < args.Length)
-                        {
-                            DedicatedDiscoveryPort = args[i];
-                        }
-
-                        break;
-                    case DEDICATED_DISABLE_DISCOVERY_ARG:
-                        DedicatedDisableDiscovery = true;
                         break;
                 }
             }

@@ -7,6 +7,7 @@ using UnityEngine;
 using YARG.Core.Logging;
 using YARG.Core.Utility;
 using YARG.Helpers;
+using YARG.Menu.Settings;
 using YARG.Settings.Metadata;
 using YARG.Settings.Types;
 
@@ -71,6 +72,7 @@ namespace YARG.Settings
 
                 new HeaderMetadata("Networking"),
                 nameof(Settings.NetworkPort),
+                new IntroducerListMetadata(),
             },
             new SongManagerTab("SongManager", icon: "Songs")
             {

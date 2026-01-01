@@ -66,7 +66,7 @@ namespace YARG.Gameplay.Visuals
             }
         }
 
-        public void Initialize(CameraPreset preset)
+        public void Initialize(CameraPreset preset, bool skipAutoRaise = false)
         {
             var camera = GetComponent<Camera>();
             // FOV
@@ -106,7 +106,8 @@ namespace YARG.Gameplay.Visuals
             _globalAnimDelay = Mathf.Clamp((float) latestStart, 0f, MAX_ANIM_DELAY);
 
             // Animate the highway raise
-            if (!_gameManager.IsPractice && SettingsManager.Settings.EnableHighwayAnimation.Value)
+            // Skip for spectator tracks - they will have their initial state set via SetInitialState()
+            if (!skipAutoRaise && !_gameManager.IsPractice && SettingsManager.Settings.EnableHighwayAnimation.Value)
             {
                 if (_highwayRaised)
                 {
@@ -129,6 +130,46 @@ namespace YARG.Gameplay.Visuals
             {
                 LowerHighway(isGameplayEnd);
                 _highwayRaised = false;
+            }
+        }
+        
+        /// <summary>
+        /// Raises the highway back up after a player has been revived.
+        /// </summary>
+        public void Raise()
+        {
+            if (!_highwayRaised)
+            {
+                RaiseHighway(false);
+                _highwayRaised = true;
+            }
+        }
+        
+        /// <summary>
+        /// Sets the initial highway state for spectator tracks.
+        /// Call this after initialization but before the track becomes visible.
+        /// This immediately sets both the flag AND the visual position (no animation).
+        /// </summary>
+        /// <param name="isRaised">True if the highway should be in the raised (normal) position, 
+        /// false if it should be lowered (failed state).</param>
+        public void SetInitialState(bool isRaised)
+        {
+            _highwayRaised = isRaised;
+            
+            // Also set the visual position immediately (no animation)
+            // This ensures the camera is in the correct position when the track becomes visible
+            if (_preset != null)
+            {
+                if (isRaised)
+                {
+                    // Set to the normal gameplay rotation (same as end of RaiseHighway animation)
+                    transform.localRotation = Quaternion.Euler(new Vector3().WithX(_preset.Rotation));
+                }
+                else
+                {
+                    // Set to the lowered/failed rotation (same as ANIM_INIT_ROTATION offset)
+                    transform.localRotation = Quaternion.Euler(new Vector3().WithX(_preset.Rotation + ANIM_INIT_ROTATION));
+                }
             }
         }
 

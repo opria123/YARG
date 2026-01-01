@@ -5,10 +5,13 @@ using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.Serialization;
 using UnityEngine.UI;
+using YARG.Core;
 using YARG.Core.Engine;
 using YARG.Core.Game;
 using YARG.Core.Logging;
+using YARG.Gameplay.Player;
 using YARG.Helpers.Extensions;
+using YARG.Player;
 
 namespace YARG.Gameplay.HUD
 {
@@ -48,12 +51,15 @@ namespace YARG.Gameplay.HUD
 
         private bool _intendedActive;
 
-
         // TODO: Should probably make a more specific class we can reference here
         private EngineManager _engineManager;
         private GameManager _gameManager;
 
         private readonly List<EngineManager.EngineContainer> _players = new();
+        
+        // Spectate mode support
+        private bool _isSpectateMode;
+        private readonly List<TrackPlayer> _spectatorPlayers = new();
 
         // Allows some overlap
         private const float HAPPINESS_COLLISION_RANGE = 0.06f;
@@ -131,6 +137,227 @@ namespace YARG.Gameplay.HUD
 
             YargLogger.LogDebug("Initialized fail meter");
         }
+        
+        /// <summary>
+        /// Reinitializes the fail meter to show spectated band's players instead of local players.
+        /// </summary>
+        public void EnterSpectateMode(List<TrackPlayer> spectatorPlayers)
+        {
+            if (_isSpectateMode)
+            {
+                // Already in spectate mode, clean up old spectator sliders first
+                CleanupSpectatorSliders();
+            }
+            
+            _isSpectateMode = true;
+            _spectatorPlayers.Clear();
+            _spectatorPlayers.AddRange(spectatorPlayers);
+            
+            // Hide the local player sliders
+            if (_playerSliders != null)
+            {
+                for (int i = 0; i < _playerSliders.Length; i++)
+                {
+                    if (_playerSliders[i] != null)
+                    {
+                        _playerSliders[i].gameObject.SetActive(false);
+                    }
+                    if (_needleSliders[i] != null)
+                    {
+                        _needleSliders[i].gameObject.SetActive(false);
+                    }
+                }
+            }
+            
+            // Create new sliders for spectator players
+            CreateSpectatorSliders();
+            
+            YargLogger.LogDebug($"Fail meter entered spectate mode with {spectatorPlayers.Count} players");
+        }
+        
+        /// <summary>
+        /// Exits spectate mode and restores the local player sliders.
+        /// </summary>
+        public void ExitSpectateMode()
+        {
+            if (!_isSpectateMode)
+            {
+                return;
+            }
+            
+            _isSpectateMode = false;
+            
+            // Clean up spectator sliders
+            CleanupSpectatorSliders();
+            _spectatorPlayers.Clear();
+            
+            // Restore local player sliders
+            if (_playerSliders != null)
+            {
+                for (int i = 0; i < _playerSliders.Length; i++)
+                {
+                    if (_playerSliders[i] != null)
+                    {
+                        _playerSliders[i].gameObject.SetActive(true);
+                    }
+                    if (_needleSliders[i] != null)
+                    {
+                        _needleSliders[i].gameObject.SetActive(true);
+                    }
+                }
+            }
+            
+            YargLogger.LogDebug("Fail meter exited spectate mode");
+        }
+        
+        // Spectate mode slider arrays
+        private Slider[] _spectatorSliders;
+        private Slider[] _spectatorNeedleSliders;
+        private Tweener[] _spectatorHappinessTweeners = Array.Empty<Tweener>();
+        private Tweener[] _spectatorNeedleHappinessTweeners = Array.Empty<Tweener>();
+        private Tweener[] _spectatorXposTweeners = Array.Empty<Tweener>();
+        private float[] _spectatorPreviousHappiness;
+        private Vector2[] _spectatorXPosVectors;
+        
+        private void CreateSpectatorSliders()
+        {
+            int count = _spectatorPlayers.Count;
+            _spectatorSliders = new Slider[count];
+            _spectatorNeedleSliders = new Slider[count];
+            _spectatorHappinessTweeners = new Tweener[count];
+            _spectatorNeedleHappinessTweeners = new Tweener[count];
+            _spectatorXposTweeners = new Tweener[count];
+            _spectatorPreviousHappiness = new float[count];
+            _spectatorXPosVectors = new Vector2[count];
+            
+            for (int i = count - 1; i >= 0; i--)
+            {
+                _spectatorSliders[i] = Instantiate(_sliderPrefab, _sliderContainer);
+                _spectatorNeedleSliders[i] = Instantiate(_needlePrefab, _sliderContainer);
+                
+                var xOffset = SPRITE_INITIAL_OFFSET + (SPRITE_OVERLAP_OFFSET * i);
+                _spectatorXPosVectors[i] = new Vector2(xOffset, 0);
+                
+                _spectatorXposTweeners[i] = _spectatorSliders[i].handleRect
+                    .DOAnchorPosX(_spectatorXPosVectors[i].x, 0.125f).SetAutoKill(false);
+                _spectatorNeedleSliders[i].handleRect.DOAnchorPosX(SPRITE_INITIAL_OFFSET, 0.125f).SetAutoKill(false);
+                
+                var handleImage = _spectatorSliders[i].handleRect.GetComponentInChildren<Image>();
+                var player = _spectatorPlayers[i].Player;
+                // Use the extension method from InstrumentIconProvider for proper sprite address
+                var spriteName = player.GetInstrumentSprite();
+                
+                var sprite = Addressables.LoadAssetAsync<Sprite>(spriteName).WaitForCompletion();
+                handleImage.sprite = sprite;
+                handleImage.color = player.GetHarmonyColor();
+                
+                var happiness = _spectatorPlayers[i].PlayerEngineContainer?.Happiness ?? 0.5f;
+                _spectatorSliders[i].value = 0.01f;
+                _spectatorNeedleSliders[i].value = 0.01f;
+                _spectatorSliders[i].gameObject.SetActive(true);
+                _spectatorNeedleSliders[i].gameObject.SetActive(true);
+                
+                _spectatorHappinessTweeners[i] = _spectatorSliders[i].DOValue(happiness, 0.5f).SetAutoKill(false);
+                _spectatorNeedleHappinessTweeners[i] = _spectatorNeedleSliders[i].DOValue(happiness, 0.5f).SetAutoKill(false);
+                _spectatorPreviousHappiness[i] = happiness;
+            }
+        }
+        
+        private void CleanupSpectatorSliders()
+        {
+            if (_spectatorSliders != null)
+            {
+                foreach (var slider in _spectatorSliders)
+                {
+                    if (slider != null)
+                    {
+                        Destroy(slider.gameObject);
+                    }
+                }
+            }
+            
+            if (_spectatorNeedleSliders != null)
+            {
+                foreach (var slider in _spectatorNeedleSliders)
+                {
+                    if (slider != null)
+                    {
+                        Destroy(slider.gameObject);
+                    }
+                }
+            }
+            
+            // Kill tweeners
+            if (_spectatorHappinessTweeners != null)
+            {
+                foreach (var tween in _spectatorHappinessTweeners)
+                {
+                    tween?.Kill();
+                }
+            }
+            
+            if (_spectatorNeedleHappinessTweeners != null)
+            {
+                foreach (var tween in _spectatorNeedleHappinessTweeners)
+                {
+                    tween?.Kill();
+                }
+            }
+            
+            if (_spectatorXposTweeners != null)
+            {
+                foreach (var tween in _spectatorXposTweeners)
+                {
+                    tween?.Kill();
+                }
+            }
+            
+            _spectatorSliders = null;
+            _spectatorNeedleSliders = null;
+            _spectatorHappinessTweeners = Array.Empty<Tweener>();
+            _spectatorNeedleHappinessTweeners = Array.Empty<Tweener>();
+            _spectatorXposTweeners = Array.Empty<Tweener>();
+        }
+        
+        private float GetSpectatorBandHappiness()
+        {
+            if (_spectatorPlayers.Count == 0)
+            {
+                return 0.5f;
+            }
+            
+            float total = 0f;
+            foreach (var player in _spectatorPlayers)
+            {
+                total += GetSpectatorPlayerHappiness(player);
+            }
+            return total / _spectatorPlayers.Count;
+        }
+        
+        /// <summary>
+        /// Gets happiness for a spectator track player.
+        /// For spectator tracks, EngineContainer is null, so we get happiness from NetworkPlayerData.
+        /// </summary>
+        private float GetSpectatorPlayerHappiness(TrackPlayer player)
+        {
+            // Try NetworkPlayerData first (for spectator tracks that don't have an EngineContainer)
+            var networkData = player.NetworkPlayerData;
+            if (networkData != null)
+            {
+                // Debug: Periodically log spectator player happiness to diagnose sync issues
+                if (_spectatorDebugLogTimer <= 0f)
+                {
+                    YargLogger.LogDebug($"[FailMeter] Spectator '{networkData.PlayerName}' happiness={networkData.Happiness:F2}, hasFailed={networkData.HasFailed}");
+                }
+                return networkData.Happiness;
+            }
+            
+            // Fallback to EngineContainer (shouldn't happen for spectator tracks)
+            return player.PlayerEngineContainer?.Happiness ?? 0.5f;
+        }
+        
+        // Debug timer for spectate mode logging
+        private float _spectatorDebugLogTimer;
 
         // Update is called once per frame
         private void Update()
@@ -147,9 +374,21 @@ namespace YARG.Gameplay.HUD
                 return;
             }
 
+            if (_isSpectateMode)
+            {
+                UpdateSpectateMode();
+            }
+            else
+            {
+                UpdateNormalMode();
+            }
+        }
+        
+        private void UpdateNormalMode()
+        {
             if (_previousBandHappiness != _engineManager.Happiness)
             {
-                UpdateMeterFill();
+                UpdateMeterFill(_engineManager.Happiness);
             }
 
             for (var i = _players.Count - 1; i >= 0; i--)
@@ -203,14 +442,84 @@ namespace YARG.Gameplay.HUD
                 }
 
                 _previousPlayerHappiness[i] = _players[i].Happiness;
+            }
+        }
+        
+        private void UpdateSpectateMode()
+        {
+            // Debug: Periodically log spectator happiness (every 2 seconds)
+            _spectatorDebugLogTimer -= Time.deltaTime;
+            if (_spectatorDebugLogTimer <= 0f)
+            {
+                _spectatorDebugLogTimer = 2f;
+            }
+            
+            var bandHappiness = GetSpectatorBandHappiness();
+            if (_previousBandHappiness != bandHappiness)
+            {
+                UpdateMeterFill(bandHappiness);
+            }
+            
+            if (_spectatorSliders == null || _spectatorPlayers.Count == 0)
+            {
+                return;
+            }
 
+            for (var i = _spectatorPlayers.Count - 1; i >= 0; i--)
+            {
+                var happiness = GetSpectatorPlayerHappiness(_spectatorPlayers[i]);
+                
+                int overlap = 0;
+                // Check if we will overlap another icon
+                for (var j = i; j >= 0; j--)
+                {
+                    if (j == i)
+                    {
+                        continue;
+                    }
+
+                    var otherHappiness = GetSpectatorPlayerHappiness(_spectatorPlayers[j]);
+                    if (Math.Abs(happiness - otherHappiness) < HAPPINESS_COLLISION_RANGE)
+                    {
+                        overlap++;
+                    }
+                }
+
+                var xOffset = SPRITE_INITIAL_OFFSET + (SPRITE_OVERLAP_OFFSET * overlap);
+                _spectatorXPosVectors[i].x = xOffset;
+
+                _spectatorXposTweeners[i].ChangeEndValue(_spectatorXPosVectors[i], 0.125f, true).Play();
+
+                if (_spectatorPreviousHappiness[i] != happiness)
+                {
+                    _spectatorHappinessTweeners[i].ChangeValues(_spectatorSliders[i].value, happiness, 0.1f);
+                    _spectatorNeedleHappinessTweeners[i].ChangeValues(_spectatorNeedleSliders[i].value, happiness, 0.1f);
+
+                    if (_spectatorHappinessTweeners[i].IsComplete())
+                    {
+                        _spectatorHappinessTweeners[i].Play();
+                    }
+                    else
+                    {
+                        _spectatorHappinessTweeners[i].Restart();
+                    }
+
+                    if (_spectatorNeedleHappinessTweeners[i].IsComplete())
+                    {
+                        _spectatorNeedleHappinessTweeners[i].Play();
+                    }
+                    else
+                    {
+                        _spectatorNeedleHappinessTweeners[i].Restart();
+                    }
+                }
+
+                _spectatorPreviousHappiness[i] = happiness;
             }
         }
 
-        private void UpdateMeterFill()
+        private void UpdateMeterFill(float happiness)
         {
-            var happiness = _engineManager.Happiness;
-
             var currentColor = GetMeterColor(happiness);
             if (currentColor != _previousMeterColor)
             {
@@ -220,7 +529,7 @@ namespace YARG.Gameplay.HUD
 
             _bandFillTweener.ChangeValues(_fillImage.fillAmount, happiness).Play();
 
-            _previousBandHappiness = _engineManager.Happiness;
+            _previousBandHappiness = happiness;
         }
 
         private void ApplyColor(MeterColor color)
@@ -302,6 +611,9 @@ namespace YARG.Gameplay.HUD
             {
                 tween.Kill();
             }
+            
+            // Clean up spectate mode tweeners and sliders
+            CleanupSpectatorSliders();
         }
 
         private enum MeterColor

@@ -22,7 +22,7 @@ namespace YARG.Gameplay.Visuals
     {
         public TNote NoteRef { get; set; }
 
-        protected SustainState SustainState { get; private set; }
+        public SustainState SustainState { get; protected set; }
 
         // Using all both at these attributes at once may seem weird, but only
         // SerializeFields are passed along properly when being duplicated.

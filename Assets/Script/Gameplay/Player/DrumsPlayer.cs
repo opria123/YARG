@@ -286,6 +286,17 @@ namespace YARG.Gameplay.Player
             GameManager.ChangeStemReverbState(SongStem.Drums, active);
         }
 
+        public override void MarkAsDisconnected()
+        {
+            base.MarkAsDisconnected();
+            
+            // Hide the fret array (drum pads/strike zone)
+            if (_fretArray != null)
+            {
+                _fretArray.gameObject.SetActive(false);
+            }
+        }
+
         protected override void ResetVisuals()
         {
             base.ResetVisuals();

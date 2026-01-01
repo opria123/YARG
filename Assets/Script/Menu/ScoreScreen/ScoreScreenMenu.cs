@@ -2,7 +2,6 @@ using System;
 using System.Linq;
 using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
-using Mirror;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -18,9 +17,10 @@ using YARG.Core.Replays;
 using YARG.Core.Replays.Analyzer;
 using YARG.Core.Song;
 using YARG.Localization;
-using YARG.Networking;
 using YARG.Networking.Abstraction;
+using YARG.Networking.Bands;
 using YARG.Net.Sessions;
+using YARG.Menu.Dialogs;
 using YARG.Menu.MusicLibrary;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
@@ -68,16 +68,26 @@ namespace YARG.Menu.ScoreScreen
         private ProKeysScoreCard _proKeysCardPrefab;
         [SerializeField]
         private ProKeysScoreCard _fiveLaneKeysCardPrefab;
+        
+        [Space]
+        [Header("Band Results")]
+        [SerializeField]
+        private BandResultsPanel _bandResultsPanel;
 
         private bool _analyzingReplay;
 
         private bool _restartingSong;
 
         private readonly List<IScoreCard<BaseStats>> _scoreCards = new();
+        
+        // Band results state
+        private BandResultsData _bandResultsData;
+        private bool _hasBandResults;
 
         private bool _isMultiplayer;
         private bool _isHost;
         private bool _advancing;
+        private bool _navigationPushed; // Track if we've pushed our navigation scheme
         private NetworkPlayerData _localNetworkPlayer;
         private readonly List<NetworkPlayerData> _networkPlayers = new();
         private TextMeshProUGUI _readyStatusLabel;
@@ -96,11 +106,34 @@ namespace YARG.Menu.ScoreScreen
             public int NotesMissed;
         }
 
+        private void Awake()
+        {
+            // Find the BandResultsPanel if not assigned in inspector
+            if (_bandResultsPanel == null)
+            {
+                _bandResultsPanel = GetComponentInChildren<BandResultsPanel>(true);
+            }
+            
+            // Always ensure band results panel starts hidden
+            if (_bandResultsPanel != null)
+            {
+                _bandResultsPanel.gameObject.SetActive(false);
+            }
+        }
+
         private void OnEnable()
         {
             var song = GlobalVariables.State.CurrentSong;
 
-            SetNavigationScheme();
+            // Hide band results panel by default - it will be shown if needed in InitializeBandResults
+            if (_bandResultsPanel != null)
+            {
+                _bandResultsPanel.gameObject.SetActive(false);
+            }
+
+            // Initialize navigation entries but DON'T push the scheme yet
+            // We'll push it after any potential dialogs are handled
+            InitializeNavigationEntries();
 
             if (GlobalVariables.State.ScoreScreenStats is null)
             {
@@ -112,6 +145,9 @@ namespace YARG.Menu.ScoreScreen
             
             // Subscribe to remote score results for LiteNet multiplayer
             SubscribeToRemoteScoreResults();
+
+            // Track if a dialog was shown during initialization
+            bool dialogShown = false;
 
 #if UNITY_EDITOR || YARG_NIGHTLY_BUILD || YARG_TEST_BUILD
             // Do analysis of replay before showing any score data
@@ -125,21 +161,32 @@ namespace YARG.Menu.ScoreScreen
             {
                 if (!AnalyzeReplay(song, scoreScreenStats.ReplayInfo))
                 {
-                    DialogManager.Instance.ShowMessage("Inconsistent Replay Results!",
+                    var dialog = DialogManager.Instance.ShowMessage("Inconsistent Replay Results!",
                         "The replay analysis for this run produced inconsistent results to the actual gameplay.\n" +
                         "Please report this issue to the YARG developers on GitHub or Discord.\n\n" +
                         $"Chart Hash: {song.Hash}");
+                    dialogShown = true;
+                    WaitForDialogAndPushScheme(dialog).Forget();
                 }
             }
             catch (Exception ex)
             {
                 YargLogger.LogException(ex, $"Failed to analyze replay! Song hash: {song.Hash}");
-                DialogManager.Instance.ShowMessage("Failed To Analyze Replay!",
+                var dialog = DialogManager.Instance.ShowMessage("Failed To Analyze Replay!",
                     "The replay analysis for this run resulted in an unexpected error.\n" +
                     "Please report this issue to the YARG developers on GitHub or Discord.\n\n" +
                     $"Chart Hash: {song.Hash}");
+                dialogShown = true;
+                WaitForDialogAndPushScheme(dialog).Forget();
             }
 #endif
+
+            // Only push navigation scheme now if no dialog was shown
+            // If a dialog was shown, WaitForDialogAndPushScheme will handle it
+            if (!dialogShown)
+            {
+                UpdateNavigationScheme();
+            }
 
             // Play audience chatter
             if (SettingsManager.Settings.UseCrowdFx.Value == CrowdFxMode.Enabled)
@@ -164,6 +211,9 @@ namespace YARG.Menu.ScoreScreen
             // Set the band score and stars
             _bandStarView.SetStars(scoreScreenStats.BandStars);
             _bandScore.text = scoreScreenStats.BandScore.ToString("N0");
+            
+            // Initialize band results if in band mode
+            InitializeBandResults(song, scoreScreenStats);
 
             // Put the scores in!
             CreateScoreCards(scoreScreenStats);
@@ -177,11 +227,33 @@ namespace YARG.Menu.ScoreScreen
             _restartingSong = false;
 
             InitializeMultiplayerReady();
+            
+            // Play band reveal animation if applicable
+            if (_hasBandResults && _bandResultsPanel != null)
+            {
+                _bandResultsPanel.PlayRevealAnimation();
+            }
+        }
+
+        /// <summary>
+        /// Waits for a dialog to close before pushing the navigation scheme.
+        /// This prevents the dialog's OnDisable from popping our scheme.
+        /// </summary>
+        private async UniTaskVoid WaitForDialogAndPushScheme(Dialog dialog)
+        {
+            await dialog.WaitUntilClosed();
+            
+            // Only push if we're still active (scene wasn't changed while dialog was up)
+            if (this != null && gameObject.activeInHierarchy)
+            {
+                UpdateNavigationScheme();
+            }
         }
 
         private void OnDisable()
         {
             CleanupMultiplayerReady();
+            CleanupBandResults();
             UnsubscribeFromRemoteScoreResults();
             _remoteScoreResults.Clear();
 
@@ -196,11 +268,189 @@ namespace YARG.Menu.ScoreScreen
                 GlobalAudioHandler.StopSoundEffect(SfxSample.Chatter, 1.0);
             }
 
-            Navigator.Instance.PopScheme();
+            // Only pop if we actually pushed a scheme
+            if (_navigationPushed)
+            {
+                Navigator.Instance.PopScheme();
+                _navigationPushed = false;
+            }
         }
+        
+        #region Band Results
+        
+        private void InitializeBandResults(SongEntry song, ScoreScreenStats scoreScreenStats)
+        {
+            var bandManager = BandManager.Instance;
+            _hasBandResults = bandManager != null && bandManager.IsBandSystemActive && bandManager.Bands.Count > 1;
+            
+            if (!_hasBandResults)
+            {
+                // No band system - hide band results panel, show standard view
+                if (_bandResultsPanel != null)
+                {
+                    _bandResultsPanel.gameObject.SetActive(false);
+                }
+                return;
+            }
+            
+            // Create band results data
+            _bandResultsData = BandResultsPanel.CreateFromGameState(bandManager, scoreScreenStats, song);
+            
+            Debug.Log($"[ScoreScreenMenu] Initialized band results: {_bandResultsData.BandResults.Count} bands");
+            
+            // Initialize band results panel (the sidebar with band list)
+            if (_bandResultsPanel != null)
+            {
+                _bandResultsPanel.gameObject.SetActive(true);
+                
+                // Subscribe to band selection BEFORE Initialize, so we receive the auto-selection event
+                _bandResultsPanel.OnBandSelected += HandleBandSelected;
+                
+                _bandResultsPanel.Initialize(_bandResultsData);
+            }
+            
+            // In band mode, we DON'T create all player cards initially
+            // Instead, we wait for band selection to populate with that band's members
+            // The existing _cardContainer will be reused for member cards
+        }
+        
+        private void CleanupBandResults()
+        {
+            if (_bandResultsPanel != null)
+            {
+                _bandResultsPanel.OnBandSelected -= HandleBandSelected;
+            }
+            
+            _bandResultsData = null;
+            _hasBandResults = false;
+        }
+        
+        /// <summary>
+        /// Clears all score cards from the container.
+        /// Used when switching between bands in band mode.
+        /// </summary>
+        private void ClearAllScoreCards()
+        {
+            Debug.Log($"[ScoreScreenMenu] ClearAllScoreCards: clearing {_scoreCards.Count} cards");
+            
+            foreach (var card in _scoreCards)
+            {
+                if (card is MonoBehaviour mb && mb != null)
+                {
+                    Destroy(mb.gameObject);
+                }
+            }
+            _scoreCards.Clear();
+            
+            // Also clear any orphaned children from the container (defensive)
+            if (_cardContainer != null)
+            {
+                int orphanCount = 0;
+                for (int i = _cardContainer.childCount - 1; i >= 0; i--)
+                {
+                    Destroy(_cardContainer.GetChild(i).gameObject);
+                    orphanCount++;
+                }
+                if (orphanCount > 0)
+                {
+                    Debug.Log($"[ScoreScreenMenu] Cleared {orphanCount} orphaned children from container");
+                }
+            }
+        }
+        
+        private void HandleBandSelected(BandResult bandResult)
+        {
+            Debug.Log($"[ScoreScreenMenu] Band selected: {bandResult.BandName} ({bandResult.MemberScoreCards.Count} members)");
+            
+            // Clear existing score cards (either from previous band selection or initial creation)
+            ClearAllScoreCards();
+            
+            // Create score cards for the selected band's members using the existing card container
+            CreateMemberScoreCards(bandResult);
+        }
+        
+        private void CreateMemberScoreCards(BandResult bandResult)
+        {
+            // Use the existing _cardContainer - reusing the standard score card area
+            if (_cardContainer == null)
+            {
+                Debug.LogWarning("[ScoreScreenMenu] Card container is null");
+                return;
+            }
+            
+            foreach (var playerScore in bandResult.MemberScoreCards)
+            {
+                IScoreCard<BaseStats> card = CreateScoreCardForPlayer(playerScore, _cardContainer);
+                
+                if (card != null)
+                {
+                    card.SetCardContents();
+                    _scoreCards.Add(card); // Add to _scoreCards, not _memberScoreCards
+                }
+            }
+            
+            // Force canvas update and reset scroll position
+            Canvas.ForceUpdateCanvases();
+            InitializeScrollRect();
+        }
+        
+        private IScoreCard<BaseStats> CreateScoreCardForPlayer(PlayerScoreCard playerScore, Transform container)
+        {
+            IScoreCard<BaseStats> card = null;
+            
+            switch (playerScore.Player.Profile.GameMode)
+            {
+                case GameMode.FiveFretGuitar:
+                {
+                    card = Instantiate(_guitarCardPrefab, container);
+                    ((ScoreCard<GuitarStats>)card).Initialize(playerScore.IsHighScore, playerScore.Player, playerScore.Stats as GuitarStats);
+                    break;
+                }
+                case GameMode.FourLaneDrums:
+                case GameMode.FiveLaneDrums:
+                case GameMode.EliteDrums:
+                {
+                    card = Instantiate(_drumsCardPrefab, container);
+                    ((ScoreCard<DrumsStats>)card).Initialize(playerScore.IsHighScore, playerScore.Player, playerScore.Stats as DrumsStats);
+                    break;
+                }
+                case GameMode.Vocals:
+                {
+                    card = Instantiate(_vocalsCardPrefab, container);
+                    ((ScoreCard<VocalsStats>)card).Initialize(playerScore.IsHighScore, playerScore.Player, playerScore.Stats as VocalsStats);
+                    break;
+                }
+                case GameMode.ProKeys:
+                {
+                    if (playerScore.Player.Profile.CurrentInstrument is Instrument.ProKeys)
+                    {
+                        card = Instantiate(_proKeysCardPrefab, container);
+                    }
+                    else
+                    {
+                        card = Instantiate(_fiveLaneKeysCardPrefab, container);
+                    }
+                    ((ScoreCard<KeysStats>) card).Initialize(playerScore.IsHighScore, playerScore.Player,
+                        playerScore.Stats as KeysStats);
+                    break;
+                }
+            }
+            
+            return card;
+        }
+        
+        #endregion
 
         private void CreateScoreCards(ScoreScreenStats scoreScreenStats)
         {
+            // In band mode, don't create cards here - they're created when a band is selected
+            // The BandResultsPanel.Initialize() will select the local band by default,
+            // which triggers HandleBandSelected() to create the member cards
+            if (_hasBandResults)
+            {
+                return;
+            }
+            
             int fcCount = 0;
             int highScoreCount = 0;
 
@@ -434,7 +684,11 @@ namespace YARG.Menu.ScoreScreen
         private NavigationScheme.Entry _scrollUpEntry;
         private NavigationScheme.Entry _scrollDownEntry;
 
-        private void SetNavigationScheme()
+        /// <summary>
+        /// Initializes navigation entry definitions without pushing to the navigator.
+        /// Call UpdateNavigationScheme() to actually push the scheme.
+        /// </summary>
+        private void InitializeNavigationEntries()
         {
             var song = GlobalVariables.State.CurrentSong;
 
@@ -504,8 +758,9 @@ namespace YARG.Menu.ScoreScreen
                 {
                     ScrollScoreCard(context.Player, -1 * _verticalScrollRate);
                 });
-
-            UpdateNavigationScheme();
+            
+            // NOTE: Don't call UpdateNavigationScheme() here anymore.
+            // The caller is responsible for calling it at the appropriate time.
         }
 
         private void ScrollScoreCard(Player.YargPlayer player, float delta)
@@ -524,7 +779,8 @@ namespace YARG.Menu.ScoreScreen
             }
 
             _isMultiplayer = true;
-            _isHost = networkService.IsHosting;
+            // Use HasHostAuthority for unified host detection across in-game hosting and dedicated servers
+            _isHost = networkService.HasHostAuthority;
             _advancing = false;
 
             _networkPlayers.Clear();
@@ -587,6 +843,7 @@ namespace YARG.Menu.ScoreScreen
             _isMultiplayer = false;
             _isHost = false;
             _advancing = false;
+            _navigationPushed = false;
 
             if (_readyStatusLabel != null)
             {
@@ -914,8 +1171,29 @@ namespace YARG.Menu.ScoreScreen
                 return;
             }
 
+            // Determine the target state based on the first local player's ready state
             bool targetState = !_localNetworkPlayer.IsReady;
-            networkService.SetPlayerReady(targetState);
+            
+            // Set ALL local players to the same ready state
+            // In multi-profile mode, we need to ready up all profiles at once since
+            // the ready button represents the user's readiness, not individual profiles
+            if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
+            {
+                foreach (var player in _networkPlayers)
+                {
+                    if (player != null && player.IsLocalUser)
+                    {
+                        liteNetAdapter.SetPlayerReady(targetState, player.PlayerName);
+                        Debug.Log($"[ScoreScreenMenu] Set local player '{player.PlayerName}' ready state to: {targetState}");
+                    }
+                }
+            }
+            else
+            {
+                // Fallback for other network implementations
+                networkService.SetPlayerReady(targetState);
+            }
+            
             UpdateNavigationScheme(true);
         }
 
@@ -961,7 +1239,15 @@ namespace YARG.Menu.ScoreScreen
 
         private void UpdateNavigationScheme(bool reset = false)
         {
-            if (reset)
+            // Don't update navigation while a dialog is showing - it would get popped when dialog closes
+            if (DialogManager.Instance != null && DialogManager.Instance.IsDialogShowing)
+            {
+                return;
+            }
+            
+            // Only pop if we've actually pushed a scheme before
+            // This prevents popping a dialog's scheme during initial setup
+            if (reset && _navigationPushed)
             {
                 Navigator.Instance.PopScheme();
             }
@@ -1008,6 +1294,7 @@ namespace YARG.Menu.ScoreScreen
             buttons.Add(_scrollDownEntry);
 
             Navigator.Instance.PushScheme(new(buttons, true));
+            _navigationPushed = true;
         }
     }
 }

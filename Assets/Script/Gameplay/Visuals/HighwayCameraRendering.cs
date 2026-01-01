@@ -101,6 +101,12 @@ namespace YARG.Gameplay.Visuals
 
         private void RecalculateCameraBounds()
         {
+            // Guard against empty camera list (e.g., during spectate mode when all local tracks are hidden)
+            if (_highwayPositions.Count == 0)
+            {
+                return;
+            }
+            
             float maxWorld = float.NaN;
             float minWorld = float.NaN;
             foreach (var position in _highwayPositions)

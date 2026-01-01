@@ -33,6 +33,12 @@ namespace YARG.Menu.ScoreScreen
         public static void SpawnEnginePresetIcons(ModifierIcon prefab, Transform parent,
             EnginePreset enginePreset, GameMode gameMode)
         {
+            // Remote players don't have engine preset data
+            if (enginePreset == null)
+            {
+                return;
+            }
+
             switch (gameMode)
             {
                 case GameMode.FiveFretGuitar:

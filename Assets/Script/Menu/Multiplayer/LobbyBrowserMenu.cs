@@ -8,10 +8,14 @@ using YARG.Core.Input;
 using YARG.Menu.ListMenu;
 using YARG.Menu.Navigation;
 using YARG.Menu.Data;
+using YARG.Menu.Dialogs;
 using YARG.Menu.Persistent;
 using YARG.Networking;
 using YARG.Networking.Abstraction;
 using YARG.Networking.Bookmarks;
+using YARG.Networking.Gameplay;
+using YARG.Networking.Session;
+using YARG.Networking.Settings;
 using Cysharp.Threading.Tasks;
 using YARG.Localization;
 
@@ -20,6 +24,7 @@ namespace YARG.Menu.Multiplayer
     /// <summary>
     /// Lobby browser menu using YARG's ListMenu pattern.
     /// Shows discovered lobbies with favorites support and live pinging for saved servers.
+    /// Uses only the networking abstraction layer (no Mirror dependencies).
     /// </summary>
     public class LobbyBrowserMenu : ListMenu<LobbyViewType, LobbyView>
     {
@@ -33,6 +38,58 @@ namespace YARG.Menu.Multiplayer
         [SerializeField]
         private NavigationGroup _navigationGroup;
 
+        private const double STALE_LOBBY_SECONDS = 18.0;
+        private const float STALE_SWEEP_INTERVAL = 1.0f;
+        private const float PING_STATUS_REFRESH_MIN_INTERVAL = 4.0f;
+        private const float DISCOVERY_PING_INTERVAL = 3.0f;
+        private const float DISCOVERY_BROADCAST_INTERVAL = 1.5f;
+        private const float DISCOVERY_BURST_INTERVAL = 0.3f; // Fast initial bursts
+        private const int DISCOVERY_BURST_COUNT = 3; // Number of rapid initial broadcasts
+        private const int MAX_CONSECUTIVE_PROBE_FAILURES = 3; // Mark offline after 3 failed pings
+        
+        private int _discoveryBurstRemaining = 0;
+
+        private LobbyFavorites _favorites;
+        private List<LobbyInfo> _currentLobbies = new();
+        private readonly List<int> _sectionStartIndices = new();
+        private LobbyInfo _selectedLobby;
+        private bool _navigationSchemePushed;
+        private string _lastNavigationHelpSignature;
+        private bool _isCreatingLobby;
+
+        // Cache for ping results: endpointKey -> LobbyInfo (if online)
+        private Dictionary<string, LobbyInfo> _pingedLobbies = new();
+        private readonly Dictionary<string, int> _consecutiveProbeFailures = new();
+        private HashSet<string> _pendingPings = new();
+        private bool _isPingingSavedServers = false;
+        private LobbyViewType _lastShownSidebarView;
+        private float _nextStaleSweepAt;
+        private float _nextPingStatusRefreshAt;
+        private bool _pendingPingStatusRefresh;
+        private CancellationTokenSource _pingCancellation;
+        private float _lastPingStartedAt = float.NegativeInfinity;
+        private float _nextAutomaticPingAt;
+        private float _nextDiscoveryBroadcastAt;
+
+        private bool _pendingPasswordSaveRequested;
+        private string _pendingPasswordAddress;
+        private int _pendingPasswordPort;
+        private string _pendingPasswordDisplayName;
+        private string _pendingPasswordValue;
+        private bool _pendingIsServerSession; // Only servers should be saved to recents
+        private readonly HashSet<string> _passwordFailures = new(StringComparer.OrdinalIgnoreCase);
+        private LobbyInfo _lastPasswordAttemptLobby;
+        private string _lastPasswordAttemptKey;
+        private bool _lastPasswordAttemptWasAuto;
+
+        protected override int ExtraListViewPadding => 15;
+
+        private INetworkingService NetworkService => NetworkingServiceFactory.Instance;
+        
+        private int SuggestedDirectConnectPort => NetworkService?.DefaultPort ?? NetworkTransportDefaults.DefaultUdpPort;
+        
+        private string PlayerName => NetworkService?.PlayerName ?? "YARG";
+
         private bool EnsureSidebar()
         {
             if (_sidebar != null)
@@ -40,19 +97,16 @@ namespace YARG.Menu.Multiplayer
 
             try
             {
-                // Prefer a sidebar that lives under this menu's hierarchy (even if it's inactive)
                 _sidebar = GetComponentInChildren<LobbyBrowserSidebar>(includeInactive: true);
                 if (_sidebar != null)
                     return true;
 
-                // Fallback: search the scene for any sidebar instance so hover behaviour still works in misconfigured prefabs
                 var sidebars = Resources.FindObjectsOfTypeAll<LobbyBrowserSidebar>();
                 foreach (var candidate in sidebars)
                 {
                     if (candidate == null)
                         continue;
 
-                    // Ignore prefabs/assets that are not part of the active scene hierarchy
                     var go = candidate.gameObject;
                     if (go == null || !go.scene.IsValid())
                         continue;
@@ -67,57 +121,12 @@ namespace YARG.Menu.Multiplayer
                 Debug.LogWarning($"[LobbyBrowserMenu] EnsureSidebar encountered an exception: {ex}");
             }
 
-            Debug.LogWarning("[LobbyBrowserMenu] Sidebar reference is not assigned. Hosted presets and details panel will be unavailable.");
+            Debug.LogWarning("[LobbyBrowserMenu] Sidebar reference is not assigned.");
             return false;
         }
 
-        private const double STALE_LOBBY_SECONDS = 18.0;
-        private const float STALE_SWEEP_INTERVAL = 1.0f;
-        private const float PING_STATUS_REFRESH_MIN_INTERVAL = 4.0f;
-        private const float DISCOVERY_PING_INTERVAL = 5.0f;
-        private const int MAX_CONSECUTIVE_PROBE_FAILURES = 6;
-
-        private LobbyFavorites _favorites;
-        private List<YARG.Networking.Abstraction.LobbyInfo> _currentLobbies = new();
-        private readonly List<int> _sectionStartIndices = new();
-        private YARG.Networking.Abstraction.LobbyInfo _selectedLobby;
-        private bool _navigationSchemePushed;
-        private string _lastNavigationHelpSignature;
-        private (int favorites, int myLobbies, int recents, int discovered, int total) _lastLoggedSummary;
-        private bool _hasLoggedSummary;
-        // Timestamp of last SelectedIndex change (unscaled time)
-        private float _lastSelectedIndexChangeTime = -1f;
-
-        // Cache for ping results: endpointKey -> LobbyInfo (if online)
-        private Dictionary<string, YARG.Networking.Abstraction.LobbyInfo> _pingedLobbies = new();
-        private readonly Dictionary<string, int> _consecutiveProbeFailures = new();
-        private HashSet<string> _pendingPings = new();
-        private bool _isPingingSavedServers = false;
-        private YargNetworkDiscovery _discovery;
-        // Track the last view the sidebar was asked to show (hover or selection) so discovery updates can refresh it.
-        private LobbyViewType _lastShownSidebarView;
-        private float _nextStaleSweepAt;
-        private float _nextPingStatusRefreshAt;
-        private bool _pendingPingStatusRefresh;
-        private CancellationTokenSource _pingCancellation;
-        private float _lastPingStartedAt = float.NegativeInfinity;
-        private float _nextAutomaticPingAt;
-
-        private bool _pendingPasswordSaveRequested;
-        private string _pendingPasswordAddress;
-        private int _pendingPasswordPort;
-        private string _pendingPasswordDisplayName;
-        private string _pendingPasswordValue;
-        private readonly HashSet<string> _passwordFailures = new(StringComparer.OrdinalIgnoreCase);
-        private YARG.Networking.Abstraction.LobbyInfo _lastPasswordAttemptLobby;
-        private string _lastPasswordAttemptKey;
-        private bool _lastPasswordAttemptWasAuto;
-
-        protected override int ExtraListViewPadding => 15;
-
         protected override void Awake()
         {
-            // Initialize favorites before calling base.Awake so CreateViewList (invoked by base) has a valid facade.
             _favorites = new LobbyFavorites();
             _favorites.OnFavoritesChanged += RefreshList;
 
@@ -142,29 +151,18 @@ namespace YARG.Menu.Multiplayer
         private void OnEnable()
         {
             SetNavigationScheme();
-
             EnsureSidebar();
 
             // Subscribe to networking events through the abstraction layer
-            if (NetworkingServiceFactory.Instance != null)
+            if (NetworkService != null)
             {
-                NetworkingServiceFactory.Instance.OnLobbyListUpdated += OnLobbyListUpdated;
-                NetworkingServiceFactory.Instance.OnLobbyJoined += HandleLobbyJoined;
-                NetworkingServiceFactory.Instance.OnNetworkError += HandleNetworkError;
+                NetworkService.OnLobbyListUpdated += OnLobbyListUpdated;
+                NetworkService.OnLobbyCreated += HandleLobbyCreated;
+                NetworkService.OnLobbyJoined += HandleLobbyJoined;
+                NetworkService.OnNetworkError += HandleNetworkError;
                 
-                // Start LiteNet discovery
-                NetworkingServiceFactory.Instance.StartDiscovery();
-            }
-
-            // Wire discovery callbacks so direct ping responses update saved entries
-            if (YargNetworkManager.Instance != null)
-            {
-                _discovery = YargNetworkManager.Instance.GetComponent<YargNetworkDiscovery>();
-                if (_discovery != null)
-                {
-                    _discovery.OnLobbyDiscovered += OnDiscoveryLobbyDiscovered;
-                    _discovery.OnLobbyLost += OnDiscoveryLobbyLost;
-                }
+                // Start discovery
+                NetworkService.StartDiscovery();
             }
 
             if (_sidebar != null)
@@ -172,44 +170,46 @@ namespace YARG.Menu.Multiplayer
                 _sidebar.Initialize(this);
                 _sidebar.CreateLobbySubmitted += OnCreateLobbySubmitted;
                 _sidebar.DirectConnectSubmitted += OnDirectConnectSubmitted;
+                _sidebar.JoinByCodeSubmitted += OnJoinByCodeSubmitted;
             }
 
-            // Build the view list first so navigatables are added to the NavigationGroup
             RefreshList(false);
 
             if (_navigationGroup != null)
             {
                 _navigationGroup.PushNavGroupToStack();
-                    if (_navigationGroup.Count > 0 && (_navigationGroup.SelectedIndex == null || _navigationGroup.SelectedIndex < 0))
-                    {
-                        _navigationGroup.SelectFirst();
-                    }
+                if (_navigationGroup.Count > 0 && (_navigationGroup.SelectedIndex == null || _navigationGroup.SelectedIndex < 0))
+                {
+                    _navigationGroup.SelectFirst();
+                }
             }
 
             RefreshLobbies();
 
             _nextAutomaticPingAt = Time.unscaledTime + DISCOVERY_PING_INTERVAL;
+            
+            // Send first broadcast immediately and enable burst mode for rapid initial discovery
+            _discoveryBurstRemaining = DISCOVERY_BURST_COUNT;
+            _nextDiscoveryBroadcastAt = 0f; // Send immediately
+            NetworkService?.SendBroadcastDiscoveryRequest();
+            
             UniTask.Void(async () => await PingSavedServersAsync(force: true));
-
-            // Debug: subscribe to navigator events to ensure inputs reach this menu
-            if (Navigator.Instance != null)
-            {
-                Navigator.Instance.NavigationEvent += OnNavigatorEvent;
-            }
 
             _nextStaleSweepAt = Time.unscaledTime + STALE_SWEEP_INTERVAL;
         }
 
         private void OnDisable()
         {
+            Debug.Log($"[LobbyBrowserMenu] OnDisable: _navigationSchemePushed={_navigationSchemePushed}");
             if (_navigationSchemePushed && Navigator.Instance != null)
             {
+                Debug.Log("[LobbyBrowserMenu] OnDisable: Popping navigation scheme");
                 Navigator.Instance.PopScheme();
                 _navigationSchemePushed = false;
             }
             _lastNavigationHelpSignature = null;
 
-            // Cancel any pending pings/probes FIRST before unsubscribing
+            // Cancel any pending pings
             if (_pingCancellation != null)
             {
                 try
@@ -220,21 +220,16 @@ namespace YARG.Menu.Multiplayer
                 _pingCancellation.Dispose();
                 _pingCancellation = null;
             }
-            
-            // Clean up any lingering Mirror probe connections
-            // This is important because probes can start NetworkClient and if the user
-            // backs out before the probe completes, the client may stay active
-            CleanupLingeringProbeConnections();
 
             // Unsubscribe from networking events
-            if (NetworkingServiceFactory.Instance != null)
+            if (NetworkService != null)
             {
-                NetworkingServiceFactory.Instance.OnLobbyListUpdated -= OnLobbyListUpdated;
-                NetworkingServiceFactory.Instance.OnLobbyJoined -= HandleLobbyJoined;
-                NetworkingServiceFactory.Instance.OnNetworkError -= HandleNetworkError;
+                NetworkService.OnLobbyListUpdated -= OnLobbyListUpdated;
+                NetworkService.OnLobbyCreated -= HandleLobbyCreated;
+                NetworkService.OnLobbyJoined -= HandleLobbyJoined;
+                NetworkService.OnNetworkError -= HandleNetworkError;
                 
-                // Stop LiteNet discovery
-                NetworkingServiceFactory.Instance.StopDiscovery();
+                NetworkService.StopDiscovery();
             }
 
             ClearPendingPasswordUpdate();
@@ -242,121 +237,49 @@ namespace YARG.Menu.Multiplayer
             _lastPasswordAttemptKey = null;
             _lastPasswordAttemptWasAuto = false;
 
-            if (_discovery != null)
-            {
-                _discovery.OnLobbyDiscovered -= OnDiscoveryLobbyDiscovered;
-                _discovery.OnLobbyLost -= OnDiscoveryLobbyLost;
-                _discovery = null;
-            }
-
             if (_sidebar != null)
             {
                 _sidebar.CreateLobbySubmitted -= OnCreateLobbySubmitted;
                 _sidebar.DirectConnectSubmitted -= OnDirectConnectSubmitted;
+                _sidebar.JoinByCodeSubmitted -= OnJoinByCodeSubmitted;
                 _sidebar.ClearLobby();
             }
             _selectedLobby = null;
 
-            if (Navigator.Instance != null)
-            {
-                Navigator.Instance.NavigationEvent -= OnNavigatorEvent;
-            }
-
             _nextStaleSweepAt = 0f;
-        }
-        
-        /// <summary>
-        /// Cleans up any lingering probe connections that may have been started
-        /// but not completed before the user navigated away.
-        /// </summary>
-        private void CleanupLingeringProbeConnections()
-        {
-            // Only clean up if we're NOT actually in a lobby
-            var networkService = NetworkingServiceFactory.Instance;
-            if (networkService != null && networkService.CurrentLobby != null)
-            {
-                // We're in a lobby, don't disconnect
-                return;
-            }
-            
-            // Cancel any in-progress probes on YargNetworkManager
-            var manager = YargNetworkManager.Instance;
-            if (manager != null)
-            {
-                // Cancel pending probe if one exists
-                manager.CancelPendingProbe();
-            }
-            
-            // If NetworkClient is active but we're not actually in a lobby,
-            // it's likely a lingering probe connection
-            if (Mirror.NetworkClient.active && !Mirror.NetworkClient.isConnected)
-            {
-                Debug.Log("[LobbyBrowserMenu] Cleaning up lingering NetworkClient from probe");
-                try
-                {
-                    Mirror.NetworkClient.Disconnect();
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[LobbyBrowserMenu] Error disconnecting lingering client: {ex.Message}");
-                }
-            }
         }
 
         protected override void OnSelectedIndexChanged()
         {
             base.OnSelectedIndexChanged();
-            Debug.Log($"[LobbyBrowserMenu] SelectedIndex changed -> {SelectedIndex}");
-            _lastSelectedIndexChangeTime = Time.unscaledTime;
             UpdateSidebarForSelection();
         }
 
         protected override List<LobbyViewType> CreateViewList()
         {
             var viewTypes = new List<LobbyViewType>();
-
-            var discoveredLookup = new Dictionary<string, YARG.Networking.Abstraction.LobbyInfo>(StringComparer.Ordinal);
+            var discoveredLookup = new Dictionary<string, LobbyInfo>(StringComparer.Ordinal);
 
             foreach (var lobby in _currentLobbies)
             {
                 if (!IsLobbyLive(lobby))
-                {
                     continue;
-                }
 
                 void TryAdd(string address, int port)
                 {
                     if (string.IsNullOrWhiteSpace(address) || port <= 0)
-                    {
                         return;
-                    }
 
                     string key = LobbyBookmarkUtility.BuildKey(address, port);
                     if (string.IsNullOrEmpty(key))
-                    {
                         return;
-                    }
 
                     if (!discoveredLookup.ContainsKey(key))
-                    {
                         discoveredLookup[key] = lobby;
-                    }
                 }
 
                 TryAdd(lobby.IpAddress, lobby.Port);
                 TryAdd(lobby.PublicAddress, lobby.PublicPort);
-
-                if (lobby.Port == NetworkTransportDefaults.DefaultUdpPort)
-                {
-                    TryAdd(lobby.IpAddress, NetworkTransportDefaults.DefaultTcpPort);
-                    TryAdd(lobby.PublicAddress, NetworkTransportDefaults.DefaultTcpPort);
-                }
-
-                if (lobby.PublicPort == NetworkTransportDefaults.DefaultUdpPort)
-                {
-                    TryAdd(lobby.IpAddress, NetworkTransportDefaults.DefaultUdpPort);
-                    TryAdd(lobby.PublicAddress, NetworkTransportDefaults.DefaultUdpPort);
-                }
             }
 
             var usedEndpointKeys = new HashSet<string>();
@@ -369,12 +292,7 @@ namespace YARG.Menu.Multiplayer
             var favoriteEndpointKeys = new HashSet<string>();
             var usedAddresses = new HashSet<string>();
 
-            var allFavorites = _favorites.GetFavorites();
-            var favoriteBookmarks = allFavorites
-                .OrderByDescending(b => (discoveredLookup.ContainsKey(b.EndpointKey) || (_pingedLobbies.TryGetValue(b.EndpointKey, out var _pinged) && _pinged != null)))
-                .ThenBy(b => b.createdAt)
-                .ToList();
-            foreach (var bookmark in favoriteBookmarks)
+            foreach (var bookmark in _favorites.GetFavorites().OrderByDescending(b => discoveredLookup.ContainsKey(b.EndpointKey)))
             {
                 string addressKey = NormalizeAddress(bookmark.address);
                 if (string.IsNullOrEmpty(addressKey) || !usedAddresses.Add(addressKey))
@@ -383,28 +301,24 @@ namespace YARG.Menu.Multiplayer
                 favoriteEndpointKeys.Add(bookmark.EndpointKey);
                 usedEndpointKeys.Add(bookmark.EndpointKey);
 
-                YARG.Networking.Abstraction.LobbyInfo liveInfo = null;
+                LobbyInfo liveInfo = null;
                 if (discoveredLookup.TryGetValue(bookmark.EndpointKey, out var dl) && IsLobbyLive(dl))
-                {
                     liveInfo = dl;
-                }
 
                 if ((liveInfo == null || !IsLobbyLive(liveInfo)) && _pingedLobbies.TryGetValue(bookmark.EndpointKey, out var pinged) && IsLobbyLive(pinged))
-                {
                     liveInfo = pinged;
-                }
 
                 if (liveInfo != null && !IsLobbyLive(liveInfo))
-                {
                     liveInfo = null;
-                }
 
-                var savedView = new SavedLobbyViewType(bookmark, this, _favorites) { LiveInfo = liveInfo };
-                favoritesSection.Add(savedView);
+                favoritesSection.Add(new SavedLobbyViewType(bookmark, this, _favorites) { LiveInfo = liveInfo });
             }
 
             var recentsSection = new List<LobbyViewType>();
-            foreach (var bookmark in _favorites.GetRecents().OrderByDescending(entry => entry.lastConnected))
+            // Sort recents by online status first (online before offline), then by lastConnected
+            foreach (var bookmark in _favorites.GetRecents()
+                .OrderByDescending(b => discoveredLookup.ContainsKey(b.EndpointKey) || (_pingedLobbies.TryGetValue(b.EndpointKey, out var pingedLobby) && IsLobbyLive(pingedLobby)))
+                .ThenByDescending(entry => entry.lastConnected))
             {
                 if (recentsSection.Count >= 5)
                     break;
@@ -413,29 +327,25 @@ namespace YARG.Menu.Multiplayer
                 if (string.IsNullOrEmpty(addressKey) || usedAddresses.Contains(addressKey))
                     continue;
 
+                // Skip if this entry is also in favorites (using EndpointKey for exact match)
                 if (favoriteEndpointKeys.Contains(bookmark.EndpointKey))
                     continue;
-
+                
+                // Also skip if we've already used this address in favorites (handles IP vs hostname differences)
+                usedAddresses.Add(addressKey);
                 usedEndpointKeys.Add(bookmark.EndpointKey);
 
-                YARG.Networking.Abstraction.LobbyInfo liveInfo = null;
+                LobbyInfo liveInfo = null;
                 if (discoveredLookup.TryGetValue(bookmark.EndpointKey, out var dl2) && IsLobbyLive(dl2))
-                {
                     liveInfo = dl2;
-                }
 
                 if ((liveInfo == null || !IsLobbyLive(liveInfo)) && _pingedLobbies.TryGetValue(bookmark.EndpointKey, out var pinged2) && IsLobbyLive(pinged2))
-                {
                     liveInfo = pinged2;
-                }
 
                 if (liveInfo != null && !IsLobbyLive(liveInfo))
-                {
                     liveInfo = null;
-                }
 
-                var savedView = new SavedLobbyViewType(bookmark, this, _favorites) { LiveInfo = liveInfo };
-                recentsSection.Add(savedView);
+                recentsSection.Add(new SavedLobbyViewType(bookmark, this, _favorites) { LiveInfo = liveInfo });
             }
 
             var myLobbiesSection = new List<LobbyViewType>();
@@ -446,7 +356,6 @@ namespace YARG.Menu.Multiplayer
                 {
                     if (preset == null)
                         continue;
-
                     myLobbiesSection.Add(new MyLobbyViewType(preset, this));
                 }
             }
@@ -458,21 +367,22 @@ namespace YARG.Menu.Multiplayer
                     continue;
 
                 string endpointKey = LobbyBookmarkUtility.BuildKey(lobby.IpAddress, lobby.Port);
-                if (usedEndpointKeys.Contains(endpointKey)) continue;
+                if (usedEndpointKeys.Contains(endpointKey))
+                    continue;
                 discoveredSection.Add(new DiscoveredLobbyViewType(lobby, this, _favorites));
             }
 
-            viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionCreateLobby"), "SectionCreateLobby"));
-
-            viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionDirectConnect"), "SectionDirectConnect"));
+            // Add action items at the top (Host/Join)
+            viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionHostGame"), "SectionHostGame"));
+            viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionJoinGame"), "SectionJoinGame"));
 
             viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionFavorites"), "SectionFavorites"));
             if (favoritesSection.Count > 0) viewTypes.AddRange(favoritesSection);
             else viewTypes.Add(new LobbyEmptyViewType(Localize.Key("Menu", "LobbyBrowser", "EmptyFavorites")));
 
-            viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionMyLobbies"), "SectionMyLobbies"));
+            viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionMySessions"), "SectionMySessions"));
             if (myLobbiesSection.Count > 0) viewTypes.AddRange(myLobbiesSection);
-            else viewTypes.Add(new LobbyEmptyViewType(Localize.Key("Menu", "LobbyBrowser", "EmptyMyLobbies")));
+            else viewTypes.Add(new LobbyEmptyViewType(Localize.Key("Menu", "LobbyBrowser", "EmptyMySessions")));
 
             viewTypes.Add(new LobbyCategoryViewType(Localize.Key("Menu", "LobbyBrowser", "SectionRecents"), "SectionRecents"));
             if (recentsSection.Count > 0) viewTypes.AddRange(recentsSection);
@@ -484,38 +394,9 @@ namespace YARG.Menu.Multiplayer
 
             RebuildSectionCache(viewTypes);
             UpdateStatusText(favoritesSection.Count, myLobbiesSection.Count, recentsSection.Count, discoveredSection.Count);
-            LogViewSummary(favoritesSection.Count, myLobbiesSection.Count, recentsSection.Count, discoveredSection.Count, viewTypes.Count);
-
-            try
-            {
-                Debug.Log($"[LobbyBrowserMenu] CreateViewList summary: favorites={favoritesSection.Count}, myLobbies={myLobbiesSection.Count}, recents={recentsSection.Count}, discovered={discoveredSection.Count}, totalViewTypes={viewTypes.Count}");
-                int maxSamples = 8;
-                var samples = viewTypes.Where(v => v is SavedLobbyViewType or DiscoveredLobbyViewType or MyLobbyViewType)
-                                       .Take(maxSamples)
-                                       .Select(v => v.GetPrimaryText(false))
-                                       .ToList();
-                if (samples.Count > 0)
-                {
-                    Debug.Log($"[LobbyBrowserMenu] CreateViewList samples: {string.Join(" | ", samples)}");
-                }
-
-                const int MAX_SAFE_VIEWTYPES = 2000;
-                if (viewTypes.Count > MAX_SAFE_VIEWTYPES)
-                {
-                    Debug.LogWarning($"[LobbyBrowserMenu] CreateViewList produced {viewTypes.Count} items — capping to {MAX_SAFE_VIEWTYPES} for safety. Investigate discovery/bookmark sources.");
-                    viewTypes = viewTypes.Take(MAX_SAFE_VIEWTYPES).ToList();
-                    RebuildSectionCache(viewTypes);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Exception while logging CreateViewList debug info: {ex}");
-            }
 
             return viewTypes;
         }
-
-        // --- List management and navigation helpers ---
 
         private static string NormalizeAddress(string address) => string.IsNullOrWhiteSpace(address) ? string.Empty : address.Trim().ToLowerInvariant();
 
@@ -524,7 +405,10 @@ namespace YARG.Menu.Multiplayer
 
         private void RefreshListInternal(bool keepSection)
         {
-            // Try to preserve the current selection by a stable key if possible.
+            // Don't refresh if this menu is disabled (e.g., we're in LobbyRoomMenu)
+            if (!gameObject.activeInHierarchy)
+                return;
+            
             string currentSelectionKey = CurrentSelection?.GetSelectionKey();
             int previousSection = keepSection ? GetSectionIndexFor(SelectedIndex) : 0;
             int priorSelectedIndex = SelectedIndex;
@@ -540,7 +424,6 @@ namespace YARG.Menu.Multiplayer
 
             if (SelectedIndex >= views.Count) SelectedIndex = views.Count - 1;
 
-            // If we have a stable selection key, try to reselect the same item after rebuilding the list.
             if (!string.IsNullOrEmpty(currentSelectionKey))
             {
                 for (int i = 0; i < views.Count; i++)
@@ -554,17 +437,10 @@ namespace YARG.Menu.Multiplayer
                             return;
                         }
                     }
-                    catch
-                    {
-                        // Ignore and continue
-                    }
+                    catch { }
                 }
             }
 
-            // If there was no stable selection key (e.g., categories/empty rows), and we're keeping section,
-            // preserve the numeric index where possible. Previously we only preserved it when the index pointed
-            // to a selectable item which caused snapping when the user was hovering a category/empty row.
-            // To avoid that snap, preserve the numeric index even if it points to a non-selectable row (category/empty).
             if (string.IsNullOrEmpty(currentSelectionKey) && keepSection)
             {
                 if (priorSelectedIndex >= 0 && priorSelectedIndex < views.Count)
@@ -587,15 +463,45 @@ namespace YARG.Menu.Multiplayer
             UpdateSidebarForSelection();
         }
 
+        /// <summary>
+        /// Returns true if a specific endpoint is currently being scanned/pinged.
+        /// Used by SavedLobbyViewType to show "Scanning..." state.
+        /// </summary>
+        public bool IsEndpointBeingScanned(string endpointKey)
+        {
+            if (string.IsNullOrEmpty(endpointKey))
+                return false;
+            return _pendingPings.Contains(endpointKey) || (_discoveryBurstRemaining > 0);
+        }
+
+        /// <summary>
+        /// Returns the number of consecutive probe failures for an endpoint.
+        /// Used to determine if a lobby should be shown as offline.
+        /// </summary>
+        public int GetProbeFailureCount(string endpointKey)
+        {
+            if (string.IsNullOrEmpty(endpointKey))
+                return 0;
+            return _consecutiveProbeFailures.TryGetValue(endpointKey, out var count) ? count : 0;
+        }
+
         public void RefreshLobbies()
         {
             if (_statusText != null) _statusText.text = Localize.Key("Menu", "LobbyBrowser", "SearchingForLobbies");
-            YargNetworkManager.Instance?.RefreshLobbyList();
+            
+            // Trigger discovery refresh through abstraction layer
+            NetworkService?.StartDiscovery();
         }
 
-        private void OnLobbyListUpdated(List<YARG.Networking.Abstraction.LobbyInfo> lobbies)
+        private void OnLobbyListUpdated(List<LobbyInfo> lobbies)
         {
-            _currentLobbies = lobbies;
+            // Store lobbies even if disabled, but don't update UI
+            _currentLobbies = lobbies ?? new List<LobbyInfo>();
+            
+            // Don't update UI if this menu is disabled (e.g., we're in LobbyRoomMenu)
+            if (!gameObject.activeInHierarchy)
+                return;
+            
             if (_statusText != null)
             {
                 if (lobbies.Count == 0) _statusText.text = Localize.Key("Menu", "LobbyBrowser", "NoLobbiesFound");
@@ -610,7 +516,6 @@ namespace YARG.Menu.Multiplayer
                         string suffix = Localize.KeyFormat(("Menu", "LobbyBrowser", "FavoritesSuffix"), favoriteCount, favoriteWord);
                         status = string.Concat(status, " (", suffix, ")");
                     }
-
                     _statusText.text = status;
                 }
             }
@@ -619,23 +524,250 @@ namespace YARG.Menu.Multiplayer
             UniTask.Void(async () => await PingSavedServersAsync());
         }
 
+        private CancellationTokenSource _createLobbyCts;
+
         private void OnCreateLobbySubmitted(LobbyBrowserSidebar.CreateLobbyFormData data)
         {
+            // Prevent double-clicks while creation is in progress
+            if (_isCreatingLobby)
+            {
+                Debug.LogWarning("[LobbyBrowserMenu] Lobby creation already in progress, ignoring duplicate request");
+                return;
+            }
+            
+            // Fire and forget async lobby creation
+            CreateLobbyAsync(data).Forget();
+        }
+
+        private async UniTaskVoid CreateLobbyAsync(LobbyBrowserSidebar.CreateLobbyFormData data)
+        {
+            _isCreatingLobby = true;
+            _createLobbyCts = new CancellationTokenSource();
+            
+            // Validate that connected profiles aren't blocked by the lobby's game mode restrictions
+            // Do this BEFORE showing the dialog or doing any work
+            if (data.AllowedInstruments != null && data.AllowedInstruments.Count > 0 && NetworkService != null)
+            {
+                var gameModeBlacklist = new List<YARG.Core.GameMode>();
+                foreach (var mode in data.AllowedInstruments)
+                {
+                    if (mode >= 0 && mode <= 255 && Enum.IsDefined(typeof(YARG.Core.GameMode), (byte)mode))
+                    {
+                        gameModeBlacklist.Add((YARG.Core.GameMode)mode);
+                    }
+                }
+                
+                if (!NetworkService.ValidateProfilesAgainstGameModes(gameModeBlacklist, out var blockedProfiles))
+                {
+                    string blockedList = string.Join(", ", blockedProfiles);
+                    Debug.LogWarning($"[LobbyBrowserMenu] Cannot create lobby - blocked profiles: {blockedList}");
+                    ToastManager.ToastWarning($"Cannot create lobby: {blockedList} uses a disabled game mode.");
+                    _isCreatingLobby = false;
+                    return;
+                }
+            }
+            
+            // Show a modal dialog with cancel option
+            MessageDialog dialog = null;
+            if (DialogManager.Instance != null)
+            {
+                dialog = DialogManager.Instance.ShowMessage("Creating Lobby", "Setting up lobby...\nThis may take a moment.");
+                dialog.ClearButtons();
+                dialog.AddDialogButton("Cancel", MenuData.Colors.CancelButton, () =>
+                {
+                    Debug.Log("[LobbyBrowserMenu] Lobby creation cancelled by user");
+                    _createLobbyCts?.Cancel();
+                    DialogManager.Instance?.ClearDialog();
+                });
+            }
+            
             try
             {
+                var ct = _createLobbyCts.Token;
+                
+                Debug.Log($"[LobbyBrowserMenu] CreateLobbyAsync: data.AllowLateJoin={data.AllowLateJoin}");
+                
                 var store = LobbyBookmarkStore.Instance;
-                var preset = store.UpsertMyLobby(data.PresetId, data.LobbyName, data.MaxPlayers, data.PrivacyMode, data.Password, true);
+                var preset = store.UpsertMyLobby(
+                    data.PresetId, 
+                    data.LobbyName, 
+                    data.MaxPlayers, 
+                    data.PrivacyMode, 
+                    data.SessionType,
+                    data.Password, 
+                    true,
+                    data.BandSize,
+                    data.NoFailMode,
+                    data.SharedSongsOnly,
+                    data.AllowModifiers,
+                    data.EnablePresetSync,
+                    data.AllowLateJoin,
+                    data.AllowedInstruments ?? new List<int>(),
+                    data.LocalPlayersFirst);
+                
+                Debug.Log($"[LobbyBrowserMenu] UpsertMyLobby returned preset.allowLateJoin={preset?.allowLateJoin}");
+                    
                 if (_sidebar != null)
-                {
                     _sidebar.ShowHostedLobbyPreset(preset);
-                }
 
-                var password = preset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private ? preset.password ?? string.Empty : string.Empty;
-                NetworkingServiceFactory.Instance?.CreateLobby(preset.lobbyName, preset.maxPlayers, (YARG.Networking.Abstraction.LobbyPrivacyMode)preset.PrivacyMode, password);
+                // Apply gameplay settings from preset
+                ApplyGameplaySettingsFromPreset(preset);
+
+                // Create a SessionPreset for the SessionLifecycleManager
+                var sessionPreset = CreateSessionPresetFromHosted(preset);
+                
+                // Get the port and lobby ID
+                int port = NetworkService?.DefaultPort ?? 7777;
+                Guid lobbyId = Guid.NewGuid();
+                
+                // Update dialog status
+                if (dialog != null)
+                {
+                    dialog.Message.text = "Configuring network settings...";
+                }
+                
+                // Start the session lifecycle (UPnP for Lobby mode, nothing for Server mode)
+                string lobbyCode = null;
+                if (SessionLifecycleManager.Instance != null)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var result = await SessionLifecycleManager.Instance.StartHostingAsync(sessionPreset, port, lobbyId, PlayerName);
+                    
+                    ct.ThrowIfCancellationRequested();
+                    if (!result.IsSuccess)
+                    {
+                        Debug.LogWarning($"[LobbyBrowserMenu] Session lifecycle failed: {result.Error}");
+                        // For Server mode, this is fine - user handles port forwarding
+                        // For Lobby mode, show an error and abort
+                        if (data.SessionType == SessionType.Lobby)
+                        {
+                            Debug.LogError($"[LobbyBrowserMenu] Failed to start lobby session: {result.Error}");
+                            DialogManager.Instance?.ClearDialog();
+                            ToastManager.ToastError($"Failed to create lobby: {result.Error}");
+                            _isCreatingLobby = false;
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        lobbyCode = result.LobbyCode;
+                        if (!string.IsNullOrEmpty(lobbyCode))
+                        {
+                            Debug.Log($"[LobbyBrowserMenu] Lobby code generated: {lobbyCode}");
+                        }
+                        
+                        if (data.SessionType == SessionType.Lobby && !result.UPnPSuccess)
+                        {
+                            Debug.LogWarning("[LobbyBrowserMenu] UPnP failed - players may not be able to connect unless port is manually forwarded");
+                        }
+                    }
+                }
+                
+                // Update dialog before creating local lobby
+                if (dialog != null)
+                {
+                    dialog.Message.text = "Starting lobby...";
+                }
+                ct.ThrowIfCancellationRequested();
+
+                var password = preset.PrivacyMode == LobbyPrivacyMode.Private ? preset.password ?? string.Empty : string.Empty;
+                var lobby = NetworkService?.CreateLobby(preset.lobbyName, preset.maxPlayers, preset.PrivacyMode, preset.SessionType, password);
+                
+                // Store the lobby code on the LobbyInfo if we got one
+                if (lobby != null && !string.IsNullOrEmpty(lobbyCode))
+                {
+                    lobby.LobbyCode = lobbyCode;
+                }
+                
+                // Show success toast with code if available
+                if (!string.IsNullOrEmpty(lobbyCode))
+                {
+                    ToastManager.ToastInformation($"Lobby created! Code: {lobbyCode}");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Debug.Log("[LobbyBrowserMenu] Lobby creation was cancelled");
+                ToastManager.ToastInformation("Lobby creation cancelled");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to create lobby from sidebar submission: {ex}");
+                Debug.LogWarning($"[LobbyBrowserMenu] Failed to create lobby: {ex}");
+                ToastManager.ToastError($"Failed to create lobby: {ex.Message}");
+            }
+            finally
+            {
+                // Clean up dialog if still showing
+                if (DialogManager.Instance != null && DialogManager.Instance.IsDialogShowing)
+                {
+                    DialogManager.Instance.ClearDialog();
+                }
+                
+                _createLobbyCts?.Dispose();
+                _createLobbyCts = null;
+                _isCreatingLobby = false;
+            }
+        }
+        
+        private SessionPreset CreateSessionPresetFromHosted(HostedLobbyPreset preset)
+        {
+            Debug.Log($"[LobbyBrowserMenu] CreateSessionPresetFromHosted: preset.allowLateJoin={preset?.allowLateJoin}, " +
+                $"preset.lobbyName={preset?.lobbyName}, preset.id={preset?.id}");
+            
+            return new SessionPreset
+            {
+                id = preset.id,
+                presetName = preset.lobbyName,
+                sessionName = preset.lobbyName,
+                sessionType = (int)preset.SessionType,
+                maxPlayers = preset.maxPlayers,
+                privacyMode = preset.privacyMode,
+                password = preset.password,
+                bandSize = preset.bandSize,
+                noFailMode = preset.noFailMode,
+                sharedSongsOnly = preset.sharedSongsOnly,
+                allowModifiers = preset.allowModifiers,
+                visibleOnLan = preset.VisibleOnLan,
+                registerWithIntroducers = preset.RegisterWithIntroducers,
+                enablePresetSync = preset.enablePresetSync,
+                allowLateJoin = preset.allowLateJoin,
+                localPlayersFirstValue = preset.localPlayersFirst,
+            };
+        }
+
+        private void ApplyGameplaySettingsFromPreset(HostedLobbyPreset preset)
+        {
+            if (preset == null)
+                return;
+
+            // Create a SessionPreset from the HostedLobbyPreset to apply gameplay settings
+            // Note: VisibleOnLan and RegisterWithIntroducers are derived from PrivacyMode
+            // IMPORTANT: Preserve the preset ID so settings can be saved back later
+            var sessionPreset = new SessionPreset
+            {
+                id = preset.id, // Preserve the ID for later saving
+                presetName = preset.lobbyName,
+                sessionName = preset.lobbyName,
+                sessionType = preset.sessionType, // Preserve session type (Server vs Lobby)
+                maxPlayers = preset.maxPlayers,
+                privacyMode = preset.privacyMode,
+                password = preset.password,
+                bandSize = preset.bandSize,
+                noFailMode = preset.noFailMode,
+                sharedSongsOnly = preset.sharedSongsOnly,
+                allowModifiers = preset.allowModifiers,
+                visibleOnLan = preset.VisibleOnLan,
+                registerWithIntroducers = preset.RegisterWithIntroducers,
+                enablePresetSync = preset.enablePresetSync,
+                allowLateJoin = preset.allowLateJoin,
+                localPlayersFirstValue = preset.localPlayersFirst,
+            };
+
+            // Apply to MultiplayerGameplaySettings if available
+            if (MultiplayerGameplaySettings.Instance != null)
+            {
+                MultiplayerGameplaySettings.Instance.ApplyPreset(sessionPreset);
+                Debug.Log($"[LobbyBrowserMenu] Applied gameplay settings: BandSize={preset.bandSize}, NoFail={preset.noFailMode}, SharedSongs={preset.sharedSongsOnly}, AllowMods={preset.allowModifiers}, VisibleOnLan={preset.VisibleOnLan}, Introducers={preset.RegisterWithIntroducers}, PresetSync={preset.enablePresetSync}, LateJoin={preset.allowLateJoin}, LocalPlayersFirst={preset.localPlayersFirst}");
             }
         }
 
@@ -663,87 +795,79 @@ namespace YARG.Menu.Multiplayer
 
             try
             {
-                NetworkingServiceFactory.Instance?.JoinLobby(endpoint, data.Password ?? string.Empty);
+                NetworkService?.JoinLobby(endpoint, data.Password ?? string.Empty);
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[LobbyBrowserMenu] Direct connect join failed: {ex}");
             }
         }
-
-        // Conversion helper for Mirror discovery callbacks
-        private static YARG.Networking.Abstraction.LobbyInfo ConvertFromMirror(YargNetworkManager.LobbyInfo mirror)
+        
+        private void OnJoinByCodeSubmitted(string code)
         {
-            if (mirror == null) return null;
-            
-            return new YARG.Networking.Abstraction.LobbyInfo
-            {
-                LobbyId = mirror.lobbyId,
-                LobbyName = mirror.lobbyName,
-                HostName = mirror.hostName,
-                IpAddress = mirror.ipAddress,
-                PublicAddress = mirror.publicAddress,
-                TransportId = mirror.transportId,
-                CurrentPlayers = mirror.currentPlayers,
-                MaxPlayers = mirror.maxPlayers,
-                PrivacyMode = (YARG.Networking.Abstraction.LobbyPrivacyMode)mirror.privacyMode,
-                HasPassword = mirror.hasPassword,
-                Password = mirror.password,
-                IsActive = mirror.isActive,
-                Port = mirror.port,
-                PublicPort = mirror.publicPort,
-                PlayerNames = mirror.playerNames,
-                PlayerInstruments = mirror.playerInstruments
-            };
+            // Fire and forget async lookup
+            JoinByCodeAsync(code).Forget();
         }
-
-        public void JoinLobby(YargNetworkManager.LobbyInfo lobby)
+        
+        private async UniTaskVoid JoinByCodeAsync(string code)
         {
-            if (lobby == null)
+            try
             {
-                return;
-            }
-
-            var abstractionLobby = ConvertFromMirror(lobby);
-            if (abstractionLobby.HasPassword)
-            {
-                if (TryAutoJoinWithStoredPassword(abstractionLobby))
+                Debug.Log($"[LobbyBrowserMenu] Looking up lobby code: {code}");
+                
+                if (SessionLifecycleManager.Instance == null)
                 {
+                    ToastManager.ToastError("Networking not initialized");
                     return;
                 }
-
-                ShowPasswordDialog(abstractionLobby);
-                return;
-            }
-
-            _lastPasswordAttemptWasAuto = false;
-            JoinLobbyWithPassword(abstractionLobby, string.Empty);
-        }
-
-        // Overload for abstraction LobbyInfo (used internally)
-        public void JoinLobby(YARG.Networking.Abstraction.LobbyInfo lobby)
-        {
-            if (lobby == null)
-            {
-                return;
-            }
-
-            if (lobby.HasPassword)
-            {
-                if (TryAutoJoinWithStoredPassword(lobby))
+                
+                var result = await SessionLifecycleManager.Instance.LookupLobbyCodeAsync(code);
+                
+                if (result == null || !result.IsSuccess || result.Lobby == null)
                 {
+                    string errorMsg = result?.Error ?? "Invalid or expired code";
+                    Debug.LogWarning($"[LobbyBrowserMenu] Code lookup failed: {errorMsg}");
+                    ToastManager.ToastError(errorMsg);
                     return;
                 }
-
-                ShowPasswordDialog(lobby);
-                return;
+                
+                var lobby = result.Lobby;
+                Debug.Log($"[LobbyBrowserMenu] Found lobby: {lobby.LobbyName} at {lobby.Address}:{lobby.Port} (hasPassword={lobby.HasPassword})");
+                
+                string endpoint = $"{lobby.Address}:{lobby.Port}";
+                
+                // If lobby requires a password, prompt the user
+                if (lobby.HasPassword)
+                {
+                    Debug.Log($"[LobbyBrowserMenu] Lobby requires password, showing dialog");
+                    ShowPasswordDialogForCodeJoin(lobby.LobbyName, endpoint);
+                    return;
+                }
+                
+                ToastManager.ToastInformation($"Connecting to {lobby.LobbyName}...");
+                
+                // Join via the networking service
+                if (NetworkService != null)
+                {
+                    NetworkService.JoinLobby(endpoint, string.Empty);
+                    _sidebar?.ClearLobbyCodeInput();
+                }
+                else
+                {
+                    ToastManager.ToastError("Networking service not available");
+                }
             }
-
-            _lastPasswordAttemptWasAuto = false;
-            JoinLobbyWithPassword(lobby, string.Empty);
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LobbyBrowserMenu] Error joining by code: {ex.Message}");
+                ToastManager.ToastError($"Error: {ex.Message}");
+            }
         }
-
-        private void ShowPasswordDialog(YARG.Networking.Abstraction.LobbyInfo lobby)
+        
+        /// <summary>
+        /// Shows a password dialog for joining a lobby via code.
+        /// </summary>
+        private void ShowPasswordDialogForCodeJoin(string lobbyName, string endpoint)
         {
             if (DialogManager.Instance == null)
             {
@@ -755,9 +879,69 @@ namespace YARG.Menu.Multiplayer
             {
                 var submitted = (value ?? string.Empty).Trim();
                 if (string.IsNullOrEmpty(submitted))
-                {
                     return;
+
+                Debug.Log($"[LobbyBrowserMenu] Joining {lobbyName} at {endpoint} with password");
+                ToastManager.ToastInformation($"Connecting to {lobbyName}...");
+                
+                if (NetworkService != null)
+                {
+                    NetworkService.JoinLobby(endpoint, submitted);
+                    _sidebar?.ClearLobbyCodeInput();
                 }
+                else
+                {
+                    ToastManager.ToastError("Networking service not available");
+                }
+            });
+
+            dialog.AllowEmpty = false;
+            dialog.SetInitialText(string.Empty, false);
+
+            var inputField = dialog.GetComponentInChildren<TMP_InputField>(true);
+            if (inputField != null)
+            {
+                inputField.contentType = TMP_InputField.ContentType.Password;
+                inputField.lineType = TMP_InputField.LineType.SingleLine;
+                inputField.text = string.Empty;
+                if (inputField.placeholder is TMP_Text placeholderText)
+                    placeholderText.text = "Enter lobby password";
+                inputField.Select();
+                inputField.ActivateInputField();
+            }
+        }
+
+        public void JoinLobby(LobbyInfo lobby)
+        {
+            if (lobby == null)
+                return;
+
+            if (lobby.HasPassword)
+            {
+                if (TryAutoJoinWithStoredPassword(lobby))
+                    return;
+
+                ShowPasswordDialog(lobby);
+                return;
+            }
+
+            _lastPasswordAttemptWasAuto = false;
+            JoinLobbyWithPassword(lobby, string.Empty);
+        }
+
+        private void ShowPasswordDialog(LobbyInfo lobby)
+        {
+            if (DialogManager.Instance == null)
+            {
+                Debug.LogWarning("[LobbyBrowserMenu] Password dialog requested but DialogManager is unavailable.");
+                return;
+            }
+
+            var dialog = DialogManager.Instance.ShowRenameDialog("Password Required", value =>
+            {
+                var submitted = (value ?? string.Empty).Trim();
+                if (string.IsNullOrEmpty(submitted))
+                    return;
 
                 _lastPasswordAttemptWasAuto = false;
                 JoinLobbyWithPassword(lobby, submitted);
@@ -773,50 +957,38 @@ namespace YARG.Menu.Multiplayer
                 inputField.lineType = TMP_InputField.LineType.SingleLine;
                 inputField.text = string.Empty;
                 if (inputField.placeholder is TMP_Text placeholderText)
-                {
                     placeholderText.text = "Enter password";
-                }
                 inputField.Select();
                 inputField.ActivateInputField();
             }
         }
 
-        private void JoinLobbyWithPassword(YARG.Networking.Abstraction.LobbyInfo lobby, string password)
+        private void JoinLobbyWithPassword(LobbyInfo lobby, string password)
         {
             TrackPasswordSubmission(lobby, password);
-            NetworkingServiceFactory.Instance?.JoinDiscoveredLobby(lobby, password);
+            NetworkService?.JoinDiscoveredLobby(lobby, password);
         }
 
-        private bool TryAutoJoinWithStoredPassword(YARG.Networking.Abstraction.LobbyInfo lobby)
+        private bool TryAutoJoinWithStoredPassword(LobbyInfo lobby)
         {
             if (lobby == null || _favorites == null)
-            {
                 return false;
-            }
 
             int port = ResolveLobbyPort(lobby);
             LobbyBookmark bookmark = null;
 
             if (!string.IsNullOrWhiteSpace(lobby.IpAddress))
-            {
                 bookmark = _favorites.FindBookmark(lobby.IpAddress, port);
-            }
 
             if (bookmark == null && !string.IsNullOrWhiteSpace(lobby.PublicAddress))
-            {
                 bookmark = _favorites.FindBookmark(lobby.PublicAddress, port);
-            }
 
             if (bookmark == null)
-            {
                 return false;
-            }
 
             string storedPassword = bookmark.password;
             if (string.IsNullOrWhiteSpace(storedPassword))
-            {
                 return false;
-            }
 
             string address = !string.IsNullOrWhiteSpace(bookmark.address)
                 ? bookmark.address.Trim()
@@ -825,22 +997,18 @@ namespace YARG.Menu.Multiplayer
             int finalPort = bookmark.port > 0 ? bookmark.port : port;
 
             if (string.IsNullOrWhiteSpace(address))
-            {
                 return false;
-            }
 
             string endpointKey = LobbyBookmarkUtility.BuildKey(address, finalPort);
             if (_passwordFailures.Contains(endpointKey))
-            {
                 return false;
-            }
 
             _lastPasswordAttemptWasAuto = true;
             JoinLobbyWithPassword(lobby, storedPassword);
             return true;
         }
 
-        private void TrackPasswordSubmission(YARG.Networking.Abstraction.LobbyInfo lobby, string password)
+        private void TrackPasswordSubmission(LobbyInfo lobby, string password)
         {
             if (lobby == null || string.IsNullOrWhiteSpace(password))
             {
@@ -857,14 +1025,10 @@ namespace YARG.Menu.Multiplayer
             if (_favorites != null)
             {
                 if (!string.IsNullOrWhiteSpace(lobby.IpAddress))
-                {
                     matchingBookmark = _favorites.FindBookmark(lobby.IpAddress, port);
-                }
 
                 if (matchingBookmark == null && !string.IsNullOrWhiteSpace(lobby.PublicAddress))
-                {
                     matchingBookmark = _favorites.FindBookmark(lobby.PublicAddress, port);
-                }
             }
 
             if (matchingBookmark != null)
@@ -896,42 +1060,55 @@ namespace YARG.Menu.Multiplayer
 
             _pendingPasswordValue = password;
             _pendingPasswordSaveRequested = true;
+            _pendingIsServerSession = lobby.IsServer; // Only save servers to recents (lobbies are ephemeral)
 
             _lastPasswordAttemptLobby = CloneLobbyInfo(lobby);
             if (!string.IsNullOrWhiteSpace(_pendingPasswordAddress) && _pendingPasswordPort > 0)
-            {
                 _lastPasswordAttemptKey = LobbyBookmarkUtility.BuildKey(_pendingPasswordAddress, _pendingPasswordPort);
-            }
             else
-            {
                 _lastPasswordAttemptKey = null;
-            }
         }
 
-        private static int ResolveLobbyPort(YARG.Networking.Abstraction.LobbyInfo lobby)
+        private int ResolveLobbyPort(LobbyInfo lobby)
         {
             if (lobby == null)
-            {
-                return YargNetworkManager.Instance?.SuggestedDirectConnectPort ?? NetworkTransportDefaults.DefaultUdpPort;
-            }
+                return SuggestedDirectConnectPort;
 
             if (lobby.Port > 0)
-            {
                 return lobby.Port;
-            }
 
             if (lobby.PublicPort > 0)
-            {
                 return lobby.PublicPort;
-            }
 
-            return YargNetworkManager.Instance?.SuggestedDirectConnectPort ?? NetworkTransportDefaults.DefaultUdpPort;
+            return SuggestedDirectConnectPort;
         }
 
-        private void HandleLobbyJoined(YARG.Networking.Abstraction.LobbyInfo lobby)
+        private void HandleLobbyCreated(LobbyInfo lobby)
         {
-            if (!_pendingPasswordSaveRequested)
+            Debug.Log($"[LobbyBrowserMenu] HandleLobbyCreated: {lobby?.LobbyName}");
+            
+            // NOTE: Navigation for hosts is now handled explicitly in StartHostedLobbyAsync
+            // to ensure proper dialog cleanup timing. This callback is kept for logging
+            // and potential future use cases (e.g., client creating lobbies).
+            // Do NOT navigate here for hosts - it would cause double navigation!
+        }
+
+        private void HandleLobbyJoined(LobbyInfo lobby)
+        {
+            Debug.Log($"[LobbyBrowserMenu] Lobby joined: {lobby?.LobbyName}, navigating to LobbyRoom");
+            
+            // Navigate to the lobby room when joining
+            if (MenuManager.Instance != null && !NetworkService.IsHosting)
             {
+                // Only navigate for clients - hosts already navigate via HandleLobbyCreated
+                MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+            }
+            
+            // Handle password saving (original logic)
+            // Only save to recents if this is a server session (lobbies are ephemeral)
+            if (!_pendingPasswordSaveRequested || !_pendingIsServerSession)
+            {
+                ClearPendingPasswordUpdate();
                 return;
             }
 
@@ -953,9 +1130,7 @@ namespace YARG.Menu.Multiplayer
                 _pendingPasswordValue ?? string.Empty);
 
             if (!string.IsNullOrEmpty(attemptKey))
-            {
                 _passwordFailures.Remove(attemptKey);
-            }
 
             ClearPendingPasswordUpdate();
         }
@@ -963,14 +1138,10 @@ namespace YARG.Menu.Multiplayer
         private void HandleNetworkError(string error)
         {
             if (!string.Equals(error, "Incorrect password", StringComparison.OrdinalIgnoreCase))
-            {
                 return;
-            }
 
             if (!string.IsNullOrEmpty(_lastPasswordAttemptKey))
-            {
                 _passwordFailures.Add(_lastPasswordAttemptKey);
-            }
 
             var lobbyClone = _lastPasswordAttemptLobby != null ? CloneLobbyInfo(_lastPasswordAttemptLobby) : null;
             bool wasAuto = _lastPasswordAttemptWasAuto;
@@ -978,9 +1149,7 @@ namespace YARG.Menu.Multiplayer
             ClearPendingPasswordUpdate();
 
             if (wasAuto && lobbyClone != null)
-            {
                 ShowPasswordDialog(lobbyClone);
-            }
         }
 
         private void ClearPendingPasswordUpdate()
@@ -990,25 +1159,21 @@ namespace YARG.Menu.Multiplayer
             _pendingPasswordDisplayName = null;
             _pendingPasswordValue = null;
             _pendingPasswordPort = 0;
+            _pendingIsServerSession = false;
             _lastPasswordAttemptLobby = null;
             _lastPasswordAttemptKey = null;
             _lastPasswordAttemptWasAuto = false;
         }
 
-        private void Back() => MenuManager.Instance.PopMenu();
+        /// <summary>
+        /// Called from the UI back button.
+        /// </summary>
+        public void Back() => MenuManager.Instance.PopMenu();
 
         private void UpdateStatusText(int favoritesCount, int myLobbiesCount, int recentsCount, int discoveredCount)
         {
             if (_statusText == null) return;
             _statusText.text = $"Favorites: {favoritesCount} · My Lobbies: {myLobbiesCount} · Recents: {recentsCount} · Discovered: {discoveredCount}";
-        }
-
-        private void LogViewSummary(int favoritesCount, int myLobbiesCount, int recentsCount, int discoveredCount, int totalCount)
-        {
-            var summary = (favoritesCount, myLobbiesCount, recentsCount, discoveredCount, totalCount);
-            if (_hasLoggedSummary && summary == _lastLoggedSummary) return;
-            _hasLoggedSummary = true; _lastLoggedSummary = summary;
-            Debug.Log($"[LobbyBrowserMenu] Built lobby list. Favorites={favoritesCount}, MyLobbies={myLobbiesCount}, Recents={recentsCount}, Discovered={discoveredCount}, ViewTypes={totalCount}");
         }
 
         private void SetNavigationScheme()
@@ -1025,6 +1190,10 @@ namespace YARG.Menu.Multiplayer
 
         private void ApplyNavigationSchemeForCurrentView(bool force = false)
         {
+            // Don't modify navigation if this menu is disabled (e.g., we're in LobbyRoomMenu)
+            if (!gameObject.activeInHierarchy)
+                return;
+            
             if (Navigator.Instance == null)
                 return;
 
@@ -1066,17 +1235,13 @@ namespace YARG.Menu.Multiplayer
         {
             var entries = new List<NavigationScheme.Entry>
             {
-                // Use direct SelectedIndex modification so instrument inputs scroll the list even when
-                // NavigationGroup does not contain navigatables for ListMenu view objects.
                 new NavigationScheme.Entry(MenuAction.Up, "Menu.Common.Up", ctx =>
                 {
-                    Debug.Log($"[LobbyBrowserMenu] Navigator UP event (IsRepeat={ctx.IsRepeat})");
                     SetWrapAroundState(!ctx.IsRepeat);
                     SelectedIndex--;
                 }),
                 new NavigationScheme.Entry(MenuAction.Down, "Menu.Common.Down", ctx =>
                 {
-                    Debug.Log($"[LobbyBrowserMenu] Navigator DOWN event (IsRepeat={ctx.IsRepeat})");
                     SetWrapAroundState(!ctx.IsRepeat);
                     SelectedIndex++;
                 }),
@@ -1084,7 +1249,6 @@ namespace YARG.Menu.Multiplayer
                 new NavigationScheme.Entry(MenuAction.Right, "Menu.MusicLibrary.SkipSection", GoToNextSection),
             };
 
-            // Respect desired help-bar order: Green, Red, Yellow, Blue.
             if (CanPerformGreenAction(target))
             {
                 string greenKey = GetGreenActionLocalizationKey(target);
@@ -1094,9 +1258,7 @@ namespace YARG.Menu.Multiplayer
             entries.Add(new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", Back));
 
             if (target != null && target.ShowFavoriteButton)
-            {
                 entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Menu.MusicLibrary.AddToFavorites", TryToggleFavorite));
-            }
 
             entries.Add(new NavigationScheme.Entry(MenuAction.Blue, "Menu.Common.Refresh", TriggerRefreshAction));
 
@@ -1120,19 +1282,13 @@ namespace YARG.Menu.Multiplayer
             return false;
         }
 
-        private string GetGreenActionLocalizationKey(LobbyViewType view)
-        {
-            // Reuse the standard confirm label for both joining and starting hosted lobbies.
-            return "Menu.Common.Confirm";
-        }
+        private string GetGreenActionLocalizationKey(LobbyViewType view) => "Menu.Common.Confirm";
 
         private void TriggerRefreshAction()
         {
             bool hadLiveInfo = InvalidateSavedLobbyLiveInfo();
             if (hadLiveInfo)
-            {
                 RequestPingStatusRefresh(forceImmediate: true);
-            }
             RefreshLobbies();
             UniTask.Void(async () => await PingSavedServersAsync(force: true));
         }
@@ -1159,7 +1315,7 @@ namespace YARG.Menu.Multiplayer
             return changed;
         }
 
-        private bool IsLobbyLive(YARG.Networking.Abstraction.LobbyInfo lobby)
+        private bool IsLobbyLive(LobbyInfo lobby)
         {
             if (lobby == null)
                 return false;
@@ -1174,43 +1330,26 @@ namespace YARG.Menu.Multiplayer
             {
                 hasFailureTracking = _consecutiveProbeFailures.TryGetValue(endpointKey, out failureCount);
                 if (hasFailureTracking && failureCount >= MAX_CONSECUTIVE_PROBE_FAILURES)
-                {
                     return false;
-                }
             }
 
-            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-            // For now, assume lobby is live if it passed failure checks
-            // if (lobby.lastSeen <= 0)
-            //     return true;
-            // long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            // long delta = now - lobby.lastSeen;
-            // if (delta <= STALE_LOBBY_SECONDS * 1000.0)
-            //     return true;
             return true;
-
-            if (hasFailureTracking && failureCount < MAX_CONSECUTIVE_PROBE_FAILURES)
-                return true;
-
-            return false;
         }
 
-        private static void MarkLobbyHeartbeat(YARG.Networking.Abstraction.LobbyInfo lobby)
+        private static void MarkLobbyHeartbeat(LobbyInfo lobby)
         {
             if (lobby == null)
                 return;
 
             lobby.IsActive = true;
-            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-            // lobby.lastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
-        private static YARG.Networking.Abstraction.LobbyInfo CloneLobbyInfo(YARG.Networking.Abstraction.LobbyInfo source)
+        private static LobbyInfo CloneLobbyInfo(LobbyInfo source)
         {
             if (source == null)
                 return null;
 
-            return new YARG.Networking.Abstraction.LobbyInfo
+            return new LobbyInfo
             {
                 LobbyId = source.LobbyId,
                 LobbyName = source.LobbyName,
@@ -1227,80 +1366,31 @@ namespace YARG.Menu.Multiplayer
                 Port = source.Port,
                 PublicPort = source.PublicPort,
                 PlayerNames = source.PlayerNames != null ? (string[])source.PlayerNames.Clone() : null,
-                PlayerInstruments = source.PlayerInstruments != null ? (int[])source.PlayerInstruments.Clone() : null
+                PlayerInstruments = source.PlayerInstruments != null ? (int[])source.PlayerInstruments.Clone() : null,
+                // Copy discovery tracking fields
+                LastSeen = source.LastSeen,
+                Ping = source.Ping,
+                // Copy gameplay settings
+                NoFailMode = source.NoFailMode,
+                SharedSongsOnly = source.SharedSongsOnly,
+                BandSize = source.BandSize,
+                AllowedGameModes = source.AllowedGameModes != null 
+                    ? new System.Collections.Generic.List<YARG.Core.GameMode>(source.AllowedGameModes) 
+                    : new System.Collections.Generic.List<YARG.Core.GameMode>(),
+                // Copy session type for bookmark eligibility
+                SessionType = source.SessionType
             };
-        }
-
-        private static bool LobbyInfosEquivalent(YARG.Networking.Abstraction.LobbyInfo a, YARG.Networking.Abstraction.LobbyInfo b)
-        {
-            if (ReferenceEquals(a, b))
-                return true;
-
-            if (a == null || b == null)
-                return false;
-
-            if (!string.Equals(a.LobbyId ?? string.Empty, b.LobbyId ?? string.Empty, StringComparison.Ordinal))
-                return false;
-
-            if (!string.Equals(a.LobbyName ?? string.Empty, b.LobbyName ?? string.Empty, StringComparison.Ordinal))
-                return false;
-
-            if (!string.Equals(a.HostName ?? string.Empty, b.HostName ?? string.Empty, StringComparison.Ordinal))
-                return false;
-
-            if (!string.Equals(a.PublicAddress ?? string.Empty, b.PublicAddress ?? string.Empty, StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            if (!string.Equals(a.TransportId ?? string.Empty, b.TransportId ?? string.Empty, StringComparison.Ordinal))
-                return false;
-
-            if (a.CurrentPlayers != b.CurrentPlayers || a.MaxPlayers != b.MaxPlayers)
-                return false;
-
-            if (a.HasPassword != b.HasPassword || a.PrivacyMode != b.PrivacyMode)
-                return false;
-
-            if (a.Port != b.Port || a.PublicPort != b.PublicPort)
-                return false;
-
-            var aNames = a.PlayerNames ?? Array.Empty<string>();
-            var bNames = b.PlayerNames ?? Array.Empty<string>();
-            if (aNames.Length != bNames.Length)
-                return false;
-            for (int i = 0; i < aNames.Length; i++)
-            {
-                if (!string.Equals(aNames[i] ?? string.Empty, bNames[i] ?? string.Empty, StringComparison.Ordinal))
-                    return false;
-            }
-
-            var aInstruments = a.PlayerInstruments ?? Array.Empty<int>();
-            var bInstruments = b.PlayerInstruments ?? Array.Empty<int>();
-            if (aInstruments.Length != bInstruments.Length)
-                return false;
-            for (int i = 0; i < aInstruments.Length; i++)
-            {
-                if (aInstruments[i] != bInstruments[i])
-                    return false;
-            }
-
-            return true;
         }
 
         private void RequestPingStatusRefresh(bool forceImmediate = false)
         {
             if (forceImmediate)
-            {
                 _nextPingStatusRefreshAt = Time.unscaledTime;
-            }
 
             if (Time.unscaledTime >= _nextPingStatusRefreshAt)
-            {
                 ApplyPendingPingRefresh();
-            }
             else
-            {
                 _pendingPingStatusRefresh = true;
-            }
         }
 
         private void ApplyPendingPingRefresh()
@@ -1323,6 +1413,541 @@ namespace YARG.Menu.Multiplayer
             catch (Exception ex)
             {
                 Debug.LogWarning($"[LobbyBrowserMenu] Exception while updating sidebar after ping refresh: {ex}");
+            }
+        }
+
+        private LobbyViewType ResolveActionTargetView()
+        {
+            var target = TryRehydrateView(_lastShownSidebarView);
+            if (target != null)
+                return target;
+
+            target = TryRehydrateView(CurrentSelection);
+            if (target != null)
+                return target;
+
+            return null;
+        }
+
+        private LobbyViewType TryRehydrateView(LobbyViewType view)
+        {
+            if (view == null)
+                return null;
+
+            var views = ViewList;
+            if (views != null && views.Count > 0)
+            {
+                string key = null;
+                try { key = view.GetSelectionKey(); }
+                catch { key = null; }
+
+                if (!string.IsNullOrEmpty(key))
+                {
+                    foreach (var candidate in views)
+                    {
+                        if (candidate == null)
+                            continue;
+
+                        try
+                        {
+                            if (string.Equals(candidate.GetSelectionKey(), key, StringComparison.Ordinal))
+                                return candidate;
+                        }
+                        catch { }
+                    }
+                }
+
+                if (views.Contains(view))
+                    return view;
+            }
+
+            return view;
+        }
+
+        private void TryExecuteJoinAction()
+        {
+            var target = ResolveActionTargetView();
+            if (!CanPerformGreenAction(target))
+                return;
+
+            try
+            {
+                target.OnJoinClick();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyBrowserMenu] Failed to execute join action: {ex}");
+            }
+        }
+
+        private void TryToggleFavorite()
+        {
+            var target = ResolveActionTargetView();
+            if (target == null || !target.ShowFavoriteButton)
+                return;
+
+            try
+            {
+                target.OnFavoriteClick();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyBrowserMenu] Failed to toggle favorite: {ex}");
+            }
+        }
+
+        private void UpdateSidebarForSelection()
+        {
+            // Don't update sidebar if this menu is disabled
+            if (!gameObject.activeInHierarchy)
+                return;
+            
+            ShowSidebarFor(CurrentSelection);
+        }
+
+        public void ShowSidebarFor(LobbyViewType view)
+        {
+            // Don't show sidebar if this menu is disabled (e.g., we're in LobbyRoomMenu)
+            if (!gameObject.activeInHierarchy)
+                return;
+            
+            EnsureSidebar();
+
+            _lastShownSidebarView = view;
+            ApplyNavigationSchemeForCurrentView();
+
+            if (_sidebar == null)
+                return;
+
+            if (view is LobbyCategoryViewType category)
+            {
+                _selectedLobby = null;
+
+                string key = category.CategoryKey;
+                if (!string.IsNullOrEmpty(key))
+                {
+                    // New action categories
+                    if (string.Equals(key, "SectionHostGame", StringComparison.Ordinal))
+                    {
+                        _sidebar.ShowHostGameForm(null, false);
+                        return;
+                    }
+
+                    if (string.Equals(key, "SectionJoinGame", StringComparison.Ordinal))
+                    {
+                        _sidebar.ShowJoinGameForm();
+                        return;
+                    }
+
+                    // Legacy categories (kept for compatibility)
+                    if (string.Equals(key, "SectionCreateLobby", StringComparison.Ordinal))
+                    {
+                        _sidebar.ShowHostGameForm(null, false);
+                        return;
+                    }
+
+                    if (string.Equals(key, "SectionDirectConnect", StringComparison.Ordinal))
+                    {
+                        _sidebar.ShowJoinGameForm();
+                        return;
+                    }
+                    return;
+                }
+                return;
+            }
+
+            if (view is MyLobbyViewType myLobby)
+            {
+                _selectedLobby = null;
+                _sidebar.ShowHostedLobbyPreset(myLobby.Preset);
+                return;
+            }
+
+            if (view is DiscoveredLobbyViewType d)
+            {
+                var lobbyInfo = d.LobbyInfo;
+                if (lobbyInfo != null)
+                {
+                    _selectedLobby = lobbyInfo;
+                    _sidebar.SetLobby(_selectedLobby);
+                    return;
+                }
+            }
+
+            if (view is SavedLobbyViewType s)
+            {
+                var bookmark = s.Bookmark;
+                if (_sidebar != null && bookmark != null && _sidebar.IsEditingBookmark(bookmark))
+                {
+                    _selectedLobby = null;
+                    _sidebar.SetBookmark(bookmark);
+                    return;
+                }
+
+                var live = s.LiveInfo;
+                if (live != null)
+                {
+                    _selectedLobby = live;
+                    _sidebar.SetLobby(_selectedLobby, bookmark);
+                    return;
+                }
+
+                if (bookmark != null)
+                {
+                    _selectedLobby = null;
+                    _sidebar.SetBookmark(bookmark);
+                    return;
+                }
+            }
+
+            if (view == null)
+            {
+                _selectedLobby = null;
+                _sidebar.ClearLobby();
+            }
+        }
+        
+        /// <summary>
+        /// Handles selection of action items (Host Game, Join Game, etc.).
+        /// Called from LobbyActionViewType.OnJoinClick().
+        /// </summary>
+        internal void HandleActionSelection(LobbyActionViewType actionView)
+        {
+            if (actionView == null) return;
+            
+            EnsureSidebar();
+            if (_sidebar == null) return;
+            
+            switch (actionView.Kind)
+            {
+                case LobbyActionViewType.ActionKind.HostGame:
+                    _sidebar.ShowHostGameForm(null, false);
+                    break;
+                case LobbyActionViewType.ActionKind.JoinGame:
+                    _sidebar.ShowJoinGameForm();
+                    break;
+                // Legacy - map to new methods
+                case LobbyActionViewType.ActionKind.CreateLobby:
+                    _sidebar.ShowHostGameForm(null, false);
+                    break;
+                case LobbyActionViewType.ActionKind.DirectConnect:
+                    _sidebar.ShowJoinGameForm();
+                    break;
+            }
+        }
+
+        internal void HandleViewPointerClick(LobbyViewType view)
+        {
+            var target = TryRehydrateView(view);
+            if (target == null)
+                return;
+
+            SelectViewInternal(target);
+
+            if (!CanPerformGreenAction(target))
+                return;
+
+            try
+            {
+                target.OnJoinClick();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyBrowserMenu] Failed to activate view via pointer click: {ex}");
+            }
+        }
+
+        private void SelectViewInternal(LobbyViewType view)
+        {
+            if (view == null)
+                return;
+
+            var views = ViewList;
+            if (views == null || views.Count == 0)
+                return;
+
+            int index = -1;
+            for (int i = 0; i < views.Count; i++)
+            {
+                if (ReferenceEquals(views[i], view))
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            if (index < 0)
+            {
+                string key = null;
+                try { key = view.GetSelectionKey(); }
+                catch { key = null; }
+
+                if (!string.IsNullOrEmpty(key))
+                {
+                    for (int i = 0; i < views.Count; i++)
+                    {
+                        var candidate = views[i];
+                        if (candidate == null)
+                            continue;
+
+                        string candidateKey = null;
+                        try { candidateKey = candidate.GetSelectionKey(); }
+                        catch { candidateKey = null; }
+
+                        if (!string.IsNullOrEmpty(candidateKey) && string.Equals(candidateKey, key, StringComparison.Ordinal))
+                        {
+                            index = i;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (index >= 0)
+                SelectedIndex = index;
+        }
+
+        private CancellationTokenSource _startHostedLobbyCts;
+        
+        internal void StartHostedLobby(HostedLobbyPreset preset)
+        {
+            if (preset == null)
+                return;
+
+            // Fire and forget async lobby creation
+            StartHostedLobbyAsync(preset).Forget();
+        }
+        
+        private async UniTaskVoid StartHostedLobbyAsync(HostedLobbyPreset preset)
+        {
+            Debug.Log($"[LobbyBrowserMenu] StartHostedLobbyAsync: preset.SessionType={preset?.SessionType}, preset.sessionType={preset?.sessionType}");
+            
+            // Validate that connected profiles aren't blocked by the preset's game mode restrictions
+            // Do this BEFORE showing the dialog or doing any work
+            if (preset.allowedInstruments != null && preset.allowedInstruments.Count > 0 && NetworkService != null)
+            {
+                var gameModeBlacklist = new List<YARG.Core.GameMode>();
+                foreach (var mode in preset.allowedInstruments)
+                {
+                    if (mode >= 0 && mode <= 255 && Enum.IsDefined(typeof(YARG.Core.GameMode), (byte)mode))
+                    {
+                        gameModeBlacklist.Add((YARG.Core.GameMode)mode);
+                    }
+                }
+                
+                if (!NetworkService.ValidateProfilesAgainstGameModes(gameModeBlacklist, out var blockedProfiles))
+                {
+                    string blockedList = string.Join(", ", blockedProfiles);
+                    Debug.LogWarning($"[LobbyBrowserMenu] Cannot start lobby - blocked profiles: {blockedList}");
+                    ToastManager.ToastWarning($"Cannot start lobby: {blockedList} uses a disabled game mode.");
+                    return;
+                }
+            }
+            
+            _startHostedLobbyCts?.Cancel();
+            _startHostedLobbyCts?.Dispose();
+            _startHostedLobbyCts = new CancellationTokenSource();
+            var ct = _startHostedLobbyCts.Token;
+            
+            // Show a loading dialog with cancel option
+            MessageDialog dialog = null;
+            if (DialogManager.Instance != null)
+            {
+                dialog = DialogManager.Instance.ShowMessage("Starting Lobby", "Setting up lobby...\nThis may take a moment.");
+                dialog.ClearButtons();
+                dialog.AddDialogButton("Cancel", MenuData.Colors.CancelButton, () =>
+                {
+                    Debug.Log("[LobbyBrowserMenu] Hosted lobby start cancelled by user");
+                    _startHostedLobbyCts?.Cancel();
+                    DialogManager.Instance?.ClearDialog();
+                });
+            }
+            
+            try
+            {
+                var store = LobbyBookmarkStore.Instance;
+                var privacy = preset.PrivacyMode;
+                string password = privacy == LobbyPrivacyMode.Private ? (preset.password ?? string.Empty) : string.Empty;
+                var storedPreset = store.UpsertMyLobby(
+                    preset.id, 
+                    preset.lobbyName, 
+                    preset.maxPlayers, 
+                    privacy, 
+                    preset.SessionType,
+                    password, 
+                    true,
+                    preset.bandSize,
+                    preset.noFailMode,
+                    preset.sharedSongsOnly,
+                    preset.allowModifiers,
+                    preset.enablePresetSync,
+                    preset.allowLateJoin,
+                    preset.allowedInstruments ?? new List<int>(),
+                    preset.localPlayersFirst);
+
+                if (_sidebar != null)
+                    _sidebar.ShowHostedLobbyPreset(storedPreset);
+
+                // Apply gameplay settings from preset
+                ApplyGameplaySettingsFromPreset(storedPreset);
+
+                // Create a SessionPreset for the SessionLifecycleManager
+                var sessionPreset = CreateSessionPresetFromHosted(storedPreset);
+                
+                // Get the port and lobby ID
+                int port = NetworkService?.DefaultPort ?? 7777;
+                Guid lobbyId = Guid.NewGuid();
+                
+                // Update dialog status
+                if (dialog != null)
+                {
+                    dialog.Message.text = "Configuring network settings...";
+                }
+                
+                // Start the session lifecycle (UPnP for Lobby mode, nothing for Server mode)
+                string lobbyCode = null;
+                if (SessionLifecycleManager.Instance != null)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var result = await SessionLifecycleManager.Instance.StartHostingAsync(sessionPreset, port, lobbyId);
+                    
+                    ct.ThrowIfCancellationRequested();
+                    if (!result.IsSuccess)
+                    {
+                        Debug.LogWarning($"[LobbyBrowserMenu] Session lifecycle failed: {result.Error}");
+                        if (storedPreset.SessionType == SessionType.Lobby)
+                        {
+                            Debug.LogError($"[LobbyBrowserMenu] Failed to start lobby session: {result.Error}");
+                            DialogManager.Instance?.ClearDialog();
+                            ToastManager.ToastError($"Failed to start lobby: {result.Error}");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        lobbyCode = result.LobbyCode;
+                        if (!string.IsNullOrEmpty(lobbyCode))
+                        {
+                            Debug.Log($"[LobbyBrowserMenu] Lobby code generated: {lobbyCode}");
+                        }
+                        
+                        if (storedPreset.SessionType == SessionType.Lobby && !result.UPnPSuccess)
+                        {
+                            Debug.LogWarning("[LobbyBrowserMenu] UPnP failed - players may not be able to connect unless port is manually forwarded");
+                        }
+                    }
+                }
+
+                // Update dialog before creating local lobby
+                if (dialog != null)
+                {
+                    dialog.Message.text = "Starting lobby...";
+                }
+                ct.ThrowIfCancellationRequested();
+
+                // Create the lobby first (this triggers OnLobbyCreated event, but we'll navigate manually)
+                var lobby = NetworkService?.CreateLobby(storedPreset.lobbyName, storedPreset.maxPlayers, storedPreset.PrivacyMode, storedPreset.SessionType, storedPreset.password ?? string.Empty);
+                
+                // Set the lobby code on the LobbyInfo - explicitly set to null for Server mode
+                // to clear any stale code from a previous Lobby session
+                if (lobby != null)
+                {
+                    lobby.LobbyCode = lobbyCode; // null for Server, valid code for Lobby
+                }
+                
+                // CRITICAL: Close the dialog AFTER creating the lobby but BEFORE navigating!
+                // Dialog.OnDisable pops from the navigation stack, and we need to ensure
+                // the stack is in the correct state before pushing LobbyRoomMenu's scheme.
+                if (DialogManager.Instance != null && DialogManager.Instance.IsDialogShowing)
+                {
+                    DialogManager.Instance.ClearDialog();
+                    dialog = null;  // Mark as cleared so finally doesn't try again
+                }
+                
+                // Navigate to lobby room explicitly (don't rely solely on HandleLobbyCreated callback)
+                // This ensures navigation happens even if there's a timing issue with the event
+                if (lobby != null && MenuManager.Instance != null)
+                {
+                    Debug.Log($"[LobbyBrowserMenu] Lobby created, navigating to LobbyRoom (explicit)");
+                    MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+                }
+                
+                // Show success toast with code if available
+                if (!string.IsNullOrEmpty(lobbyCode))
+                {
+                    ToastManager.ToastInformation($"Lobby started! Code: {lobbyCode}");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Debug.Log("[LobbyBrowserMenu] Hosted lobby start was cancelled");
+                ToastManager.ToastInformation("Lobby start cancelled");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LobbyBrowserMenu] Failed to create lobby from preset: {ex}");
+                ToastManager.ToastError($"Failed to start lobby: {ex.Message}");
+            }
+            finally
+            {
+                // Clean up dialog if still showing
+                if (DialogManager.Instance != null && DialogManager.Instance.IsDialogShowing)
+                {
+                    DialogManager.Instance.ClearDialog();
+                }
+                
+                _startHostedLobbyCts?.Dispose();
+                _startHostedLobbyCts = null;
+            }
+        }
+
+        internal void ShowHostedLobbyEditor(HostedLobbyPreset preset)
+        {
+            // Don't show editor if this menu is disabled (e.g., we're in LobbyRoomMenu)
+            if (!gameObject.activeInHierarchy)
+                return;
+            
+            if (_sidebar == null || preset == null)
+                return;
+
+            _lastShownSidebarView = null;
+            ApplyNavigationSchemeForCurrentView();
+            _sidebar.ShowCreateLobbyForm(preset, true);
+        }
+
+        protected override void Update()
+        {
+            base.Update();
+
+            if (Time.unscaledTime >= _nextStaleSweepAt)
+            {
+                _nextStaleSweepAt = Time.unscaledTime + STALE_SWEEP_INTERVAL;
+                if (CullStalePingCache() || PruneStaleDiscoveryEntries())
+                    RequestPingStatusRefresh();
+            }
+
+            if (_pendingPingStatusRefresh && Time.unscaledTime >= _nextPingStatusRefreshAt)
+                ApplyPendingPingRefresh();
+
+            if (!_isPingingSavedServers && Time.unscaledTime >= _nextAutomaticPingAt)
+                UniTask.Void(async () => await PingSavedServersAsync());
+            
+            // Send periodic LAN discovery broadcasts
+            // Uses rapid burst mode initially, then slows to normal interval
+            if (Time.unscaledTime >= _nextDiscoveryBroadcastAt)
+            {
+                if (_discoveryBurstRemaining > 0)
+                {
+                    // Burst mode: send rapid discovery requests to catch servers quickly
+                    _discoveryBurstRemaining--;
+                    _nextDiscoveryBroadcastAt = Time.unscaledTime + DISCOVERY_BURST_INTERVAL;
+                }
+                else
+                {
+                    // Normal mode: slower interval to reduce network traffic
+                    _nextDiscoveryBroadcastAt = Time.unscaledTime + DISCOVERY_BROADCAST_INTERVAL;
+                }
+                NetworkService?.SendBroadcastDiscoveryRequest();
             }
         }
 
@@ -1358,442 +1983,19 @@ namespace YARG.Menu.Multiplayer
             return removed > 0;
         }
 
-        // Determine which view should receive button actions, favoring the last hovered/visible sidebar entry.
-        private LobbyViewType ResolveActionTargetView()
+        private void GoToPreviousSection()
         {
-            var target = TryRehydrateView(_lastShownSidebarView);
-            if (target != null)
-                return target;
-
-            target = TryRehydrateView(CurrentSelection);
-            if (target != null)
-                return target;
-
-            return null;
+            if (_sectionStartIndices.Count == 0) return;
+            int currentSection = GetSectionIndexFor(SelectedIndex);
+            JumpToSection(Mathf.Max(0, currentSection - 1));
         }
 
-        // Map a cached view reference back to the current view list when possible so actions operate on fresh data.
-        private LobbyViewType TryRehydrateView(LobbyViewType view)
+        private void GoToNextSection()
         {
-            if (view == null)
-                return null;
-
-            var views = ViewList;
-            if (views != null && views.Count > 0)
-            {
-                string key = null;
-                try
-                {
-                    key = view.GetSelectionKey();
-                }
-                catch
-                {
-                    key = null;
-                }
-
-                if (!string.IsNullOrEmpty(key))
-                {
-                    foreach (var candidate in views)
-                    {
-                        if (candidate == null)
-                            continue;
-
-                        try
-                        {
-                            if (string.Equals(candidate.GetSelectionKey(), key, StringComparison.Ordinal))
-                                return candidate;
-                        }
-                        catch
-                        {
-                            // Ignore mismatched keys
-                        }
-                    }
-                }
-
-                if (views.Contains(view))
-                    return view;
-            }
-
-            return view;
+            if (_sectionStartIndices.Count == 0) return;
+            int currentSection = GetSectionIndexFor(SelectedIndex);
+            JumpToSection(Mathf.Min(_sectionStartIndices.Count - 1, currentSection + 1));
         }
-
-        private void TryExecuteJoinAction()
-        {
-            var target = ResolveActionTargetView();
-            if (!CanPerformGreenAction(target))
-                return;
-
-            try
-            {
-                target.OnJoinClick();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to execute join action for {target.GetType().Name}: {ex}");
-            }
-        }
-
-        private void TryToggleFavorite()
-        {
-            var target = ResolveActionTargetView();
-            if (target == null || !target.ShowFavoriteButton)
-                return;
-
-            try
-            {
-                target.OnFavoriteClick();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to toggle favorite for {target.GetType().Name}: {ex}");
-            }
-        }
-
-        private void UpdateSidebarForSelection()
-        {
-            ShowSidebarFor(CurrentSelection);
-        }
-
-        /// <summary>
-        /// Public helper to show sidebar for an arbitrary view (used by view objects on pointer hover).
-        /// </summary>
-        public void ShowSidebarFor(LobbyViewType view)
-        {
-            EnsureSidebar();
-
-            // remember last requested view for discovery-driven refreshes
-            _lastShownSidebarView = view;
-            ApplyNavigationSchemeForCurrentView();
-
-            if (_sidebar == null)
-                return;
-
-            if (view is LobbyCategoryViewType category)
-            {
-                _selectedLobby = null;
-
-                string key = category.CategoryKey;
-                if (!string.IsNullOrEmpty(key))
-                {
-                    if (string.Equals(key, "SectionCreateLobby", StringComparison.Ordinal))
-                    {
-                        _sidebar.ShowCreateLobbyForm(null, false);
-                        return;
-                    }
-
-                    if (string.Equals(key, "SectionDirectConnect", StringComparison.Ordinal))
-                    {
-                        _sidebar.ShowDirectConnectForm();
-                        return;
-                    }
-
-                    return;
-                }
-
-                string name = category.CategoryName;
-                if (!string.IsNullOrEmpty(name))
-                {
-                    // Fallback for legacy prefabs without category keys.
-                    if (string.Equals(name, Localize.Key("Menu", "LobbyBrowser", "SectionCreateLobby"), StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(name, "CREATE A LOBBY", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _sidebar.ShowCreateLobbyForm(null, false);
-                        return;
-                    }
-
-                    if (string.Equals(name, Localize.Key("Menu", "LobbyBrowser", "SectionDirectConnect"), StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(name, "ADD NEW CONNECTION", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _sidebar.ShowDirectConnectForm();
-                        return;
-                    }
-                }
-
-                return;
-            }
-
-            if (view is MyLobbyViewType myLobby)
-            {
-                _selectedLobby = null;
-                _sidebar.ShowHostedLobbyPreset(myLobby.Preset);
-                return;
-            }
-            // If this is a discovered lobby and has live players, show full lobby info.
-            if (view is DiscoveredLobbyViewType d)
-            {
-                var lobbyInfo = d.LobbyInfo;
-                if (lobbyInfo != null)
-                {
-                    _selectedLobby = lobbyInfo;
-                    _sidebar.SetLobby(_selectedLobby);
-                    return;
-                }
-            }
-
-            // If this is a saved bookmark, prefer showing live info when available; otherwise show bookmark details.
-            if (view is SavedLobbyViewType s)
-            {
-                var bookmark = s.Bookmark;
-                if (_sidebar != null && bookmark != null && _sidebar.IsEditingBookmark(bookmark))
-                {
-                    _selectedLobby = null;
-                    _sidebar.SetBookmark(bookmark);
-                    return;
-                }
-
-                var live = s.LiveInfo;
-                if (live != null)
-                {
-                    _selectedLobby = live;
-                    _sidebar.SetLobby(_selectedLobby, bookmark);
-                    return;
-                }
-
-                if (bookmark != null)
-                {
-                    _selectedLobby = null;
-                    _sidebar.SetBookmark(bookmark);
-                    return;
-                }
-            }
-
-            // Fallback: for category/empty rows, do not clear the sidebar so transient hovers
-            // don't remove the currently-displayed lobby/player list. Only clear when the
-            // incoming view is null (no selection).
-            if (view == null)
-            {
-                _selectedLobby = null;
-                _sidebar.ClearLobby();
-            }
-        }
-
-        internal void HandleViewPointerClick(LobbyViewType view)
-        {
-            var target = TryRehydrateView(view);
-            if (target == null)
-            {
-                return;
-            }
-
-            SelectViewInternal(target);
-
-            if (!CanPerformGreenAction(target))
-            {
-                return;
-            }
-
-            try
-            {
-                target.OnJoinClick();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to activate view via pointer click: {ex}");
-            }
-        }
-
-        private void SelectViewInternal(LobbyViewType view)
-        {
-            if (view == null)
-            {
-                return;
-            }
-
-            var views = ViewList;
-            if (views == null || views.Count == 0)
-            {
-                return;
-            }
-
-            int index = -1;
-            for (int i = 0; i < views.Count; i++)
-            {
-                if (ReferenceEquals(views[i], view))
-                {
-                    index = i;
-                    break;
-                }
-            }
-            if (index < 0)
-            {
-                string key = null;
-                try
-                {
-                    key = view.GetSelectionKey();
-                }
-                catch
-                {
-                    key = null;
-                }
-
-                if (!string.IsNullOrEmpty(key))
-                {
-                    for (int i = 0; i < views.Count; i++)
-                    {
-                        var candidate = views[i];
-                        if (candidate == null)
-                        {
-                            continue;
-                        }
-
-                        string candidateKey = null;
-                        try
-                        {
-                            candidateKey = candidate.GetSelectionKey();
-                        }
-                        catch
-                        {
-                            candidateKey = null;
-                        }
-
-                        if (!string.IsNullOrEmpty(candidateKey) && string.Equals(candidateKey, key, StringComparison.Ordinal))
-                        {
-                            index = i;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (index >= 0)
-            {
-                SelectedIndex = index;
-            }
-        }
-
-        internal void HandleActionSelection(LobbyActionViewType action)
-        {
-            if (action == null)
-                return;
-
-            _lastShownSidebarView = action;
-            ApplyNavigationSchemeForCurrentView();
-
-            if (_sidebar == null)
-                return;
-
-            switch (action.Kind)
-            {
-                case LobbyActionViewType.ActionKind.CreateLobby:
-                    _sidebar.ShowCreateLobbyForm(null, true);
-                    break;
-                case LobbyActionViewType.ActionKind.DirectConnect:
-                    _sidebar.ShowDirectConnectForm(true);
-                    break;
-            }
-        }
-
-        internal void StartHostedLobby(HostedLobbyPreset preset)
-        {
-            if (preset == null)
-                return;
-
-            var store = LobbyBookmarkStore.Instance;
-            var privacy = preset.PrivacyMode;
-            string password = privacy == YargNetworkManager.LobbyPrivacyMode.Private ? (preset.password ?? string.Empty) : string.Empty;
-            var storedPreset = store.UpsertMyLobby(preset.id, preset.lobbyName, preset.maxPlayers, privacy, password, true);
-
-            if (_sidebar != null)
-            {
-                _sidebar.ShowHostedLobbyPreset(storedPreset);
-            }
-
-            try
-            {
-                NetworkingServiceFactory.Instance?.CreateLobby(storedPreset.lobbyName, storedPreset.maxPlayers, (YARG.Networking.Abstraction.LobbyPrivacyMode)storedPreset.PrivacyMode, storedPreset.password ?? string.Empty);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Failed to create lobby from preset '{storedPreset?.lobbyName}': {ex}");
-            }
-        }
-
-        internal void ShowHostedLobbyEditor(HostedLobbyPreset preset)
-        {
-            if (_sidebar == null || preset == null)
-                return;
-
-            _lastShownSidebarView = null;
-            ApplyNavigationSchemeForCurrentView();
-            _sidebar.ShowCreateLobbyForm(preset, true);
-        }
-
-        // Discovery callbacks
-        private void OnDiscoveryLobbyDiscovered(YargNetworkManager.LobbyInfo lobby)
-        {
-            try
-            {
-                if (lobby == null) return;
-                var abstractionLobby = ConvertFromMirror(lobby);
-                string key = LobbyBookmarkUtility.BuildKey(abstractionLobby.IpAddress, abstractionLobby.Port);
-                if (string.IsNullOrEmpty(key)) return;
-                MarkLobbyHeartbeat(abstractionLobby);
-                var snapshot = CloneLobbyInfo(abstractionLobby);
-                bool hadExisting = _pingedLobbies.TryGetValue(key, out var previous) && previous != null;
-                ResetProbeFailureCount(key);
-                _pingedLobbies[key] = snapshot;
-                Debug.Log($"[LobbyBrowserMenu] Discovery found lobby for key {key}: {abstractionLobby.LobbyName}");
-
-                if (!hadExisting || !LobbyInfosEquivalent(previous, snapshot))
-                {
-                    RequestPingStatusRefresh(forceImmediate: !hadExisting);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Exception in OnDiscoveryLobbyDiscovered: {ex}");
-            }
-        }
-
-        private void OnDiscoveryLobbyLost(long serverId)
-        {
-            try
-            {
-                // Try to remove any pinged entries that match this lost server via matching ip/port from discovery component
-                // We don't have serverId -> endpoint mapping here, so just refresh lists (the discovery component cleans its own cache)
-                Debug.Log($"[LobbyBrowserMenu] Discovery reported lobby lost: {serverId}");
-                if (InvalidateSavedLobbyLiveInfo())
-                {
-                    RequestPingStatusRefresh();
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Exception in OnDiscoveryLobbyLost: {ex}");
-            }
-        }
-
-        protected override void Update()
-        {
-            base.Update();
-
-            if (Time.unscaledTime >= _nextStaleSweepAt)
-            {
-                _nextStaleSweepAt = Time.unscaledTime + STALE_SWEEP_INTERVAL;
-
-                bool changed = false;
-                changed |= CullStalePingCache();
-                changed |= PruneStaleDiscoveryEntries();
-
-                if (changed)
-                {
-                    RequestPingStatusRefresh();
-                }
-            }
-
-            if (_pendingPingStatusRefresh && Time.unscaledTime >= _nextPingStatusRefreshAt)
-            {
-                ApplyPendingPingRefresh();
-            }
-
-            if (!_isPingingSavedServers && Time.unscaledTime >= _nextAutomaticPingAt)
-            {
-                UniTask.Void(async () => await PingSavedServersAsync());
-            }
-        }
-
-        private void GoToPreviousSection() { if (_sectionStartIndices.Count == 0) return; int currentSection = GetSectionIndexFor(SelectedIndex); JumpToSection(Mathf.Max(0, currentSection - 1)); }
-        private void GoToNextSection() { if (_sectionStartIndices.Count == 0) return; int currentSection = GetSectionIndexFor(SelectedIndex); JumpToSection(Mathf.Min(_sectionStartIndices.Count - 1, currentSection + 1)); }
 
         private void JumpToSection(int sectionIndex)
         {
@@ -1804,34 +2006,49 @@ namespace YARG.Menu.Multiplayer
 
         private int GetSectionIndexFor(int viewIndex)
         {
-            if (_sectionStartIndices.Count == 0) return 0; if (viewIndex < 0) return 0;
-            for (int i = _sectionStartIndices.Count - 1; i >= 0; i--) if (viewIndex >= _sectionStartIndices[i]) return i; return 0;
+            if (_sectionStartIndices.Count == 0) return 0;
+            if (viewIndex < 0) return 0;
+            for (int i = _sectionStartIndices.Count - 1; i >= 0; i--)
+                if (viewIndex >= _sectionStartIndices[i]) return i;
+            return 0;
         }
 
         private int GetSectionEndIndex(int sectionIndex)
         {
-            var views = ViewList; if (views == null || views.Count == 0) return 0; if (sectionIndex + 1 < _sectionStartIndices.Count) return _sectionStartIndices[sectionIndex + 1]; return views.Count;
+            var views = ViewList;
+            if (views == null || views.Count == 0) return 0;
+            if (sectionIndex + 1 < _sectionStartIndices.Count) return _sectionStartIndices[sectionIndex + 1];
+            return views.Count;
         }
 
         private bool SelectFirstSelectableInSection(int sectionIndex)
         {
-            if (_sectionStartIndices.Count == 0) return false; sectionIndex = Mathf.Clamp(sectionIndex, 0, _sectionStartIndices.Count - 1); return SelectFirstSelectableInRange(_sectionStartIndices[sectionIndex], GetSectionEndIndex(sectionIndex));
+            if (_sectionStartIndices.Count == 0) return false;
+            sectionIndex = Mathf.Clamp(sectionIndex, 0, _sectionStartIndices.Count - 1);
+            return SelectFirstSelectableInRange(_sectionStartIndices[sectionIndex], GetSectionEndIndex(sectionIndex));
         }
 
         private bool SelectFirstSelectableInRange(int startInclusive, int endExclusive)
         {
-            var views = ViewList; if (views == null || views.Count == 0) return false; startInclusive = Mathf.Clamp(startInclusive, 0, views.Count - 1); endExclusive = Mathf.Clamp(endExclusive, startInclusive + 1, views.Count);
-            for (int i = startInclusive; i < endExclusive; i++) if (IsSelectable(views[i])) { SelectedIndex = i; return true; } return false;
+            var views = ViewList;
+            if (views == null || views.Count == 0) return false;
+            startInclusive = Mathf.Clamp(startInclusive, 0, views.Count - 1);
+            endExclusive = Mathf.Clamp(endExclusive, startInclusive + 1, views.Count);
+            for (int i = startInclusive; i < endExclusive; i++)
+                if (IsSelectable(views[i])) { SelectedIndex = i; return true; }
+            return false;
         }
 
         private static bool IsSelectable(LobbyViewType view) => view is not LobbyCategoryViewType and not LobbyEmptyViewType;
 
         private void RebuildSectionCache(List<LobbyViewType> viewTypes)
         {
-            _sectionStartIndices.Clear(); if (viewTypes == null || viewTypes.Count == 0) return; for (int i = 0; i < viewTypes.Count; i++) if (viewTypes[i] is LobbyCategoryViewType) _sectionStartIndices.Add(i);
+            _sectionStartIndices.Clear();
+            if (viewTypes == null || viewTypes.Count == 0) return;
+            for (int i = 0; i < viewTypes.Count; i++)
+                if (viewTypes[i] is LobbyCategoryViewType) _sectionStartIndices.Add(i);
         }
 
-        // --- Ping saved servers (lightweight placeholder implementation) ---
         private async UniTask PingSavedServersAsync(bool force = false)
         {
             if (_favorites == null)
@@ -1844,15 +2061,11 @@ namespace YARG.Menu.Multiplayer
             _lastPingStartedAt = now;
             _nextAutomaticPingAt = now + DISCOVERY_PING_INTERVAL;
 
-            _pingedLobbies ??= new Dictionary<string, YARG.Networking.Abstraction.LobbyInfo>();
+            _pingedLobbies ??= new Dictionary<string, LobbyInfo>();
 
             if (_isPingingSavedServers)
             {
-                if (_pingCancellation != null)
-                {
-                    _pingCancellation.Cancel();
-                }
-
+                _pingCancellation?.Cancel();
                 await UniTask.WaitUntil(() => !_isPingingSavedServers);
             }
 
@@ -1866,14 +2079,14 @@ namespace YARG.Menu.Multiplayer
                 var processedKeys = new HashSet<string>();
                 var token = _pingCancellation.Token;
 
-                await PingBookmarkCollectionAsync(_favorites.GetFavorites(), "favorite", processedKeys, token);
-                await PingBookmarkCollectionAsync(_favorites.GetRecents(), "recent", processedKeys, token);
+                await PingBookmarkCollectionAsync(_favorites.GetFavorites(), processedKeys, token);
+                await PingBookmarkCollectionAsync(_favorites.GetRecents(), processedKeys, token);
 
                 RequestPingStatusRefresh();
             }
             catch (OperationCanceledException)
             {
-                // Cancellation is expected when refresh restarts or menu closes.
+                // Cancellation is expected
             }
             finally
             {
@@ -1883,7 +2096,7 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
-        private async UniTask PingBookmarkCollectionAsync(IReadOnlyList<LobbyBookmark> bookmarks, string sourceLabel, HashSet<string> processedKeys, CancellationToken token)
+        private async UniTask PingBookmarkCollectionAsync(IReadOnlyList<LobbyBookmark> bookmarks, HashSet<string> processedKeys, CancellationToken token)
         {
             if (bookmarks == null || bookmarks.Count == 0)
                 return;
@@ -1908,14 +2121,9 @@ namespace YARG.Menu.Multiplayer
                 _pendingPings.Add(key);
                 try
                 {
-                    bool issuedRequest = SendDiscoveryRequestsForBookmark(bookmark, sourceLabel);
-
-                    bool probeSuccess = await ProbeBookmarkAsync(bookmark, token, sourceLabel);
-
-                    if (issuedRequest || probeSuccess)
-                    {
-                        await UniTask.Yield(PlayerLoopTiming.Update, token);
-                    }
+                    SendDiscoveryRequestForBookmark(bookmark);
+                    await ProbeBookmarkAsync(bookmark, token);
+                    await UniTask.Yield(PlayerLoopTiming.Update, token);
                 }
                 finally
                 {
@@ -1924,47 +2132,26 @@ namespace YARG.Menu.Multiplayer
             }
         }
 
-        private bool SendDiscoveryRequestsForBookmark(LobbyBookmark bookmark, string sourceLabel)
+        private void SendDiscoveryRequestForBookmark(LobbyBookmark bookmark)
         {
-            if (bookmark == null)
-                return false;
-
-            if (string.IsNullOrWhiteSpace(bookmark.address))
-                return false;
+            if (bookmark == null || string.IsNullOrWhiteSpace(bookmark.address))
+                return;
 
             var candidatePorts = new List<int>(4);
 
-            // Get discovery port from abstraction layer or Mirror
-            int discoveryPort = 0;
-            try
-            {
-                var factory = NetworkingServiceFactory.Instance;
-                if (factory != null)
-                {
-                    discoveryPort = factory.DiscoveryPort;
-                }
-            }
-            catch { }
-            
-            if (discoveryPort <= 0 && _discovery != null)
-            {
-                discoveryPort = _discovery.DiscoveryPort;
-            }
-            
+            int discoveryPort = NetworkService?.DiscoveryPort ?? 0;
             if (discoveryPort > 0)
                 candidatePorts.Add(discoveryPort);
 
-            int bookmarkPort = bookmark.port > 0 ? bookmark.port : (YargNetworkManager.Instance?.SuggestedDirectConnectPort ?? NetworkTransportDefaults.DefaultUdpPort);
+            int bookmarkPort = bookmark.port > 0 ? bookmark.port : SuggestedDirectConnectPort;
             if (bookmarkPort > 0)
                 candidatePorts.Add(bookmarkPort);
 
-            // Fallback to default transport ports to cover hosts that expose discovery separately from gameplay.
             if (NetworkTransportDefaults.DefaultUdpPort > 0)
                 candidatePorts.Add(NetworkTransportDefaults.DefaultUdpPort);
             if (NetworkTransportDefaults.DefaultTcpPort > 0)
                 candidatePorts.Add(NetworkTransportDefaults.DefaultTcpPort);
 
-            bool sentAny = false;
             foreach (int port in candidatePorts.Distinct())
             {
                 if (port <= 0 || port > ushort.MaxValue)
@@ -1972,81 +2159,45 @@ namespace YARG.Menu.Multiplayer
 
                 try
                 {
-                    // Send via LiteNet discovery if available
-                    try
-                    {
-                        var factory = NetworkingServiceFactory.Instance;
-                        if (factory != null)
-                        {
-                            factory.SendDiscoveryRequest(bookmark.address, port);
-                            Debug.Log($"[LobbyBrowserMenu] Sent LiteNet discovery request to {bookmark.address}:{port} for {sourceLabel} '{bookmark.displayName}'");
-                            sentAny = true;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning($"[LobbyBrowserMenu] LiteNet discovery request failed: {ex.Message}");
-                    }
-                    
-                    // Also send via Mirror discovery if available (for backwards compatibility)
-                    if (_discovery != null)
-                    {
-                        _discovery.SendDiscoveryRequest(bookmark.address, port);
-                        Debug.Log($"[LobbyBrowserMenu] Sent Mirror discovery request to {bookmark.address}:{port} for {sourceLabel} '{bookmark.displayName}'");
-                        sentAny = true;
-                    }
+                    NetworkService?.SendDiscoveryRequest(bookmark.address, port);
                 }
                 catch (Exception ex)
                 {
                     Debug.LogWarning($"[LobbyBrowserMenu] Failed to send discovery request to {bookmark.address}:{port}: {ex.Message}");
                 }
             }
-
-            return sentAny;
         }
 
-        private async UniTask<bool> ProbeBookmarkAsync(LobbyBookmark bookmark, CancellationToken token, string sourceLabel)
+        private async UniTask<bool> ProbeBookmarkAsync(LobbyBookmark bookmark, CancellationToken token)
         {
-            if (bookmark == null)
+            if (bookmark == null || NetworkService == null)
                 return false;
 
             string key = bookmark.EndpointKey;
             if (string.IsNullOrEmpty(key))
                 return false;
 
-            var manager = YargNetworkManager.Instance;
-            if (manager == null)
-                return false;
-
             if (string.IsNullOrWhiteSpace(bookmark.address))
                 return false;
 
-            int port = bookmark.port > 0 ? bookmark.port : manager.SuggestedDirectConnectPort;
+            int port = bookmark.port > 0 ? bookmark.port : SuggestedDirectConnectPort;
 
             try
             {
-                var info = await manager.ProbeLobbyAsync(bookmark.address, port, timeoutMilliseconds: 4500, cancellationToken: token);
+                var info = await NetworkService.ProbeLobby(bookmark.address, port);
                 if (info != null)
                 {
-                    // Convert Mirror LobbyInfo to abstraction LobbyInfo
-                    var abstractionInfo = ConvertFromMirror(info);
-                    abstractionInfo.IpAddress = bookmark.address;
-                    abstractionInfo.PublicAddress = string.IsNullOrWhiteSpace(abstractionInfo.PublicAddress) ? bookmark.address : abstractionInfo.PublicAddress;
-                    abstractionInfo.Port = port;
-                    MarkLobbyHeartbeat(abstractionInfo);
-                    var snapshot = CloneLobbyInfo(abstractionInfo);
-                    bool hadExisting = _pingedLobbies.TryGetValue(key, out var previous) && previous != null;
+                    info.IpAddress = bookmark.address;
+                    info.PublicAddress = string.IsNullOrWhiteSpace(info.PublicAddress) ? bookmark.address : info.PublicAddress;
+                    info.Port = port;
+                    MarkLobbyHeartbeat(info);
+                    var snapshot = CloneLobbyInfo(info);
                     ResetProbeFailureCount(key);
                     _pingedLobbies[key] = snapshot;
-                    if (!hadExisting || !LobbyInfosEquivalent(previous, snapshot))
-                    {
-                        RequestPingStatusRefresh(forceImmediate: !hadExisting);
-                    }
-                    Debug.Log($"[LobbyBrowserMenu] Probe succeeded for {bookmark.address}:{port} ({sourceLabel})");
+                    RequestPingStatusRefresh(forceImmediate: true);
                     return true;
                 }
 
-                Debug.Log($"[LobbyBrowserMenu] Probe returned no data for {bookmark.address}:{port} ({sourceLabel})");
                 HandleProbeFailure(key);
             }
             catch (OperationCanceledException)
@@ -2055,7 +2206,7 @@ namespace YARG.Menu.Multiplayer
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[LobbyBrowserMenu] Probe failed for {bookmark.address}:{port} ({sourceLabel}): {ex.Message}");
+                Debug.LogWarning($"[LobbyBrowserMenu] Probe failed for {bookmark.address}:{port}: {ex.Message}");
                 HandleProbeFailure(key);
             }
 
@@ -2077,14 +2228,10 @@ namespace YARG.Menu.Multiplayer
 
             int failures = 1;
             if (_consecutiveProbeFailures.TryGetValue(endpointKey, out var existing))
-            {
                 failures = existing + 1;
-            }
 
             if (failures > MAX_CONSECUTIVE_PROBE_FAILURES)
-            {
                 failures = MAX_CONSECUTIVE_PROBE_FAILURES;
-            }
 
             _consecutiveProbeFailures[endpointKey] = failures;
 
@@ -2095,84 +2242,42 @@ namespace YARG.Menu.Multiplayer
                 _pingedLobbies[endpointKey] = null;
 
                 if (shouldNotify)
-                {
                     RequestPingStatusRefresh();
-                }
             }
         }
 
         public void JoinSavedBookmark(LobbyBookmark bookmark)
         {
-            if (bookmark == null) return; if (_pingedLobbies.TryGetValue(bookmark.EndpointKey, out var live) && live != null) { JoinLobby(live); return; }
-            // Join using the normalized endpoint (address:port). YargNetworkManager does not expose JoinBookmark,
-            // so use JoinLobby with a formatted endpoint and the saved password.
+            if (bookmark == null) return;
+            if (_pingedLobbies.TryGetValue(bookmark.EndpointKey, out var live) && live != null)
+            {
+                JoinLobby(live);
+                return;
+            }
+
             try
             {
-                string endpoint = EndpointUtility.FormatEndpoint(bookmark.address, bookmark.port <= 0 ? (YargNetworkManager.Instance?.SuggestedDirectConnectPort ?? NetworkTransportDefaults.DefaultUdpPort) : bookmark.port);
-                NetworkingServiceFactory.Instance?.JoinLobby(endpoint, bookmark.password ?? string.Empty);
+                string endpoint = EndpointUtility.FormatEndpoint(bookmark.address, bookmark.port <= 0 ? SuggestedDirectConnectPort : bookmark.port);
+                NetworkService?.JoinLobby(endpoint, bookmark.password ?? string.Empty);
             }
             catch (Exception)
             {
-                // Fallback: attempt naive concat
                 string endpoint = string.Concat(bookmark.address, ":", bookmark.port);
-                NetworkingServiceFactory.Instance?.JoinLobby(endpoint, bookmark.password ?? string.Empty);
+                NetworkService?.JoinLobby(endpoint, bookmark.password ?? string.Empty);
             }
         }
 
-        /// <summary>
-        /// Edit a saved bookmark. Currently this shows a simple dialog and defers to the LobbyFavorites update API.
-        /// A richer edit UI can replace this in the future.
-        /// </summary>
         public void EditBookmark(LobbyBookmark bookmark)
         {
             if (bookmark == null) return;
 
-            // For now, simply show a message and ensure the bookmark is re-saved via the favorites facade.
             if (DialogManager.Instance != null)
             {
-                var dialog = DialogManager.Instance.ShowMessage("Edit Bookmark", "Bookmark editing UI is not implemented in this build. Use Direct Connect to connect or modify bookmarks in settings.");
+                var dialog = DialogManager.Instance.ShowMessage("Edit Bookmark", "Bookmark editing UI is not implemented in this build.");
                 dialog.AddDialogButton("OK", MenuData.Colors.BrightButton, () => DialogManager.Instance.ClearDialog());
             }
-            
-            // Touch the bookmark via the facade to ensure store is in a consistent state.
+
             _favorites?.UpdateBookmark(bookmark, bookmark.displayName, bookmark.address, bookmark.port, bookmark.password);
         }
-
-        // Debug helper: listen to Navigator events
-        private void OnNavigatorEvent(Navigation.NavigationContext ctx)
-        {
-            Debug.Log($"[LobbyBrowserMenu] Navigator event received: Action={ctx.Action}, Player={(ctx.Player != null ? ctx.Player.Profile.Name : "null")}, IsRepeat={ctx.IsRepeat}");
-
-            // Fallback: if our scheme didn't run for some reason but we have pushed our scheme, handle Up/Down here.
-            // We avoid double-handling by only applying the fallback if SelectedIndex hasn't changed very recently.
-            try
-            {
-                if (_navigationSchemePushed && (ctx.Action == MenuAction.Up || ctx.Action == MenuAction.Down))
-                {
-                    var timeSinceLastChange = Time.unscaledTime - _lastSelectedIndexChangeTime;
-                    // If SelectedIndex wasn't updated in the last 0.1s, assume scheme didn't handle it and apply fallback.
-                    if (timeSinceLastChange > 0.1f)
-                    {
-                        if (ctx.Action == MenuAction.Up)
-                        {
-                            Debug.Log("[LobbyBrowserMenu] Fallback handling: UP -> modifying SelectedIndex");
-                            SetWrapAroundState(!ctx.IsRepeat);
-                            SelectedIndex--;
-                        }
-                        else
-                        {
-                            Debug.Log("[LobbyBrowserMenu] Fallback handling: DOWN -> modifying SelectedIndex");
-                            SetWrapAroundState(!ctx.IsRepeat);
-                            SelectedIndex++;
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[LobbyBrowserMenu] Exception in OnNavigatorEvent fallback: {ex}");
-            }
-        }
     }
-
 }

@@ -128,6 +128,14 @@ namespace YARG.Gameplay.HUD
         {
             _playerNameDisplay.ShowPlayer(player);
         }
+        
+        /// <summary>
+        /// Updates the solo display for a remote player based on network state.
+        /// </summary>
+        public void UpdateRemoteSolo(bool soloActive, int soloSequence, int noteCount, int notesHit, int lastBonus)
+        {
+            _soloBox.UpdateRemoteSolo(soloActive, soloSequence, noteCount, notesHit, lastBonus);
+        }
 
         public void ForceReset()
         {

@@ -7,6 +7,7 @@ using YARG.Localization;
 using YARG.Menu.Navigation;
 using YARG.Menu.Settings;
 using YARG.Menu.Settings.Visuals;
+using YARG.Networking.Settings;
 
 namespace YARG.Settings.Metadata
 {
@@ -22,6 +23,37 @@ namespace YARG.Settings.Metadata
         private static readonly GameObject _textPrefab = Addressables
             .LoadAssetAsync<GameObject>("SettingTab/Text")
             .WaitForCompletion();
+        
+        // Introducer prefabs - loaded lazily since they may not exist yet
+        private static GameObject _introducerHeaderPrefab;
+        private static GameObject _introducerEntryPrefab;
+        private static bool _introducerPrefabsLoaded;
+
+        private static void EnsureIntroducerPrefabsLoaded()
+        {
+            if (_introducerPrefabsLoaded) return;
+            _introducerPrefabsLoaded = true;
+            
+            try
+            {
+                var headerOp = Addressables.LoadAssetAsync<GameObject>("SettingTab/IntroducerHeader");
+                _introducerHeaderPrefab = headerOp.WaitForCompletion();
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[MetadataTab] IntroducerHeader prefab not found: {e.Message}");
+            }
+            
+            try
+            {
+                var entryOp = Addressables.LoadAssetAsync<GameObject>("SettingTab/IntroducerEntry");
+                _introducerEntryPrefab = entryOp.WaitForCompletion();
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[MetadataTab] IntroducerEntry prefab not found: {e.Message}");
+            }
+        }
 
         private Dictionary<string, BaseSettingVisual> _settingVisuals = new();
         private readonly List<AbstractMetadata> _settings = new();
@@ -74,6 +106,32 @@ namespace YARG.Settings.Metadata
                         // Set text
                         go.GetComponentInChildren<TextMeshProUGUI>().text =
                             Localize.Key("Settings.Text", text.TextName);
+
+                        break;
+                    }
+                    case IntroducerListMetadata:
+                    {
+                        EnsureIntroducerPrefabsLoaded();
+                        
+                        // Spawn the introducer header with "Add New" button
+                        if (_introducerHeaderPrefab != null)
+                        {
+                            Object.Instantiate(_introducerHeaderPrefab, container);
+                        }
+
+                        // Create entries for each introducer
+                        if (_introducerEntryPrefab != null)
+                        {
+                            var introducers = NetworkSettingsStore.Instance?.Settings?.introducers;
+                            if (introducers != null)
+                            {
+                                for (int i = 0; i < introducers.Count; i++)
+                                {
+                                    var go = Object.Instantiate(_introducerEntryPrefab, container);
+                                    go.GetComponent<IntroducerEntry>().SetIndex(i);
+                                }
+                            }
+                        }
 
                         break;
                     }

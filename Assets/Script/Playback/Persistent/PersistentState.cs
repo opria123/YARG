@@ -28,6 +28,8 @@ namespace YARG
         public          int             ShowIndex    { get; set; }
 
         public          bool IsPractice;
+        public          bool IsSpectating;
+        public          double SpectateStartTime;
         public readonly bool IsReplay => CurrentReplay is not null;
         public          bool PlayingWithReplay;
 

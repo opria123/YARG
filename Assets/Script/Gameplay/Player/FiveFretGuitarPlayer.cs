@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using YARG.Core;
@@ -346,6 +347,28 @@ namespace YARG.Gameplay.Player
             GameManager.ChangeStemReverbState(_stem, active);
         }
 
+        public override void MarkAsDisconnected()
+        {
+            base.MarkAsDisconnected();
+            
+            // Hide the fret array (frets/strike zone)
+            if (_fretArray != null)
+            {
+                _fretArray.gameObject.SetActive(false);
+            }
+            
+            // Return shift and range indicator pools
+            if (_shiftIndicatorPool != null)
+            {
+                _shiftIndicatorPool.ReturnAllObjects();
+            }
+            
+            if (_rangeIndicatorPool != null)
+            {
+                _rangeIndicatorPool.ReturnAllObjects();
+            }
+        }
+
         protected override void ResetVisuals()
         {
             base.ResetVisuals();
@@ -371,11 +394,44 @@ namespace YARG.Gameplay.Player
                 if (note.Fret != (int) FiveFretGuitarFret.Open)
                 {
                     _fretArray.PlayHitAnimation(note.Fret - 1);
+                    
+                    // For remote players, also light up the fret briefly since we're not
+                    // simulating their button presses. This gives the same visual feedback
+                    // as local players get when they hold the fret and hit a note.
+                    // For sustain notes, the sustain sync will handle the pressed state.
+                    if (IsRemotePlayer)
+                    {
+                        // For non-sustain notes, briefly flash the fret light
+                        // For sustain notes, also set pressed here - SyncSustainVisualsWithNetwork will maintain it
+                        _fretArray.SetPressed(note.Fret - 1, true);
+                        
+                        if (!note.IsSustain)
+                        {
+                            // Schedule the fret to turn off after a brief flash for non-sustains
+                            StartCoroutine(ReleaseFretAfterDelay(note.Fret - 1, 0.1f));
+                        }
+                    }
                 }
                 else
                 {
                     _fretArray.PlayOpenHitAnimation();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Coroutine to release a fret after a brief delay.
+        /// Used for remote players to flash the fret light when they hit non-sustain notes.
+        /// </summary>
+        private IEnumerator ReleaseFretAfterDelay(int fretIndex, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            
+            // Only release if not currently being held by a sustain
+            int fretBit = 1 << fretIndex;
+            if ((SustainsHeldBitmask & fretBit) == 0)
+            {
+                _fretArray.SetPressed(fretIndex, false);
             }
         }
 
@@ -706,48 +762,35 @@ namespace YARG.Gameplay.Player
         }
 
         /// <summary>
-        /// Applies remote player's sustain state to the fret visuals.
-        /// Called by RemotePlayerSimulation when the sustain state changes.
-        /// Note: We only update fret sustained state and handle sustain drops.
-        /// The normal ResolveRemoteNote flow handles hitting notes - we don't interfere with that.
+        /// Applies remote player's sustain state changes.
+        /// Called by RemotePlayerSimulation when the network sustain bitmask changes.
+        /// Note: Fret visual states are now managed by SyncSustainVisualsWithNetwork to ensure
+        /// fret burning and note element states stay synchronized.
+        /// This method handles sustain drop events (when remote player releases a sustain).
         /// </summary>
         /// <param name="oldSustains">Previous sustain bitmask</param>
         /// <param name="newSustains">New sustain bitmask</param>
         public void ApplyRemoteSustainState(int oldSustains, int newSustains)
         {
-            // Check each fret (5-fret guitar has frets 0-4)
+            // Check each fret for sustain drops (transitions from held to not-held)
             for (int fretIndex = 0; fretIndex < 5; fretIndex++)
             {
                 int fretBit = 1 << fretIndex;
                 bool wasHeld = (oldSustains & fretBit) != 0;
                 bool isHeld = (newSustains & fretBit) != 0;
 
-                if (wasHeld != isHeld)
+                if (wasHeld && !isHeld)
                 {
-                    // Update fret visual states:
-                    // - SetSustained: plays sustain particle effect and sets animator state
-                    // - SetPressed: sets inner material brightness (the "lit up" look when holding)
-                    _fretArray.SetSustained(fretIndex, isHeld);
-                    _fretArray.SetPressed(fretIndex, isHeld);
-
-                    if (isHeld && !wasHeld)
-                    {
-                        // Sustain started (0→1) - play hit animation for the glow effect
-                        // This gives the fret the same visual pop as when hitting a note locally
-                        _fretArray.PlayHitAnimation(fretIndex);
-                    }
-                    else if (!isHeld && wasHeld)
-                    {
-                        // Sustain ended (1→0) - gray out the sustain note
-                        // Fret index is 0-4, but note.Fret is 1-5 (0 = open)
-                        int noteFret = fretIndex + 1;
-                        ApplySustainEndToNoteElements(noteFret);
-                    }
+                    // Sustain ended (1→0) - gray out the sustain note elements
+                    // Fret index is 0-4, but note.Fret is 1-5 (0 = open)
+                    int noteFret = fretIndex + 1;
+                    ApplySustainEndToNoteElements(noteFret);
                 }
             }
-
-            // Update the bitmask for tracking
-            SustainsHeldBitmask = newSustains;
+            
+            // Note: We don't update fret visual states or SustainsHeldBitmask here anymore.
+            // SyncSustainVisualsWithNetwork handles synchronized fret + note element state
+            // to prevent visual desync (e.g., fret burning but note grey, or vice versa).
         }
 
         /// <summary>
@@ -788,6 +831,183 @@ namespace YARG.Gameplay.Player
 
                 // Call SustainEnd to gray out the sustain
                 noteElement.SustainEnd(false);
+            }
+        }
+
+        /// <summary>
+        /// Syncs sustain note visuals with network state.
+        /// Handles the case where local simulation resolved a note differently than the actual remote player.
+        /// For example, if local thought a sustain was hit but remote actually missed it (or vice versa).
+        /// Also handles the case where network shows a sustain is held but local hasn't processed the hit yet.
+        /// This also syncs the fret array "burning" state to ensure frets and note elements stay in sync.
+        /// 
+        /// OPTIMISTIC APPROACH: Once a note is resolved as "hit" by local simulation, we keep it
+        /// in the "Hitting" visual state until either:
+        /// 1. The sustain time window ends, OR
+        /// 2. Network explicitly tells us the sustain was dropped (network had it held but now doesn't)
+        /// This prevents the "pop-in" effect where notes start grey and then light up after network data arrives.
+        /// </summary>
+        /// <param name="networkSustainBitmask">The current sustain bitmask from network (frets 0-4 as bits 0-4)</param>
+        public void SyncSustainVisualsWithNetwork(int networkSustainBitmask)
+        {
+            // Use GameManager.SongTime instead of Engine.CurrentTime because for remote players
+            // the engine isn't updated (BaseEngine.Update is never called for remote players)
+            double currentTime = GameManager.SongTime;
+            
+            // Track which frets SHOULD be burning based on note timing + network state
+            // This ensures fret burning matches note element state
+            int validFretBurnMask = 0;
+            
+            // Iterate through all spawned notes and check for mismatches
+            foreach (var poolable in NotePool.AllSpawned)
+            {
+                if (poolable is not FiveFretGuitarNoteElement noteElement)
+                    continue;
+
+                var note = noteElement.NoteRef;
+                if (note == null || !note.IsSustain)
+                    continue;
+
+                // Check timing constraints
+                bool noteHasBeenReached = currentTime >= note.Time;
+                bool sustainStillActive = currentTime < note.TimeEnd;
+                bool withinSustainWindow = noteHasBeenReached && sustainStillActive;
+
+                // Check if the note was resolved as hit by local simulation
+                // This is set by ResolveRemoteNote -> OnNoteHit
+                bool noteWasHit = note.WasHit;
+                
+                // Check if any fret of this note is supposed to be held according to network
+                bool networkSaysHeld = false;
+                int noteFretMask = 0; // Track which frets this note uses
+                foreach (var childNote in note.AllNotes)
+                {
+                    int fret = childNote.Fret;
+                    if (fret >= 1 && fret <= 5)
+                    {
+                        // Fret 1-5 maps to bits 0-4
+                        int fretBit = 1 << (fret - 1);
+                        noteFretMask |= fretBit;
+                        if ((networkSustainBitmask & fretBit) != 0)
+                        {
+                            networkSaysHeld = true;
+                        }
+                    }
+                    // Note: Open notes (fret 0) don't have a sustain bitmask representation
+                }
+
+                // OPTIMISTIC APPROACH:
+                // - If note was hit and sustain is still active, show as "Hitting"
+                // - Only show as dropped if network says sustain is not held AND either:
+                //   1. Network previously had it held (wasBeingHeld), OR
+                //   2. Enough time has passed for network to report (grace period expired)
+                // This prevents the "pop-in" effect while still detecting drops properly.
+                
+                // First, check for sustain drops from network BEFORE deciding visual state
+                // This prevents the "hit then immediately drop" visual glitch
+                
+                // Give network time to report before treating "not held" as a drop
+                // This is needed because network data may arrive slightly after the note is hit
+                const double NETWORK_GRACE_PERIOD = 0.15; // 150ms grace period for network latency
+                bool hadTimeForNetworkUpdate = currentTime > note.Time + NETWORK_GRACE_PERIOD;
+                
+                bool networkExplicitlyDropped = false;
+                if (noteWasHit && withinSustainWindow && !networkSaysHeld && noteFretMask != 0)
+                {
+                    // Check if this fret was previously marked as burning (meaning network previously said held)
+                    bool wasBeingHeld = (SustainsHeldBitmask & noteFretMask) != 0;
+                    
+                    // Detect drop if:
+                    // 1. Network previously said held but now doesn't (explicit drop), OR
+                    // 2. Enough time has passed and network never said held (missed/quick drop)
+                    if (wasBeingHeld || hadTimeForNetworkUpdate)
+                    {
+                        // Network says not held - treat as drop
+                        networkExplicitlyDropped = true;
+                    }
+                }
+                
+                if (withinSustainWindow)
+                {
+                    if (networkExplicitlyDropped)
+                    {
+                        // Network explicitly told us this sustain was dropped
+                        // Show the note as missed/dropped (grey state)
+                        if (noteElement.SustainState == SustainState.Hitting)
+                        {
+                            noteElement.SustainEnd(false); // dropped, not finished
+                        }
+                        // Don't add to valid burn mask - fret should stop burning
+                        validFretBurnMask &= ~noteFretMask;
+                    }
+                    else if (noteWasHit)
+                    {
+                        // Note was resolved as hit - show as "Hitting" since no drop signal received
+                        if (noteElement.SustainState != SustainState.Hitting)
+                        {
+                            noteElement.HitNote();
+                        }
+                        
+                        // Mark frets for burning if network confirms they're held
+                        // (or if network hasn't told us otherwise yet - be optimistic for visuals)
+                        if (networkSaysHeld || noteFretMask == 0)
+                        {
+                            validFretBurnMask |= noteFretMask;
+                        }
+                    }
+                    else if (networkSaysHeld)
+                    {
+                        // Note wasn't resolved as hit yet, but network says it's being held.
+                        // This can happen if network state arrives before local resolution.
+                        // Show as hitting and mark for burning.
+                        if (noteElement.SustainState != SustainState.Hitting)
+                        {
+                            noteElement.HitNote();
+                        }
+                        validFretBurnMask |= noteFretMask;
+                    }
+                }
+                else if (noteHasBeenReached && !sustainStillActive)
+                {
+                    // Sustain time window has ended - make sure visual reflects this
+                    if (noteElement.SustainState == SustainState.Hitting)
+                    {
+                        noteElement.SustainEnd(true); // finished = true since time ended
+                    }
+                }
+            }
+            
+            // Sync fret array burning state to match note element state
+            // This ensures frets only burn when there's a corresponding active sustain note
+            for (int fretIndex = 0; fretIndex < 5; fretIndex++)
+            {
+                int fretBit = 1 << fretIndex;
+                bool fretShouldBurn = (validFretBurnMask & fretBit) != 0;
+                bool networkSaysBurning = (networkSustainBitmask & fretBit) != 0;
+                bool currentlyBurning = (SustainsHeldBitmask & fretBit) != 0;
+                
+                // The fret should only burn if:
+                // 1. We have a valid sustain note that's active AND
+                // 2. Either network says the sustain is held OR we're being optimistic (note was hit)
+                bool targetBurnState = fretShouldBurn;
+                
+                if (targetBurnState != currentlyBurning)
+                {
+                    _fretArray.SetSustained(fretIndex, targetBurnState);
+                    _fretArray.SetPressed(fretIndex, targetBurnState);
+                    
+                    if (targetBurnState && !currentlyBurning)
+                    {
+                        // Fret started burning - play hit animation for the glow effect
+                        _fretArray.PlayHitAnimation(fretIndex);
+                        SustainsHeldBitmask |= fretBit;
+                    }
+                    else if (!targetBurnState && currentlyBurning)
+                    {
+                        // Fret stopped burning
+                        SustainsHeldBitmask &= ~fretBit;
+                    }
+                }
             }
         }
 

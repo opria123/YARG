@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using DG.Tweening;
@@ -5,6 +6,9 @@ using DG.Tweening.Core;
 using DG.Tweening.Plugins.Options;
 using UnityEngine;
 using YARG.Core.Audio;
+using YARG.Networking.Abstraction;
+using YARG.Networking.Bands;
+using YARG.Networking.Gameplay;
 using YARG.Playback;
 using YARG.Settings;
 
@@ -133,12 +137,130 @@ namespace YARG.Gameplay
 
         public void ChangeStarPowerStatus(bool active)
         {
+            ChangeStarPowerStatus(active, isFromRemotePlayer: false);
+        }
+        
+        /// <summary>
+        /// Changes Star Power status and optionally triggers revival logic.
+        /// </summary>
+        /// <param name="active">Whether Star Power is now active.</param>
+        /// <param name="isFromRemotePlayer">If true, this is from a remote/spectator player and should NOT trigger revival.</param>
+        public void ChangeStarPowerStatus(bool active, bool isFromRemotePlayer)
+        {
             if (SettingsManager.Settings.UseCrowdFx.Value == CrowdFxMode.Disabled)
                 return;
 
             StarPowerActivations += active ? 1 : -1;
             if (StarPowerActivations < 0)
                 StarPowerActivations = 0;
+            
+            // When Star Power is activated, try to revive any failed players
+            // This works when No Fail mode is OFF (players can actually fail)
+            // Works for both local and multiplayer sessions
+            // In band mode, only revives players in the same band
+            // IMPORTANT: Do NOT trigger revival from remote/spectator players - their Star Power
+            // activations should only affect visuals/audio, not game mechanics like revival.
+            // Revival from remote players' Star Power is handled separately via the network state.
+            if (active && !IsNoFailActive && !IsPractice && !isFromRemotePlayer)
+            {
+                TryReviveFailedPlayersWithStarPower();
+            }
+        }
+        
+        /// <summary>
+        /// Attempts to revive failed players when Star Power is activated.
+        /// Works when No Fail mode is OFF for both local and multiplayer sessions.
+        /// When band mode is active, only revives players in the same band.
+        /// </summary>
+        private void TryReviveFailedPlayersWithStarPower()
+        {
+            // Check if there are any failed players that can be revived
+            if (!EngineManager.HasAnyFailedPlayer())
+            {
+                return;
+            }
+            
+            // Build filter for band-aware revival
+            Func<int, bool> revivalFilter = null;
+            
+            // Check if band mode is active
+            var bandManager = BandManager.Instance;
+            if (bandManager != null && bandManager.IsBandSystemActive)
+            {
+                // Build a mapping from engine ID to player GUID
+                var engineIdToPlayerId = BuildEngineIdToPlayerIdMap();
+                int localBandId = bandManager.LocalPlayerBandId;
+                
+                // Only revive players in the same band as local player
+                revivalFilter = (engineId) =>
+                {
+                    if (!engineIdToPlayerId.TryGetValue(engineId, out Guid playerId))
+                    {
+                        // Unknown player - don't revive (shouldn't happen)
+                        return false;
+                    }
+                    
+                    int playerBandId = bandManager.GetPlayerBandId(playerId);
+                    return playerBandId == localBandId;
+                };
+                
+                Debug.Log($"[GameManager] Star Power revival - band mode active, filtering to band {localBandId}");
+            }
+            
+            // Revive failed players (with optional band filter)
+            bool anyRevived = EngineManager.TryReviveFailedPlayers(revivalFilter);
+            
+            if (anyRevived)
+            {
+                // Clear the band-wide failure state if it was set
+                if (PlayerHasFailed)
+                {
+                    PlayerHasFailed = false;
+                    Debug.Log("[GameManager] Star Power revival - cleared PlayerHasFailed flag");
+                }
+                
+                // Note: We no longer show a toast notification for star power revival
+                // to avoid spam. A countdown/visual cue should be shown instead.
+                
+                // In multiplayer, broadcast the revival to other players
+                var networkService = NetworkingServiceFactory.Instance;
+                if (networkService != null && networkService.IsNetworkActive)
+                {
+                    // The revival state will be synced via the normal gameplay snapshot system
+                    // The happiness values will automatically propagate
+                    Debug.Log("[GameManager] Star Power revival - will sync via gameplay snapshots");
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Builds a mapping from engine ID to network player GUID.
+        /// Used for band-aware revival filtering.
+        /// </summary>
+        private Dictionary<int, Guid> BuildEngineIdToPlayerIdMap()
+        {
+            var map = new Dictionary<int, Guid>();
+            
+            if (_players == null)
+                return map;
+                
+            foreach (var player in _players)
+            {
+                var engineContainer = player.PlayerEngineContainer;
+                var networkData = player.NetworkPlayerData;
+                
+                if (engineContainer != null && networkData != null)
+                {
+                    // NetworkPlayerData.NetworkPlayerId is already a Guid
+                    Guid playerId = networkData.NetworkPlayerId;
+                    if (playerId != Guid.Empty)
+                    {
+                        map[engineContainer.EngineId] = playerId;
+                    }
+                }
+            }
+            
+            return map;
         }
 
         public void ChangeStemMuteState(SongStem stem, bool muted, float duration = 0.0f)

@@ -1,7 +1,7 @@
 using System;
 using System.Globalization;
 using YARG.Menu.ListMenu;
-using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Networking.Bookmarks;
 using Cysharp.Text;
 using YARG.Helpers;
@@ -56,15 +56,22 @@ namespace YARG.Menu.Multiplayer
         internal override LobbyBrowserMenu MenuOwner => _menu;
 
         public override BackgroundType Background => BackgroundType.Normal;
-        public override bool ShowFavoriteButton => true;
-        public override bool IsFavorited => _favorites.IsFavorited(_lobbyInfo.IpAddress, _lobbyInfo.Port);
+        
+        // Only show favorite button for servers (persistent) - lobbies are ephemeral
+        public override bool ShowFavoriteButton => _lobbyInfo.IsServer;
+        public override bool IsFavorited => _lobbyInfo.IsServer && _favorites.IsFavorited(_lobbyInfo.IpAddress, _lobbyInfo.Port);
         public override int Ping
         {
             get
             {
-                // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-                // Return 0 for now - proper ping tracking needs to be implemented
-                return 0;
+                // Use the ping value from LobbyInfo if available
+                if (_lobbyInfo.Ping >= 0)
+                {
+                    return _lobbyInfo.Ping;
+                }
+                // Fallback: estimate based on time since last seen
+                var ms = (int)_lobbyInfo.TimeSinceLastSeen.TotalMilliseconds;
+                return Math.Max(0, Math.Min(ms, 999));
             }
         }
         public override bool CanEdit => GetBookmark() != null;
@@ -117,9 +124,30 @@ namespace YARG.Menu.Multiplayer
         
         public string GetPingText()
         {
-            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-            // For now, just show Live status
-            return TextColorer.StyleString("Live", new Color(0.35f, 0.92f, 0.55f), 400);
+            // Check if we've exceeded failure threshold - show offline
+            if (_menu != null)
+            {
+                string endpointKey = LobbyBookmarkUtility.BuildKey(_lobbyInfo.IpAddress, _lobbyInfo.Port);
+                if (_menu.GetProbeFailureCount(endpointKey) >= 3)
+                {
+                    return TextColorer.StyleString("Offline", new Color(0.5f, 0.5f, 0.5f), 600);
+                }
+            }
+            
+            // Show ping if we have a measurement (keep showing last known ping)
+            if (_lobbyInfo.Ping >= 0)
+            {
+                Color pingColor = _lobbyInfo.Ping switch
+                {
+                    < 50 => new Color(0.35f, 0.92f, 0.55f),
+                    < 100 => new Color(0.92f, 0.85f, 0.35f),
+                    _ => new Color(0.92f, 0.55f, 0.35f)
+                };
+                return TextColorer.StyleString(ZString.Format("{0}ms", _lobbyInfo.Ping), pingColor, 600);
+            }
+            
+            // No ping yet but lobby exists - show Live
+            return TextColorer.StyleString("Live", new Color(0.35f, 0.92f, 0.55f), 600);
         }
         
         public bool HasPassword()
@@ -134,6 +162,10 @@ namespace YARG.Menu.Multiplayer
         
         public override void OnFavoriteClick()
         {
+            // Only allow favoriting servers (persistent) - lobbies are ephemeral
+            if (!_lobbyInfo.IsServer)
+                return;
+                
             if (IsFavorited)
             {
                 _favorites.RemoveFavorite(_lobbyInfo.IpAddress, _lobbyInfo.Port);
@@ -207,14 +239,16 @@ namespace YARG.Menu.Multiplayer
     }
 
     /// <summary>
-    /// Action view that triggers sidebar workflows (create lobby, direct connect, etc.).
+    /// Action view that triggers sidebar workflows (host game, join game, etc.).
     /// </summary>
     public class LobbyActionViewType : LobbyViewType
     {
         public enum ActionKind
         {
-            CreateLobby,
-            DirectConnect
+            CreateLobby,    // Legacy - kept for compatibility
+            DirectConnect,  // Legacy - kept for compatibility
+            HostGame,       // New: Host a Game (replaces CreateLobby in UI)
+            JoinGame        // New: Join a Game (replaces DirectConnect in UI)
         }
 
         private readonly LobbyBrowserMenu _menu;
@@ -380,16 +414,42 @@ namespace YARG.Menu.Multiplayer
                 return ZString.Concat(currentText, maxText);
             }
 
+            // Check if we're actively scanning for this server
+            if (_menu != null && _menu.IsEndpointBeingScanned(_bookmark?.EndpointKey))
+            {
+                return TextColorer.StyleString("SCANNING", new Color(0.6f, 0.8f, 1f), 600);
+            }
+
             return TextColorer.StyleString("OFFLINE", MenuData.Colors.PrimaryText.WithAlpha(0.45f), 600);
         }
 
         public string GetInfoBadge()
         {
+            // Check if we've exceeded failure threshold - show offline
+            if (_menu != null && _bookmark != null)
+            {
+                if (_menu.GetProbeFailureCount(_bookmark.EndpointKey) >= 3)
+                {
+                    return TextColorer.StyleString("Offline", new Color(0.5f, 0.5f, 0.5f), 600);
+                }
+            }
+            
             if (LiveInfo != null)
             {
-                // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-                // For now, just show ONLINE if we have LiveInfo
-                return TextColorer.StyleString("ONLINE", new Color(0.35f, 0.92f, 0.55f), 600);
+                // Show ping if we have a measurement (keep showing last known ping)
+                if (LiveInfo.Ping >= 0)
+                {
+                    // Color code by latency
+                    Color pingColor = LiveInfo.Ping switch
+                    {
+                        < 50 => new Color(0.35f, 0.92f, 0.55f),   // Green - good
+                        < 100 => new Color(0.92f, 0.85f, 0.35f),  // Yellow - okay  
+                        _ => new Color(0.92f, 0.55f, 0.35f)       // Orange/red - poor
+                    };
+                    return TextColorer.StyleString(ZString.Format("{0}ms", LiveInfo.Ping), pingColor, 600);
+                }
+                // No ping measurement yet - show Live
+                return TextColorer.StyleString("Live", new Color(0.35f, 0.92f, 0.55f), 600);
             }
 
             if (_bookmark.lastConnected <= 0)
@@ -495,7 +555,12 @@ namespace YARG.Menu.Multiplayer
                 return string.Empty;
             }
 
-            string privacy = _preset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private ? "Private" : "Public";
+            string privacy = _preset.PrivacyMode switch
+            {
+                LobbyPrivacyMode.Private => "Private",
+                LobbyPrivacyMode.Unlisted => "Unlisted",
+                _ => "Public"
+            };
 
             string hosted = _preset.lastHostedAt > 0
                 ? BuildRelativeTimeString(_preset.lastHostedAt)
@@ -540,7 +605,12 @@ namespace YARG.Menu.Multiplayer
                 return string.Empty;
             }
 
-            return _preset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private ? "Private" : "Public";
+            return _preset.PrivacyMode switch
+            {
+                LobbyPrivacyMode.Private => "Private",
+                LobbyPrivacyMode.Unlisted => "Unlisted",
+                _ => "Public"
+            };
         }
 
         public bool IsPasswordProtected()
@@ -555,7 +625,7 @@ namespace YARG.Menu.Multiplayer
                 return true;
             }
 
-            return _preset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private;
+            return _preset.PrivacyMode == LobbyPrivacyMode.Private;
         }
 
         public string GetHostedRecencyText(bool selected)

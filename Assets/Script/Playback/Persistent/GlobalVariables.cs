@@ -28,6 +28,7 @@ using YARG.Settings.Customization;
 using YARG.Song;
 using YARG.Logging;
 using YARG.Logging.Unity;
+using YARG.Networking;
 
 namespace YARG
 {
@@ -119,6 +120,12 @@ namespace YARG
 
             Players = new List<YargPlayer>();
 
+            // Initialize networking subsystem (regardless of headless mode)
+            if (!OfflineMode)
+            {
+                NetworkManagersBootstrap.Initialize();
+            }
+
             // Set alpha fading (on the tracks) to on
             // (this is mostly for the editor, but just in case)
             if (!_isHeadlessEnvironment)
@@ -139,6 +146,19 @@ namespace YARG
             else
             {
                 YargLogger.LogInfo("[DedicatedServer] Menu scene load skipped in headless mode.");
+                // Keep the application running in headless mode
+                StartCoroutine(HeadlessServerLoop());
+            }
+        }
+
+        private System.Collections.IEnumerator HeadlessServerLoop()
+        {
+            YargLogger.LogInfo("[DedicatedServer] Server running. Press Ctrl+C to stop.");
+            
+            // Keep Unity alive by yielding every frame
+            while (true)
+            {
+                yield return null;
             }
         }
 
@@ -161,6 +181,9 @@ namespace YARG
 
         protected override void SingletonDestroy()
         {
+            // Shutdown networking first
+            NetworkManagersBootstrap.Shutdown();
+
             SettingsManager.SaveSettings();
             PlayerContainer.SaveProfiles();
             PlaylistContainer.SaveAll();
@@ -367,6 +390,18 @@ namespace YARG
             {
                 return true;
             }
+
+#if UNITY_EDITOR
+            // Check if dedicated server mode is forced in the Editor via EditorPrefs
+            // Use project-specific key so ParrelSync clones have independent settings
+            string projectPath = Application.dataPath;
+            int pathHash = projectPath.GetHashCode();
+            string prefKey = $"YARG_ForceDedicatedServerMode_{pathHash}";
+            if (UnityEditor.EditorPrefs.GetBool(prefKey, false))
+            {
+                return true;
+            }
+#endif
 
             string env = Environment.GetEnvironmentVariable("YARG_DEDICATED") ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(env))

@@ -22,6 +22,10 @@ namespace YARG.Gameplay.Visuals
         private static readonly int _layer4ColorProperty = Shader.PropertyToID("_Layer_4_Color");
 
         private static readonly int _starPowerColorProperty = Shader.PropertyToID("_Starpower_Color");
+        
+        private bool _isGrayedOut;
+        private Preset _savedNormalPreset;
+        private Preset _savedGroovePreset;
 
         public struct Preset
         {
@@ -181,6 +185,53 @@ namespace YARG.Gameplay.Visuals
         {
             float position = (float) time * noteSpeed / 4f;
             _material.SetFloat(_scrollProperty, position);
+        }
+        
+        /// <summary>
+        /// Sets the track to a grayed out state for disconnected players.
+        /// </summary>
+        public void SetGrayedOut(bool grayedOut)
+        {
+            if (_isGrayedOut == grayedOut)
+                return;
+                
+            _isGrayedOut = grayedOut;
+            
+            if (grayedOut)
+            {
+                // Save current presets
+                _savedNormalPreset = _normalPreset;
+                _savedGroovePreset = _groovePreset;
+                
+                // Create grayed out preset
+                var grayPreset = new Preset
+                {
+                    Layer1 = new Color(0.15f, 0.15f, 0.15f, 0.5f),
+                    Layer2 = new Color(0.25f, 0.25f, 0.25f, 0.3f),
+                    Layer3 = new Color(0.3f, 0.3f, 0.3f, 0f),
+                    Layer4 = new Color(0.2f, 0.2f, 0.2f, 0.5f)
+                };
+                
+                _normalPreset = grayPreset;
+                _groovePreset = grayPreset;
+                
+                // Apply immediately
+                _material.SetColor(_layer1ColorProperty, grayPreset.Layer1);
+                _material.SetColor(_layer2ColorProperty, grayPreset.Layer2);
+                _material.SetColor(_layer3ColorProperty, grayPreset.Layer3);
+                _material.SetColor(_layer4ColorProperty, grayPreset.Layer4);
+                
+                // Disable starpower and groove effects
+                StarpowerMode = false;
+                GrooveMode = false;
+                StarpowerState = 0f;
+            }
+            else
+            {
+                // Restore saved presets
+                _normalPreset = _savedNormalPreset;
+                _groovePreset = _savedGroovePreset;
+            }
         }
     }
 }

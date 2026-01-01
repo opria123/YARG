@@ -16,13 +16,18 @@ namespace YARG.Menu.ScoreScreen
         [SerializeField]
         private TextMeshProUGUI _ghostInputs;
 
-        public override void SetCardContents()
+        public override bool SetCardContents()
         {
-            base.SetCardContents();
+            if (!base.SetCardContents())
+            {
+                // Stats are null (remote player), placeholder was shown, skip guitar-specific stats
+                return false;
+            }
 
             _overstrums.text = WrapWithColor(Stats.Overstrums);
             _hoposStrummed.text = WrapWithColor(Stats.HoposStrummed);
             _ghostInputs.text = WrapWithColor(Stats.GhostInputs);
+            return true;
         }
     }
 }

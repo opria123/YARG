@@ -190,13 +190,16 @@ namespace YARG.Menu.Navigation
         public void PushScheme(NavigationScheme scheme)
         {
             _schemeStack.Push(scheme);
+            Debug.Log($"[Navigator] PushScheme: stack count now {_schemeStack.Count}");
             UpdateHelpBar().Forget();
         }
 
         public void PopScheme()
         {
+            Debug.Log($"[Navigator] PopScheme: stack count before {_schemeStack.Count}");
             var scheme = _schemeStack.Pop();
             scheme.PopCallback?.Invoke();
+            Debug.Log($"[Navigator] PopScheme: stack count after {_schemeStack.Count}");
             UpdateHelpBar().Forget();
         }
 
@@ -218,13 +221,24 @@ namespace YARG.Menu.Navigation
             // This prevents the music player from resetting across schemes.
             await UniTask.WaitForEndOfFrame(this);
 
+            Debug.Log($"[Navigator] UpdateHelpBar: stack count = {_schemeStack.Count}");
             if (_schemeStack.Count <= 0)
             {
+                Debug.Log("[Navigator] UpdateHelpBar: Resetting HelpBar (empty stack)");
                 HelpBar.Instance.Reset();
             }
             else
             {
-                HelpBar.Instance.SetInfoFromScheme(_schemeStack.Peek());
+                var topScheme = _schemeStack.Peek();
+                
+                // Find the red entry for logging - handle case where no red entry exists
+                var redEntry = topScheme.Entries.FirstOrDefault(e => e.Action == MenuAction.Red);
+                string redButtonName = string.IsNullOrEmpty(redEntry.LocalizationKey) 
+                    ? "(none)" 
+                    : redEntry.DisplayName;
+                Debug.Log($"[Navigator] UpdateHelpBar: Setting from top scheme, Red button = '{redButtonName}'");
+                
+                HelpBar.Instance.SetInfoFromScheme(topScheme);
             }
         }
     }

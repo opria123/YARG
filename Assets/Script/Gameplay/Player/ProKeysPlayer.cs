@@ -447,6 +447,34 @@ namespace YARG.Gameplay.Player
             }
         }
 
+        public override void MarkAsDisconnected()
+        {
+            base.MarkAsDisconnected();
+            
+            // Hide the keys array (piano keys/strike zone)
+            if (_keysArray != null)
+            {
+                _keysArray.gameObject.SetActive(false);
+            }
+            
+            // Hide the track overlay
+            if (_trackOverlay != null)
+            {
+                _trackOverlay.gameObject.SetActive(false);
+            }
+            
+            // Return shift indicator and chord bar pools
+            if (_shiftIndicatorPool != null)
+            {
+                _shiftIndicatorPool.ReturnAllObjects();
+            }
+            
+            if (_chordBarPool != null)
+            {
+                _chordBarPool.ReturnAllObjects();
+            }
+        }
+
         protected override void InitializeSpawnedNote(IPoolable poolable, ProKeysNote note)
         {
             ((ProKeysNoteElement) poolable).NoteRef = note;

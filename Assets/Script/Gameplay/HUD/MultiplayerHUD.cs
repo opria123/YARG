@@ -1,7 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
-using YARG.Networking;
 using YARG.Networking.Abstraction;
 using System.Collections.Generic;
 using YARG.Core;
@@ -31,14 +30,10 @@ namespace YARG.Gameplay.HUD
 
         private void Start()
         {
-            // Check if we're in multiplayer mode (LiteNet or Mirror)
-            // NOTE: Check LiteNet first - if LiteNet is active, consider Mirror inactive
-            bool isLiteNetActive = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
-            bool isMirrorActive = !isLiteNetActive && 
-                                  YargNetworkManager.Instance != null && 
-                                  YargNetworkManager.Instance.isNetworkActive;
+            // Check if we're in multiplayer mode (LiteNet)
+            bool isNetworkActive = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
             
-            if (!isLiteNetActive && !isMirrorActive)
+            if (!isNetworkActive)
             {
                 _isMultiplayer = false;
                 if (multiplayerPanel != null)
@@ -54,18 +49,8 @@ namespace YARG.Gameplay.HUD
                 multiplayerPanel.SetActive(true);
             }
 
-            // For LiteNet, the HUD works differently (we use player simulations)
-            // Only initialize Mirror-style HUD for Mirror
-            if (isLiteNetActive)
-            {
-                Debug.Log("[MultiplayerHUD] LiteNet mode - using player simulation for remote displays");
-                return;
-            }
-
-            Debug.Log("[MultiplayerHUD] Mirror mode - initializing multiplayer HUD");
-
-            // Create displays for all players (Mirror only)
-            RefreshPlayerList();
+            // For LiteNet, the HUD uses player simulation for remote displays
+            Debug.Log("[MultiplayerHUD] LiteNet mode - using player simulation for remote displays");
         }
 
         private void Update()
@@ -91,7 +76,8 @@ namespace YARG.Gameplay.HUD
 
         private void RefreshPlayerList()
         {
-            if (YargNetworkManager.Instance == null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService == null || !networkService.IsNetworkActive)
                 return;
 
             // Clear existing displays
@@ -105,7 +91,11 @@ namespace YARG.Gameplay.HUD
             _playerDisplays.Clear();
 
             // Get all connected players
-            var players = YargNetworkManager.Instance.GetAllPlayers();
+            var liteNetAdapter = networkService as LiteNetNetworkingAdapter;
+            if (liteNetAdapter == null)
+                return;
+                
+            var players = liteNetAdapter.GetAllPlayers();
             
             foreach (var playerData in players)
             {

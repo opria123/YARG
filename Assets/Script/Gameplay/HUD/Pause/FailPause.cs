@@ -5,9 +5,10 @@ using UnityEngine;
 using UnityEngine.UI;
 using YARG.Core.Input;
 using YARG.Menu.Data;
+using YARG.Menu.Multiplayer;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
-using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Settings;
 
 namespace YARG.Gameplay.HUD
@@ -17,10 +18,10 @@ namespace YARG.Gameplay.HUD
         [SerializeField]
         private GameObject _separatorObject;
 
-        private Button _restartButton;
-        private Button _enableNoFailButton;
-        private Button _backToLibraryButton;
-        private Button _practiceModeButton;
+        private NavigatableButton _restartButton;
+        private NavigatableButton _enableNoFailButton;
+        private NavigatableButton _backToLibraryButton;
+        private NavigatableButton _practiceModeButton;
 
         private TMP_Text _backToLibraryLabel;
         private TMP_Text _enableNoFailLabel;
@@ -47,9 +48,18 @@ namespace YARG.Gameplay.HUD
 
         protected override void OnEnable()
         {
+            // Reset cache if buttons weren't found (wrong component type on previous attempt)
+            if (_buttonsCached && _restartButton == null && _backToLibraryButton == null)
+            {
+                Debug.Log("[FailPause] Resetting button cache - buttons were not found previously");
+                _buttonsCached = false;
+            }
+            
             CacheButtons();
             UpdateMultiplayerState();
             RestoreSinglePlayerLayout();
+
+            Debug.Log($"[FailPause] OnEnable - isMultiplayer={_isMultiplayer}, isHost={_isHost}");
 
             if (_isMultiplayer)
             {
@@ -136,23 +146,27 @@ namespace YARG.Gameplay.HUD
         {
             if (_buttonsCached)
             {
+                Debug.Log("[FailPause] CacheButtons - already cached");
                 return;
             }
 
             _buttonsCached = true;
+            Debug.Log("[FailPause] CacheButtons - caching buttons...");
 
             if (_separatorObject != null)
             {
                 _initialSeparatorState = _separatorObject.activeSelf;
             }
 
-            foreach (var button in GetComponentsInChildren<Button>(true))
+            foreach (var button in GetComponentsInChildren<NavigatableButton>(true))
             {
+                Debug.Log($"[FailPause] Found button: '{button.gameObject.name}'");
                 switch (button.gameObject.name)
                 {
                     case "Restart":
                         _restartButton = button;
                         _initialRestartState = button.gameObject.activeSelf;
+                        Debug.Log("[FailPause] Cached Restart button");
                         break;
                     case "Enable No Fail":
                         _enableNoFailButton = button;
@@ -162,6 +176,7 @@ namespace YARG.Gameplay.HUD
                         {
                             _defaultEnableNoFailLabel = _enableNoFailLabel.text;
                         }
+                        Debug.Log("[FailPause] Cached Enable No Fail button");
                         break;
                     case "Back to Library":
                         _backToLibraryButton = button;
@@ -170,6 +185,7 @@ namespace YARG.Gameplay.HUD
                         {
                             _defaultBackToLibraryLabel = _backToLibraryLabel.text;
                         }
+                        Debug.Log("[FailPause] Cached Back to Library button");
                         break;
                     case "Practice Mode":
                         _practiceModeButton = button;
@@ -179,6 +195,7 @@ namespace YARG.Gameplay.HUD
                         {
                             _defaultPracticeModeLabel = _practiceModeLabel.text;
                         }
+                        Debug.Log("[FailPause] Cached Practice Mode button");
                         break;
                 }
             }
@@ -191,13 +208,23 @@ namespace YARG.Gameplay.HUD
                     _defaultBackToLibraryLabel = _backToLibraryLabel.text;
                 }
             }
+            
+            Debug.Log($"[FailPause] CacheButtons complete - restart={_restartButton != null}, enableNoFail={_enableNoFailButton != null}, backToLib={_backToLibraryButton != null}, practice={_practiceModeButton != null}");
         }
 
         private void UpdateMultiplayerState()
         {
-            var manager = YargNetworkManager.Instance;
-            _isMultiplayer = manager != null && manager.isNetworkActive;
-            _isHost = _isMultiplayer && manager != null && manager.LocalUserIsHost();
+            // Check for multiplayer using multiple methods for reliability
+            var networkService = NetworkingServiceFactory.Instance;
+            bool networkActive = networkService != null && networkService.IsNetworkActive;
+            
+            // Also check if we have the multiplayer sync component (more reliable during gameplay)
+            var multiplayerSync = GameManager != null ? GameManager.GetComponent<MultiplayerGameplaySync>() : null;
+            
+            _isMultiplayer = networkActive || multiplayerSync != null;
+            _isHost = _isMultiplayer && networkService != null && networkService.IsHosting;
+            
+            Debug.Log($"[FailPause] UpdateMultiplayerState - networkActive={networkActive}, hasSync={multiplayerSync != null}, _isMultiplayer={_isMultiplayer}, _isHost={_isHost}");
         }
 
         private void RestoreSinglePlayerLayout()
@@ -245,6 +272,9 @@ namespace YARG.Gameplay.HUD
 
         private void ApplyMultiplayerLayout()
         {
+            Debug.Log($"[FailPause] ApplyMultiplayerLayout - isHost={_isHost}, restartBtn={_restartButton != null}, enableNoFailBtn={_enableNoFailButton != null}, backToLibBtn={_backToLibraryButton != null}, practiceModeBtn={_practiceModeButton != null}");
+            
+            // Hide separator and single-player-only options in multiplayer
             if (_separatorObject != null)
             {
                 _separatorObject.SetActive(false);
@@ -252,19 +282,30 @@ namespace YARG.Gameplay.HUD
 
             if (_enableNoFailButton != null)
             {
+                Debug.Log("[FailPause] Hiding Enable No Fail button");
                 _enableNoFailButton.gameObject.SetActive(false);
             }
 
             if (_practiceModeButton != null)
             {
+                Debug.Log("[FailPause] Hiding Practice Mode button");
                 _practiceModeButton.gameObject.SetActive(false);
             }
 
             if (_isHost)
             {
+                // Host sees: Restart + Back to Library
+                // Both actions sync to all clients
                 if (_restartButton != null)
                 {
+                    Debug.Log("[FailPause] Host: Showing Restart button");
                     _restartButton.gameObject.SetActive(true);
+                }
+
+                if (_backToLibraryButton != null)
+                {
+                    Debug.Log("[FailPause] Host: Showing Back to Library button");
+                    _backToLibraryButton.gameObject.SetActive(true);
                 }
 
                 if (_backToLibraryLabel != null && !string.IsNullOrEmpty(_defaultBackToLibraryLabel))
@@ -274,13 +315,17 @@ namespace YARG.Gameplay.HUD
             }
             else
             {
+                // Client sees ONLY: Leave Lobby
+                // Hide everything except the back to library button (repurposed as Leave Lobby)
                 if (_restartButton != null)
                 {
+                    Debug.Log("[FailPause] Client: Hiding Restart button");
                     _restartButton.gameObject.SetActive(false);
                 }
 
                 if (_backToLibraryButton != null)
                 {
+                    Debug.Log("[FailPause] Client: Showing Leave Lobby button");
                     _backToLibraryButton.gameObject.SetActive(true);
                 }
 
@@ -298,10 +343,11 @@ namespace YARG.Gameplay.HUD
                 return;
             }
 
-            var manager = YargNetworkManager.Instance;
-            if (manager != null)
+            var networkService = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
+            if (networkService != null)
             {
-                manager.RestartMultiplayerGameplay();
+                // Use unified RestartGameplay - works for both in-game hosting and dedicated servers
+                networkService.RestartGameplay();
             }
 
             PauseMenuManager.Restart();
@@ -314,16 +360,20 @@ namespace YARG.Gameplay.HUD
                 return;
             }
 
-            YargNetworkManager.SetMenuNavigationAfterSceneLoad(
+            var networkService = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
+            if (networkService != null)
+            {
+                // Use unified host action methods - works for both in-game hosting and dedicated servers
+                networkService.QuitToLibrary();
+                networkService.NavigateToMusicLibrary();
+            }
+            
+            // Set up proper menu navigation stack so back button works correctly
+            // Stack will be: MainMenu > OnlineMultiplayer > LobbyRoom > MusicLibrary
+            Networking.Abstraction.MenuNavigationHelper.SetMenuNavigationAfterSceneLoad(
                 Menu.MenuManager.Menu.OnlineMultiplayer,
                 Menu.MenuManager.Menu.LobbyRoom,
                 Menu.MenuManager.Menu.MusicLibrary);
-
-            var manager = YargNetworkManager.Instance;
-            if (manager != null)
-            {
-                manager.QuitMultiplayerGameplay();
-            }
 
             PauseMenuManager.Quit();
         }
@@ -344,7 +394,7 @@ namespace YARG.Gameplay.HUD
 
             var dialog = dialogManager.ShowMessage(
                 "Leave Lobby?",
-                "Are you sure you want to leave the lobby? All players will be returned to the music library.");
+                "Are you sure you want to leave the lobby?");
 
             dialog.ClearButtons();
             dialog.AddDialogButton("Cancel", MenuData.Colors.BrightButton, () => dialogManager.ClearDialog());
@@ -357,11 +407,14 @@ namespace YARG.Gameplay.HUD
 
         private void ExecuteClientLeaveLobby()
         {
-            var manager = YargNetworkManager.Instance;
-            if (manager != null)
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null)
             {
-                manager.LeaveLobby();
+                networkService.LeaveLobby();
             }
+            
+            // Navigate back to the main menu after leaving the lobby
+            PauseMenuManager.Quit();
         }
     }
 }

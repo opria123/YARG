@@ -69,7 +69,7 @@ namespace YARG.Menu
             PushMenu(Menu.MainMenu);
 
             // Check if there's a menu navigation target from multiplayer (host quitting song)
-            var targetMenus = Networking.YargNetworkManager.GetAndClearMenuNavigationAfterSceneLoad();
+            var targetMenus = Networking.Abstraction.MenuNavigationHelper.GetAndClearMenuNavigationAfterSceneLoad();
             if (targetMenus.Count > 0)
             {
                 Debug.Log($"[MenuManager] Navigating to {string.Join(" > ", targetMenus)} after scene load (from multiplayer)");

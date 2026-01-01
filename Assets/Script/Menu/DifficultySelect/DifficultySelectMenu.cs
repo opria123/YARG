@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using Mirror;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
@@ -16,9 +15,11 @@ using YARG.Core.Utility;
 using YARG.Helpers.Extensions;
 using YARG.Localization;
 using YARG.Menu.Data;
+using YARG.Menu.Multiplayer;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Networking.Abstraction;
+using YARG.Networking.Gameplay;
 using YARG.Player;
 using YARG.Song;
 
@@ -77,7 +78,7 @@ namespace YARG.Menu.DifficultySelect
         [SerializeField]
         private GameObject _songQueueEntryPrefab;
 
-        private bool _pendingGameplayStart;
+        // NOTE: _pendingGameplayStart removed - auto-start is handled by the networking adapter
 
         [Space]
         [SerializeField]
@@ -116,22 +117,22 @@ namespace YARG.Menu.DifficultySelect
         private int _maxHarmonyIndex = 3;
 
         private readonly List<ModifierItem> _modifierItems = new();
-        private readonly Dictionary<Networking.NetworkPlayerData, MultiplayerPlayerEntry> _playerEntries = new();
+        private readonly Dictionary<NetworkPlayerData, MultiplayerPlayerEntry> _playerEntries = new();
         private readonly List<SongQueueEntry> _songQueueEntries = new();
 
         private List<SongEntry> _songList;
 
         private YargPlayer CurrentPlayer => PlayerContainer.Players[_playerIndex];
         
-        private Multiplayer.MultiplayerDifficultySync _multiplayerSync;
+        private MultiplayerDifficultySync _multiplayerSync;
 
         private void OnEnable()
         {
             // Get or create multiplayer sync component
-            _multiplayerSync = GetComponent<Multiplayer.MultiplayerDifficultySync>();
+            _multiplayerSync = GetComponent<MultiplayerDifficultySync>();
             if (_multiplayerSync == null)
             {
-                _multiplayerSync = gameObject.AddComponent<Multiplayer.MultiplayerDifficultySync>();
+                _multiplayerSync = gameObject.AddComponent<MultiplayerDifficultySync>();
             }
             
             _multiplayerSync.ForceRefreshNetworkState();
@@ -153,12 +154,6 @@ namespace YARG.Menu.DifficultySelect
             
             // Subscribe to LiteNet adapter events
             SubscribeToLiteNetEvents();
-            
-            // Subscribe to player left event to update player list (Mirror)
-            if (Networking.YargNetworkManager.Instance != null)
-            {
-                Networking.YargNetworkManager.Instance.OnPlayerLeft += OnPlayerLeftLobby;
-            }
             
             // Update multiplayer player list with delay to allow NetworkPlayerData objects to spawn
             if (NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive)
@@ -197,6 +192,22 @@ namespace YARG.Menu.DifficultySelect
             else
             {
                 _songList = new List<SongEntry> { GlobalVariables.State.CurrentSong };
+            }
+
+            // Reset ready state for new song - this ensures players can re-select instruments
+            // between songs in a setlist (especially important after sitting out)
+            _readyPlayerIndices.Clear();
+            
+            // Reset sitting out state for all players so they can re-select for this song
+            foreach (var player in PlayerContainer.Players)
+            {
+                player.SittingOut = false;
+            }
+            
+            // If modifiers are not allowed in this multiplayer session, clear all modifiers
+            if (MultiplayerGameplaySettings.Instance != null && !MultiplayerGameplaySettings.Instance.AllowModifiers)
+            {
+                ClearAllPlayerModifiers();
             }
 
             // ChangePlayer(0) will update for the current player
@@ -318,16 +329,20 @@ namespace YARG.Menu.DifficultySelect
                 else if (_playerIndex == 0)
                 {
                     // Check if in multiplayer
-                    var networkManager = Networking.YargNetworkManager.Instance;
-                    if (networkManager != null && networkManager.isNetworkActive)
+                    var networkService = NetworkingServiceFactory.Instance;
+                    if (networkService != null && networkService.IsNetworkActive)
                     {
                         // Host can go back (takes everyone with them), client shows confirmation
-                        if (networkManager.LocalUserIsHost())
+                        if (networkService.IsHosting)
                         {
                             Debug.Log($"[DifficultySelectMenu] Host pressing back - Menu stack count: {MenuManager.Instance.MenuStackCount}");
 
                             // Sync menu navigation to all clients first
-                            networkManager.RequestSyncMenuNavigation(popMenu: true);
+                            var liteNetAdapter = networkService as LiteNetNetworkingAdapter;
+                            if (liteNetAdapter != null)
+                            {
+                                liteNetAdapter.BroadcastPopMenu();
+                            }
 
                             Debug.Log("[DifficultySelectMenu] Host synced, now navigating locally");
 
@@ -477,9 +492,14 @@ namespace YARG.Menu.DifficultySelect
                 }
 
                 // Only allow vocal modifiers to be selected once (so they don't conflict)
-                if (player.Profile.GameMode != GameMode.Vocals ||
+                // Also hide modifiers menu if modifiers are not allowed in this multiplayer session
+                bool modifiersAllowed = MultiplayerGameplaySettings.Instance == null || 
+                                        MultiplayerGameplaySettings.Instance.AllowModifiers;
+                
+                if (modifiersAllowed &&
+                    (player.Profile.GameMode != GameMode.Vocals ||
                     _vocalModifierSelectIndex == -1 ||
-                    _vocalModifierSelectIndex == _playerIndex)
+                    _vocalModifierSelectIndex == _playerIndex))
                 {
                     // Create modifiers body text
                     string modifierText = "";
@@ -544,8 +564,19 @@ namespace YARG.Menu.DifficultySelect
                 });
             }
 
-            // Only show if there is more than one play, only if there is instruments available
-            if (_possibleInstruments.Count <= 0 || PlayerContainer.Players.Count != 1)
+            // Check if we're in online multiplayer
+            bool isOnlineMultiplayer = NetworkingServiceFactory.Instance != null && 
+                                       NetworkingServiceFactory.Instance.IsNetworkActive;
+            
+            // Show Sit Out button if:
+            // - There are no instruments available for this song (must sit out), OR
+            // - There are multiple local players, OR
+            // - We're in online multiplayer (can choose to sit out any song)
+            bool showSitOut = _possibleInstruments.Count <= 0 || 
+                              PlayerContainer.Players.Count > 1 || 
+                              isOnlineMultiplayer;
+            
+            if (showSitOut)
             {
                 // Sit out button
                 CreateItem(LocalizeHeader("SitOut"), _possibleInstruments.Count <= 0, _difficultyItemSmallRedPrefab, () =>
@@ -558,9 +589,25 @@ namespace YARG.Menu.DifficultySelect
                     }
 
                     player.SittingOut = true;
+                    
+                    // In online multiplayer, notify network that this player is sitting out (ready but not playing)
+                    if (isOnlineMultiplayer)
+                    {
+                        int currentIndex = _playerIndex;
+                        SetLocalPlayerReadyState(currentIndex, true, sittingOut: true);
+                    }
+                    
                     ChangePlayer(1);
                 });
-
+            }
+            
+            // Show Disconnect button only in local/offline mode (not online multiplayer)
+            // and only if there are multiple local players or no instruments
+            bool showDisconnect = !isOnlineMultiplayer && 
+                                  (_possibleInstruments.Count <= 0 || PlayerContainer.Players.Count > 1);
+            
+            if (showDisconnect)
+            {
                 // Disconnect button
                 CreateItem(LocalizeHeader("Disconnect"), _possibleInstruments.Count <= 0, _difficultyItemSmallRedPrefab, () =>
                 {
@@ -629,6 +676,14 @@ namespace YARG.Menu.DifficultySelect
 
         private void CreateModifierMenu()
         {
+            // Safety check: if modifiers are not allowed, go back to main menu
+            if (MultiplayerGameplaySettings.Instance != null && !MultiplayerGameplaySettings.Instance.AllowModifiers)
+            {
+                _menuState = State.Main;
+                UpdateForPlayer();
+                return;
+            }
+            
             var profile = CurrentPlayer.Profile;
 
             _modifierItems.Clear();
@@ -675,6 +730,20 @@ namespace YARG.Menu.DifficultySelect
                     _menuState = State.Main;
                     UpdateForPlayer();
                 });
+            }
+        }
+        
+        /// <summary>
+        /// Clears all modifiers for all players. Used when modifiers are not allowed in multiplayer.
+        /// </summary>
+        private void ClearAllPlayerModifiers()
+        {
+            foreach (var player in PlayerContainer.Players)
+            {
+                // Remove all possible modifiers for this player's game mode
+                var (possible, excusable) = player.Profile.GameMode.PossibleModifiers(player.Profile.CurrentInstrument);
+                var allModifiers = possible | excusable;
+                player.Profile.RemoveModifiers(allModifiers);
             }
         }
 
@@ -794,7 +863,13 @@ namespace YARG.Menu.DifficultySelect
             _songSpeed = speed;
             GlobalVariables.State.SongSpeed = speed;
 
-            if (_multiplayerSync != null)
+            // Check if we're actually in a multiplayer session (host or connected client)
+            var networkService = NetworkingServiceFactory.Instance;
+            bool isInMultiplayerSession = networkService != null && 
+                                          networkService.IsNetworkActive && 
+                                          (networkService.IsHosting || networkService.IsConnected);
+            
+            if (_multiplayerSync != null && isInMultiplayerSession)
             {
                 _multiplayerSync.OnAllLocalPlayersReady();
             }
@@ -839,26 +914,40 @@ namespace YARG.Menu.DifficultySelect
             var song = GlobalVariables.State.CurrentSong;
 
             // Get the possible instruments for this show and player
-            // TODO: We should probably allow players to select instruments that are not in
-            //  all songs and have them sit out songs that don't have that instrument
-            // TODO: We should also let Ekit users choose an option that switches them between
-            // each song's native drum format
+            // In online multiplayer setlists, difficulty select shows per-song, so only check current song
+            // In local/offline mode, we require the instrument to be in ALL songs (original behavior)
             _possibleInstruments.Clear();
-            var allowedInstruments = profile.GameMode.PossibleInstrumentsForSong(GlobalVariables.State.CurrentSong);
+            var allowedInstruments = profile.GameMode.PossibleInstrumentsForSong(song);
+            
+            // Check if we're in online multiplayer mode
+            bool isOnlineMultiplayer = NetworkingServiceFactory.Instance != null && 
+                                       NetworkingServiceFactory.Instance.IsNetworkActive;
+            bool isShowMode = GlobalVariables.State.PlayingAShow;
 
             foreach (var instrument in allowedInstruments)
             {
-                bool invalidInstrument = false;
-                foreach (var showSong in _songList)
+                bool validInstrument;
+                
+                if (isOnlineMultiplayer && isShowMode)
                 {
-                    if (!HasPlayableInstrument(showSong, instrument))
+                    // Online multiplayer setlist: only check current song (difficulty select shows per-song)
+                    validInstrument = HasPlayableInstrument(song, instrument);
+                }
+                else
+                {
+                    // Local/offline mode: require instrument in ALL songs (original behavior)
+                    validInstrument = true;
+                    foreach (var showSong in _songList)
                     {
-                        invalidInstrument = true;
-                        break;
+                        if (!HasPlayableInstrument(showSong, instrument))
+                        {
+                            validInstrument = false;
+                            break;
+                        }
                     }
                 }
 
-                if (!invalidInstrument)
+                if (validInstrument)
                 {
                     _possibleInstruments.Add(instrument);
                 }
@@ -869,10 +958,20 @@ namespace YARG.Menu.DifficultySelect
                 profile.CurrentInstrument = _possibleInstruments[0];
             }
 
-            _maxHarmonyIndex = song.VocalsCount;
-            foreach (var showsong in GlobalVariables.State.ShowSongs)
+            // Harmony index calculation
+            // In online multiplayer, use current song's harmony count (per-song selection)
+            // In local mode, use minimum (most restrictive - original behavior)
+            if (isOnlineMultiplayer && isShowMode)
             {
-                _maxHarmonyIndex = Mathf.Min(_maxHarmonyIndex, showsong.VocalsCount);
+                _maxHarmonyIndex = song.VocalsCount;
+            }
+            else
+            {
+                _maxHarmonyIndex = song.VocalsCount;
+                foreach (var showsong in GlobalVariables.State.ShowSongs)
+                {
+                    _maxHarmonyIndex = Mathf.Min(_maxHarmonyIndex, showsong.VocalsCount);
+                }
             }
 
             if (profile.HarmonyIndex >= _maxHarmonyIndex)
@@ -894,27 +993,44 @@ namespace YARG.Menu.DifficultySelect
             _possibleDifficulties.Clear();
 
             var profile = CurrentPlayer.Profile;
+            var song = GlobalVariables.State.CurrentSong;
+            
+            // Check if we're in online multiplayer setlist mode
+            bool isOnlineMultiplayer = NetworkingServiceFactory.Instance != null && 
+                                       NetworkingServiceFactory.Instance.IsNetworkActive;
+            bool isShowMode = GlobalVariables.State.PlayingAShow;
 
             // Get the possible difficulties for the player's instrument in the song
             foreach (var difficulty in EnumExtensions<Difficulty>.Values)
             {
-                bool invalidDifficulty = false;
-                foreach (var showsong in _songList)
+                bool validDifficulty;
+                
+                if (isOnlineMultiplayer && isShowMode)
                 {
-                    if (!HasPlayableDifficulty(showsong, profile.CurrentInstrument, difficulty))
+                    // Online multiplayer setlist: only check current song (difficulty select shows per-song)
+                    validDifficulty = HasPlayableDifficulty(song, profile.CurrentInstrument, difficulty);
+                }
+                else
+                {
+                    // Local/offline mode: require difficulty in ALL songs (original behavior)
+                    validDifficulty = true;
+                    foreach (var showsong in _songList)
                     {
-                        invalidDifficulty = true;
-                        break;
+                        if (!HasPlayableDifficulty(showsong, profile.CurrentInstrument, difficulty))
+                        {
+                            validDifficulty = false;
+                            break;
+                        }
                     }
                 }
 
-                if (!invalidDifficulty)
+                if (validDifficulty)
                 {
                     _possibleDifficulties.Add(difficulty);
                 }
             }
 
-            // TODO: Handle difficulty fallback better in play a show mode
+            // Handle difficulty fallback
 
             var diff = (int) profile.DifficultyFallback;
             while (diff >= (int) Difficulty.Beginner && !_possibleDifficulties.Contains((Difficulty) diff))
@@ -1004,31 +1120,38 @@ namespace YARG.Menu.DifficultySelect
             }
         }
 
-        private void SetLocalPlayerReadyState(int playerIndex, bool ready)
+        private void SetLocalPlayerReadyState(int playerIndex, bool ready, bool sittingOut = false)
         {
             // Send ready state to network
             var networkService = NetworkingServiceFactory.Instance;
             if (networkService != null && networkService.IsNetworkActive)
             {
-                // Try LiteNet first
                 if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
                 {
-                    liteNetAdapter.SetPlayerReady(ready);
-                    Debug.Log($"[DifficultySelect] Set local player {playerIndex} ready state to: {ready} (LiteNet)");
-                }
-                else
-                {
-                    // Fall back to Mirror
-                    var localNetworkPlayer = GetLocalNetworkPlayer(playerIndex);
-                    if (localNetworkPlayer != null)
+                    // Get the player name for this specific index
+                    string playerName = null;
+                    if (playerIndex >= 0 && playerIndex < PlayerContainer.Players.Count)
                     {
-                        localNetworkPlayer.CmdSetReady(ready);
-                        Debug.Log($"[DifficultySelect] Set local player {playerIndex} ready state to: {ready} (Mirror)");
+                        var player = PlayerContainer.Players[playerIndex];
+                        playerName = player?.Profile?.Name;
+                    }
+                    
+                    if (!string.IsNullOrEmpty(playerName))
+                    {
+                        // Use the overload that specifies which player by name
+                        liteNetAdapter.SetPlayerReady(ready, playerName, sittingOut);
+                        Debug.Log($"[DifficultySelect] Set local player '{playerName}' (index {playerIndex}) ready state to: {ready}, sittingOut: {sittingOut}");
                     }
                     else
                     {
-                        Debug.LogWarning($"[DifficultySelect] Could not find local network player for index {playerIndex} to set ready state.");
+                        // Fallback to old behavior
+                        liteNetAdapter.SetPlayerReady(ready, sittingOut);
+                        Debug.Log($"[DifficultySelect] Set local player {playerIndex} ready state to: {ready}, sittingOut: {sittingOut} (using default)");
                     }
+                }
+                else
+                {
+                    Debug.LogWarning($"[DifficultySelect] Network service is not a LiteNet adapter, cannot set ready state.");
                 }
             }
 
@@ -1346,12 +1469,6 @@ namespace YARG.Menu.DifficultySelect
                 return;
             }
             
-            // Unsubscribe from player left event
-            if (Networking.YargNetworkManager.Instance != null)
-            {
-                Networking.YargNetworkManager.Instance.OnPlayerLeft -= OnPlayerLeftLobby;
-            }
-            
             var allPlayers = GetAllNetworkPlayers();
             foreach (var player in allPlayers)
             {
@@ -1374,6 +1491,15 @@ namespace YARG.Menu.DifficultySelect
                 liteNetAdapter.OnPlayerLeft += OnLiteNetPlayerLeft;
                 liteNetAdapter.OnAllPlayersReady += OnLiteNetAllPlayersReady;
                 liteNetAdapter.OnStartGameplay += OnLiteNetStartGameplay;
+                
+                // Enable auto-start when all players are ready (host only)
+                // This is handled centrally in the networking adapter, eliminating duplicate code
+                if (liteNetAdapter.IsHosting)
+                {
+                    liteNetAdapter.SetAutoStartOnAllReady(true);
+                    Debug.Log("[DifficultySelectMenu] Enabled auto-start on all ready (host)");
+                }
+                
                 Debug.Log("[DifficultySelectMenu] Subscribed to LiteNet events");
             }
         }
@@ -1388,6 +1514,9 @@ namespace YARG.Menu.DifficultySelect
                 liteNetAdapter.OnPlayerLeft -= OnLiteNetPlayerLeft;
                 liteNetAdapter.OnAllPlayersReady -= OnLiteNetAllPlayersReady;
                 liteNetAdapter.OnStartGameplay -= OnLiteNetStartGameplay;
+                
+                // Disable auto-start when leaving the menu (to avoid starting from other screens)
+                liteNetAdapter.SetAutoStartOnAllReady(false);
             }
         }
         
@@ -1403,18 +1532,18 @@ namespace YARG.Menu.DifficultySelect
                 UpdateForPlayer();
             }
             
-            // Check if all players are ready and auto-start
-            CheckAndAutoStart();
+            // Auto-start is now handled centrally by the networking adapter
+            // See LiteNetNetworkingAdapter.SetAutoStartOnAllReady()
         }
         
-        private void OnLiteNetPlayerJoined(Networking.NetworkPlayerData player)
+        private void OnLiteNetPlayerJoined(NetworkPlayerData player)
         {
             Debug.Log($"[DifficultySelectMenu] LiteNet: Player joined: {player?.PlayerName}");
             UpdateMultiplayerPlayerList();
             UpdateReadyStatus();
         }
         
-        private void OnLiteNetPlayerLeft(Networking.NetworkPlayerData player)
+        private void OnLiteNetPlayerLeft(NetworkPlayerData player)
         {
             Debug.Log($"[DifficultySelectMenu] LiteNet: Player left: {player?.PlayerName}");
             UpdateMultiplayerPlayerList();
@@ -1433,7 +1562,7 @@ namespace YARG.Menu.DifficultySelect
             // The LiteNet adapter handles the scene load
         }
         
-        private void OnPlayerLeftLobby(Networking.NetworkPlayerData player)
+        private void OnPlayerLeftLobby(NetworkPlayerData player)
         {
             Debug.Log($"[DifficultySelectMenu] Player left: {player?.PlayerName}");
             UpdateMultiplayerPlayerList();
@@ -1451,8 +1580,8 @@ namespace YARG.Menu.DifficultySelect
                 UpdateForPlayer();
             }
             
-            // Check if all players are ready and auto-start
-            CheckAndAutoStart();
+            // Auto-start is now handled centrally by the networking adapter
+            // See LiteNetNetworkingAdapter.SetAutoStartOnAllReady()
         }
         
         private void OnNetworkPlayerInstrumentChanged(int instrument, int difficulty)
@@ -1465,72 +1594,9 @@ namespace YARG.Menu.DifficultySelect
             UpdateMultiplayerPlayerList();
         }
         
-        private void CheckAndAutoStart()
-        {
-            var networkService = NetworkingServiceFactory.Instance;
-            if (networkService == null || !networkService.IsNetworkActive)
-            {
-                return;
-            }
-            
-            // Only check on host
-            if (!networkService.IsHosting)
-            {
-                _pendingGameplayStart = false;
-                return;
-            }
-            
-            // Check if all players are ready
-            if (AreAllNetworkPlayersReady())
-            {
-                if (_pendingGameplayStart)
-                {
-                    return;
-                }
-
-                Debug.Log("[DifficultySelect] All players ready - auto-starting gameplay");
-                _pendingGameplayStart = true;
-                
-                // Small delay to show "All players ready!" message
-                StartCoroutine(AutoStartGameplayAfterDelay());
-            }
-            else
-            {
-                _pendingGameplayStart = false;
-            }
-        }
-        
-        private System.Collections.IEnumerator AutoStartGameplayAfterDelay()
-        {
-            yield return new WaitForSeconds(1.0f);
-            
-            // Check if using LiteNet
-            var networkService = NetworkingServiceFactory.Instance;
-            if (networkService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsHosting)
-            {
-                Debug.Log("[DifficultySelect] Starting gameplay for all players via LiteNet");
-                liteNetAdapter.StartGameplayForAll();
-                yield break;
-            }
-            
-            // Fall back to Mirror
-            var manager = Networking.YargNetworkManager.Instance;
-            if (manager == null)
-            {
-                _pendingGameplayStart = false;
-                yield break;
-            }
-
-            if (NetworkServer.active)
-            {
-                manager.StartMultiplayerGameplay();
-            }
-            else if (!RequestServerStartGameplay())
-            {
-                Debug.LogWarning("[DifficultySelect] Failed to relay gameplay start request to server");
-                _pendingGameplayStart = false;
-            }
-        }
+        // NOTE: CheckAndAutoStart() and AutoStartGameplayAfterDelay() have been removed.
+        // Auto-start when all players are ready is now handled centrally by the networking adapter.
+        // See LiteNetNetworkingAdapter.SetAutoStartOnAllReady() - enabled in SubscribeToLiteNetEvents().
         
         private System.Collections.IEnumerator DelayedUpdateMultiplayerPlayerList()
         {
@@ -1561,15 +1627,16 @@ namespace YARG.Menu.DifficultySelect
             _multiplayerPlayerListContainer.SetActive(true);
             
             var allPlayers = GetAllNetworkPlayers();
-            Debug.Log($"[DifficultySelectMenu] Found {allPlayers.Count} players in network");
-            var currentPlayers = new HashSet<Networking.NetworkPlayerData>(allPlayers.Where(p => p != null));
+            Debug.Log($"[DifficultySelectMenu] Found {allPlayers.Count} players in network, currently have {_playerEntries.Count} entries");
+            var currentPlayers = new HashSet<NetworkPlayerData>(allPlayers.Where(p => p != null));
             
             // Remove entries for players that left
-            var playersToRemove = new List<Networking.NetworkPlayerData>();
+            var playersToRemove = new List<NetworkPlayerData>();
             foreach (var kvp in _playerEntries)
             {
                 if (!currentPlayers.Contains(kvp.Key))
                 {
+                    Debug.Log($"[DifficultySelectMenu] Removing entry for player: {kvp.Key?.PlayerName ?? "null"}");
                     playersToRemove.Add(kvp.Key);
                     if (kvp.Value != null && kvp.Value.gameObject != null)
                     {
@@ -1581,6 +1648,7 @@ namespace YARG.Menu.DifficultySelect
             foreach (var player in playersToRemove)
             {
                 _playerEntries.Remove(player);
+                Debug.Log($"[DifficultySelectMenu] Removed entry, now have {_playerEntries.Count} entries");
             }
             
             // Add entries for new players
@@ -1798,7 +1866,7 @@ namespace YARG.Menu.DifficultySelect
             Debug.Log($"[DifficultySelectMenu] Entry created and added - Total entries: {_songQueueEntries.Count}, Entry active: {entryObject.activeSelf}, In hierarchy: {entryObject.transform.parent != null}");
         }
         
-        private void CreateMultiplayerPlayerEntry(Networking.NetworkPlayerData player)
+        private void CreateMultiplayerPlayerEntry(NetworkPlayerData player)
         {
             if (_multiplayerPlayerListContent == null || player == null)
             {
@@ -1964,41 +2032,22 @@ namespace YARG.Menu.DifficultySelect
                 Debug.LogError($"[DifficultySelectMenu] Failed to create MultiplayerPlayerEntry component for {player.PlayerName}!");
             }
         }
-        
-        private Networking.NetworkPlayerData GetLocalNetworkPlayer(int playerIndex)
-        {
-            var networkService = NetworkingServiceFactory.Instance;
-            if (networkService == null || !networkService.IsNetworkActive)
-            {
-                return null;
-            }
-            
-            var allPlayers = GetAllNetworkPlayers();
-            foreach (var player in allPlayers)
-            {
-                if (player != null && player.IsLocalUser && player.PlayerIndex == playerIndex)
-                {
-                    return player;
-                }
-            }
-            
-            return null;
-        }
 
         private bool RequestServerStartGameplay()
         {
-            var manager = Networking.YargNetworkManager.Instance;
-            if (manager == null)
+            var networkService = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
+            if (networkService == null)
             {
                 return false;
             }
 
-            foreach (var player in manager.GetAllPlayers())
+            foreach (var player in networkService.GetAllPlayers())
             {
                 if (player != null && player.IsLocalUser && player.IsHost)
                 {
-                    Debug.Log("[DifficultySelect] Requesting dedicated server to start gameplay");
-                    player.CmdRequestStartGameplay();
+                    Debug.Log("[DifficultySelect] Requesting server to start gameplay");
+                    // For LiteNet, we use the StartGameplayForAll method
+                    networkService.StartGameplayForAll();
                     return true;
                 }
             }
@@ -2008,29 +2057,23 @@ namespace YARG.Menu.DifficultySelect
         }
         
         /// <summary>
-        /// Gets all network players from either Mirror or LiteNet depending on which is active.
+        /// Gets all network players from LiteNet.
         /// </summary>
-        private List<Networking.NetworkPlayerData> GetAllNetworkPlayers()
+        private List<NetworkPlayerData> GetAllNetworkPlayers()
         {
             var networkService = NetworkingServiceFactory.Instance;
             if (networkService == null || !networkService.IsNetworkActive)
             {
-                return new List<Networking.NetworkPlayerData>();
+                return new List<NetworkPlayerData>();
             }
             
-            // Try LiteNet first (if it's the active implementation)
+            // Use LiteNet
             if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
             {
                 return liteNetAdapter.GetAllPlayers();
             }
             
-            // Fall back to Mirror
-            if (Networking.YargNetworkManager.Instance != null)
-            {
-                return Networking.YargNetworkManager.Instance.GetAllPlayers();
-            }
-            
-            return new List<Networking.NetworkPlayerData>();
+            return new List<NetworkPlayerData>();
         }
         
         /// <summary>
@@ -2044,16 +2087,10 @@ namespace YARG.Menu.DifficultySelect
                 return false;
             }
             
-            // Try LiteNet first
+            // Use LiteNet
             if (networkService is LiteNetNetworkingAdapter liteNetAdapter)
             {
                 return liteNetAdapter.AreAllPlayersReady();
-            }
-            
-            // Fall back to Mirror
-            if (Networking.YargNetworkManager.Instance != null)
-            {
-                return Networking.YargNetworkManager.Instance.AreAllPlayersReady();
             }
             
             return false;

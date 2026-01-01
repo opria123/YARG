@@ -15,8 +15,6 @@ namespace YARG.Menu.MusicLibrary
 {
     public partial class MusicLibraryMenu
     {
-        private YARG.Multiplayer.MultiplayerShowPlaylist _multiplayerShowPlaylist;
-        
         // LiteNet setlist as a Playlist for compatibility
         private Playlist _liteNetPlaylist = new(true);
         private bool _subscribedToLiteNetSetlist = false;
@@ -25,9 +23,9 @@ namespace YARG.Menu.MusicLibrary
         {
             get
             {
-                // Check LiteNet first
+                // Check LiteNet networking
                 var networkingService = NetworkingServiceFactory.Instance;
-                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
                 {
                     // Subscribe to setlist updates if not already subscribed
                     if (!_subscribedToLiteNetSetlist)
@@ -46,33 +44,20 @@ namespace YARG.Menu.MusicLibrary
                     return _liteNetPlaylist;
                 }
                 
-                // In multiplayer (Mirror), use the networked playlist
-                if (_multiplayerShowPlaylist != null)
-                {
-                    return _multiplayerShowPlaylist.ShowPlaylist;
-                }
-                // Fallback to local playlist
+                // Fallback to local playlist (single player)
                 return _localShowPlaylist;
             }
             set
             {
                 var networkingService = NetworkingServiceFactory.Instance;
-                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
                 {
-                    // For LiteNet, we need to sync the playlist to the setlist
-                    // This is typically not needed since we manage setlist separately
+                    // For LiteNet, we manage setlist separately via API
                     UnityEngine.Debug.Log("[MusicLibraryMenu] Setting ShowPlaylist for LiteNet - syncing to setlist");
                     return;
                 }
                 
-                if (_multiplayerShowPlaylist != null)
-                {
-                    _multiplayerShowPlaylist.ShowPlaylist = value;
-                }
-                else
-                {
-                    _localShowPlaylist = value;
-                }
+                _localShowPlaylist = value;
             }
         }
         
@@ -118,75 +103,6 @@ namespace YARG.Menu.MusicLibrary
 
         private Playlist _localShowPlaylist = new(true);
 
-        private void OnMultiplayerPlaylistUpdated()
-        {
-            UnityEngine.Debug.Log($"[MusicLibraryMenu] OnPlaylistUpdated triggered - refreshing UI and navigation. Playlist count: {ShowPlaylist.Count}");
-            // Always refresh the view list when playlist changes
-            Refresh();
-            // Update navigation scheme since button options depend on playlist state
-            SetNavigationScheme(true);
-        }
-
-        private void EnsureMultiplayerShowPlaylist()
-        {
-            if (_multiplayerShowPlaylist == null && Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
-            {
-                // Get the spawned MultiplayerShowPlaylist from the NetworkManager
-                _multiplayerShowPlaylist = Networking.YargNetworkManager.Instance.MultiplayerShowPlaylist;
-                
-                if (_multiplayerShowPlaylist != null)
-                {
-                    // Subscribe to playlist updates
-                    _multiplayerShowPlaylist.OnPlaylistUpdated -= OnMultiplayerPlaylistUpdated;
-                    _multiplayerShowPlaylist.OnPlaylistUpdated += OnMultiplayerPlaylistUpdated;
-                    
-                    // Wait for initial sync on clients
-                    if (!Networking.YargNetworkManager.Instance.LocalUserIsHost() && !_multiplayerShowPlaylist.HasReceivedInitialSync)
-                    {
-                        UnityEngine.Debug.Log($"[MusicLibraryMenu] Client waiting for initial playlist sync...");
-                        StartCoroutine(WaitForInitialSync());
-                    }
-                    else
-                    {
-                        UnityEngine.Debug.Log($"[MusicLibraryMenu] MultiplayerShowPlaylist reference obtained. Current count: {_multiplayerShowPlaylist.ShowPlaylist.Count}");
-                    }
-                }
-                else
-                {
-                    UnityEngine.Debug.LogWarning("[MusicLibraryMenu] MultiplayerShowPlaylist not found - may not be spawned yet");
-                }
-            }
-            else if (_multiplayerShowPlaylist != null)
-            {
-                // Re-subscribe if we already have the reference (in case we navigated away and back)
-                _multiplayerShowPlaylist.OnPlaylistUpdated -= OnMultiplayerPlaylistUpdated;
-                _multiplayerShowPlaylist.OnPlaylistUpdated += OnMultiplayerPlaylistUpdated;
-                UnityEngine.Debug.Log($"[MusicLibraryMenu] Re-subscribed to playlist updates. Current count: {ShowPlaylist.Count}");
-            }
-        }
-
-        private System.Collections.IEnumerator WaitForInitialSync()
-        {
-            float timeout = 2f;
-            float elapsed = 0f;
-            
-            while (!_multiplayerShowPlaylist.HasReceivedInitialSync && elapsed < timeout)
-            {
-                yield return new UnityEngine.WaitForSeconds(0.1f);
-                elapsed += 0.1f;
-            }
-            
-            if (_multiplayerShowPlaylist.HasReceivedInitialSync)
-            {
-                UnityEngine.Debug.Log($"[MusicLibraryMenu] Initial sync received! Playlist count: {_multiplayerShowPlaylist.ShowPlaylist.Count}");
-                Refresh();
-            }
-            else
-            {
-                UnityEngine.Debug.LogWarning($"[MusicLibraryMenu] Timed out waiting for initial sync. Proceeding anyway.");
-            }
-        }
-
         // Helper methods for multiplayer show playlist management
         public void AddSongToMultiplayerShow(string songHash)
         {
@@ -205,9 +121,8 @@ namespace YARG.Menu.MusicLibrary
                 displayArtist = songList[0].Artist;
             }
             
-            // Try LiteNet first
             var networkingService = NetworkingServiceFactory.Instance;
-            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
             {
                 // Check if song is already in the setlist
                 if (liteNetAdapter.IsInSetlist(songHash))
@@ -218,26 +133,11 @@ namespace YARG.Menu.MusicLibrary
                 
                 UnityEngine.Debug.Log($"[MusicLibraryMenu] Adding song to LiteNet setlist: {displayName} by {displayArtist}");
                 liteNetAdapter.RequestAddToSetlist(songHash, playerName, displayName, displayArtist);
-                return;
-            }
-            
-            // Fall back to Mirror
-            EnsureMultiplayerShowPlaylist();
-            if (_multiplayerShowPlaylist != null)
-            {
-                // Check if song is already in the playlist
-                if (_multiplayerShowPlaylist.IsInPlaylist(songHash))
-                {
-                    UnityEngine.Debug.Log($"[MusicLibraryMenu] Song {songHash} already in playlist, skipping add");
-                    return;
-                }
-                
-                UnityEngine.Debug.Log($"[MusicLibraryMenu] Calling CmdAddSongToShow for hash: {songHash} from player: {playerName}");
-                _multiplayerShowPlaylist.CmdAddSongToShow(songHash, playerName, displayName, displayArtist);
             }
             else
             {
-                UnityEngine.Debug.LogError("[MusicLibraryMenu] Cannot add song - MultiplayerShowPlaylist is null and LiteNet is not active!");
+                // Single player - add to local playlist
+                ShowPlaylist.AddSong(hashWrapper);
             }
         }
 
@@ -258,48 +158,48 @@ namespace YARG.Menu.MusicLibrary
                 displayArtist = songList[0].Artist;
             }
             
-            // Try LiteNet first
             var networkingService = NetworkingServiceFactory.Instance;
-            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
             {
                 UnityEngine.Debug.Log($"[MusicLibraryMenu] Removing song from LiteNet setlist: {displayName}");
                 liteNetAdapter.RequestRemoveFromSetlist(songHash, playerName, displayName, displayArtist);
-                return;
             }
-            
-            // Fall back to Mirror
-            EnsureMultiplayerShowPlaylist();
-            if (_multiplayerShowPlaylist != null)
+            else
             {
-                _multiplayerShowPlaylist.CmdRemoveSongFromShow(songHash, playerName, displayName, displayArtist);
+                // Single player - remove from local playlist
+                ShowPlaylist.RemoveSong(hashWrapper);
             }
         }
 
         public void StartMultiplayerShow()
         {
-            // Try LiteNet first
             var networkingService = NetworkingServiceFactory.Instance;
-            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
             {
-                // Only host can start the show
-                if (liteNetAdapter.IsHosting)
+                // Use the unified HasHostAuthority check and StartShow method
+                // This works the same for in-game hosting and dedicated server designated hosts
+                if (liteNetAdapter.HasHostAuthority)
                 {
-                    UnityEngine.Debug.Log("[MusicLibraryMenu] Starting show via LiteNet");
+                    UnityEngine.Debug.Log("[MusicLibraryMenu] Starting show via unified StartShow (host/designated host)");
                     liteNetAdapter.StartShow();
                 }
                 else
                 {
                     UnityEngine.Debug.Log("[MusicLibraryMenu] Only the host can start the show");
+                    ToastManager.ToastWarning("Only the host can start the show");
                 }
-                return;
             }
-            
-            // Fall back to Mirror
-            EnsureMultiplayerShowPlaylist();
-            var networkManager = Networking.YargNetworkManager.Instance;
-            if (_multiplayerShowPlaylist != null && networkManager != null && networkManager.LocalUserIsHost())
+            else
             {
-                _multiplayerShowPlaylist.CmdStartShow();
+                // Single player mode - start directly
+                if (ShowPlaylist.Count > 0)
+                {
+                    GlobalVariables.State.PlayingAShow = true;
+                    GlobalVariables.State.ShowSongs = ShowPlaylist.ToList();
+                    GlobalVariables.State.CurrentSong = GlobalVariables.State.ShowSongs.First();
+                    GlobalVariables.State.ShowIndex = 0;
+                    MenuManager.Instance.PushMenu(MenuManager.Menu.DifficultySelect);
+                }
             }
         }
 
@@ -427,15 +327,12 @@ namespace YARG.Menu.MusicLibrary
             _moreOptionsActivationTimer = MORE_OPTIONS_ACTIVATION_DELAY;
             
             // Check if we're the host (only host can start the show)
+            // Use HasHostAuthority for unified host detection across in-game hosting and dedicated servers
             bool isHost = false;
             var networkingService = NetworkingServiceFactory.Instance;
-            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
             {
-                isHost = liteNetAdapter.IsHosting;
-            }
-            else if (Networking.YargNetworkManager.Instance != null && Networking.YargNetworkManager.Instance.isNetworkActive)
-            {
-                isHost = Networking.YargNetworkManager.Instance.LocalUserIsHost();
+                isHost = liteNetAdapter.HasHostAuthority;
             }
             else
             {
@@ -571,13 +468,14 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
             
-            var networkManager = Networking.YargNetworkManager.Instance;
-            bool isMultiplayer = networkManager != null && networkManager.isNetworkActive;
+            var networkingService = NetworkingServiceFactory.Instance;
+            bool isMultiplayer = networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive;
             
             if (isMultiplayer)
             {
-                // In multiplayer, only host can start
-                if (networkManager.LocalUserIsHost())
+                var adapter = (LiteNetNetworkingAdapter)networkingService;
+                // In multiplayer, use unified HasHostAuthority check
+                if (adapter.HasHostAuthority)
                 {
                     UnityEngine.Debug.Log($"[MusicLibraryMenu] Host starting show with {ShowPlaylist.Count} songs from MusicLibrary");
                     ToastManager.ToastInformation($"Starting show with {ShowPlaylist.Count} songs!");
@@ -605,8 +503,8 @@ namespace YARG.Menu.MusicLibrary
 
         private void AddToPlaylist()
         {
-            var networkManager = Networking.YargNetworkManager.Instance;
-            bool isMultiplayer = networkManager != null && networkManager.isNetworkActive;
+            var networkingService = NetworkingServiceFactory.Instance;
+            bool isMultiplayer = networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive;
             
             if (CurrentSelection is PlaylistViewType playlist)
             {
@@ -686,14 +584,10 @@ namespace YARG.Menu.MusicLibrary
         private void QuickStartShow()
         {
             // Quick start for multiplayer - starts the show immediately if there are songs
-            var networkManager = Networking.YargNetworkManager.Instance;
-            bool isMultiplayer = networkManager != null && networkManager.isNetworkActive;
-            
-            // Also check for LiteNet
             var networkingService = NetworkingServiceFactory.Instance;
-            bool isLiteNet = networkingService is LiteNetNetworkingAdapter;
+            bool isMultiplayer = networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive;
             
-            if (!isMultiplayer && !isLiteNet)
+            if (!isMultiplayer)
             {
                 // Fallback to regular add to playlist behavior in single player
                 AddToPlaylist();
@@ -713,17 +607,9 @@ namespace YARG.Menu.MusicLibrary
             }
             
             // Only host can start the show
-            bool isHost = false;
-            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
-            {
-                isHost = liteNetAdapter.IsHosting;
-            }
-            else if (networkManager != null)
-            {
-                isHost = networkManager.LocalUserIsHost();
-            }
-            
-            if (!isHost)
+            // Use HasHostAuthority for unified host detection
+            var adapter = (LiteNetNetworkingAdapter)networkingService;
+            if (!adapter.HasHostAuthority)
             {
                 ToastManager.ToastWarning("Only the host can start the show");
                 return;
@@ -738,32 +624,12 @@ namespace YARG.Menu.MusicLibrary
         {
             if (ShowPlaylist.Count > 0 && PlayerContainer.Players.Count > 0)
             {
-                var networkManager = Networking.YargNetworkManager.Instance;
-                bool isMirrorMultiplayer = networkManager != null && networkManager.isNetworkActive;
-                
-                // Check for LiteNet
                 var networkingService = NetworkingServiceFactory.Instance;
-                bool isLiteNet = networkingService is LiteNetNetworkingAdapter;
                 
-                if (isLiteNet)
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
                 {
-                    // In LiteNet multiplayer, only host can start
-                    var liteNetAdapter = (LiteNetNetworkingAdapter)networkingService;
-                    if (liteNetAdapter.IsHosting)
-                    {
-                        StartMultiplayerShow();
-                    }
-                    else
-                    {
-                        ToastManager.ToastWarning("Only the host can start the show");
-                    }
-                    return;
-                }
-                
-                if (isMirrorMultiplayer)
-                {
-                    // In Mirror multiplayer, only host can start
-                    if (networkManager.LocalUserIsHost())
+                    // In LiteNet multiplayer, use unified HasHostAuthority check
+                    if (liteNetAdapter.HasHostAuthority)
                     {
                         StartMultiplayerShow();
                     }

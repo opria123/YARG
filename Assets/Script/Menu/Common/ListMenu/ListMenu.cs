@@ -405,6 +405,9 @@ namespace YARG.Menu.ListMenu
         private void UpdateScroll()
         {
             if (!CanScroll) return;
+            
+            // Check if a NestedScrollRect is blocking scroll (e.g., sidebar settings panel is hovered)
+            if (Helpers.UI.NestedScrollRect.IsScrollingBlocked) return;
 
             if (_scrollTimer > 0f)
             {

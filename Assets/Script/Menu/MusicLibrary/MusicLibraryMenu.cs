@@ -12,6 +12,7 @@ using YARG.Core.Input;
 using YARG.Core.Song;
 using YARG.Input;
 using YARG.Localization;
+using YARG.Menu.Data;
 using YARG.Menu.ListMenu;
 using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
@@ -140,84 +141,6 @@ namespace YARG.Menu.MusicLibrary
 
         private int _primaryHeaderIndex;
 
-        // Multiplayer song queue integration
-        private YARG.Multiplayer.MultiplayerSongQueue _songQueue;
-
-        private void EnsureSongQueue()
-        {
-            if (_songQueue == null)
-            {
-                _songQueue = FindObjectOfType<YARG.Multiplayer.MultiplayerSongQueue>();
-                if (_songQueue == null && NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive)
-                {
-                    var go = new GameObject("MultiplayerSongQueue");
-                    _songQueue = go.AddComponent<YARG.Multiplayer.MultiplayerSongQueue>();
-                }
-            }
-        }
-
-        // Add a song to the multiplayer queue (host only)
-        public void AddSongToMultiplayerQueue(string songId, string songName)
-        {
-            EnsureSongQueue();
-            if (_songQueue != null && _songQueue.isServer)
-            {
-                var entry = new YARG.Multiplayer.SongQueueEntry { songId = songId, songName = songName };
-                _songQueue.AddSongToQueue(entry);
-            }
-        }
-
-        // Remove a song from the multiplayer queue (host only)
-        public void RemoveSongFromMultiplayerQueue(int index)
-        {
-            EnsureSongQueue();
-            if (_songQueue != null && _songQueue.isServer)
-            {
-                _songQueue.RemoveSongFromQueue(index);
-            }
-        }
-
-        // Clear the multiplayer queue (host only)
-        public void ClearMultiplayerQueue()
-        {
-            EnsureSongQueue();
-            if (_songQueue != null && _songQueue.isServer)
-            {
-                _songQueue.ClearQueue();
-            }
-        }
-
-        // Start the set (host only)
-        public void StartMultiplayerSet()
-        {
-            EnsureSongQueue();
-            if (_songQueue != null && _songQueue.isServer)
-            {
-                _songQueue.StartSet();
-            }
-        }
-
-        // Get the current queue (all clients)
-        public IReadOnlyList<YARG.Multiplayer.SongQueueEntry> GetMultiplayerQueue()
-        {
-            EnsureSongQueue();
-            return _songQueue?.Queue ?? new List<YARG.Multiplayer.SongQueueEntry>();
-        }
-
-        // Get current song index (all clients)
-        public int GetCurrentQueueSongIndex()
-        {
-            EnsureSongQueue();
-            return _songQueue?.currentSongIndex ?? -1;
-        }
-
-        // Is set active (all clients)
-        public bool IsMultiplayerSetActive()
-        {
-            EnsureSongQueue();
-            return _songQueue?.isSetActive ?? false;
-        }
-
         protected override void Awake()
         {
             base.Awake();
@@ -231,10 +154,12 @@ namespace YARG.Menu.MusicLibrary
             // Set navigation scheme
             SetNavigationScheme();
 
-            // Initialize multiplayer show playlist if in multiplayer
-            if (NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive)
+            // Subscribe to LiteNet setlist updates if in multiplayer
+            var networkingService = NetworkingServiceFactory.Instance;
+            if (networkingService is LiteNetNetworkingAdapter liteNetAdapter && liteNetAdapter.IsNetworkActive)
             {
-                EnsureMultiplayerShowPlaylist();
+                // Subscription happens in ShowPlaylist getter
+                _ = ShowPlaylist;
             }
 
             // Restore search
@@ -374,27 +299,21 @@ namespace YARG.Menu.MusicLibrary
             bool isMultiplayer = NetworkingServiceFactory.Instance != null && NetworkingServiceFactory.Instance.IsNetworkActive;
             
             // Check if we're the host (only host can quick start)
+            // Use HasHostAuthority for unified host detection across in-game hosting and dedicated servers
             bool isHost = false;
             if (isMultiplayer)
             {
                 var networkingService = NetworkingServiceFactory.Instance;
                 if (networkingService is Networking.Abstraction.LiteNetNetworkingAdapter liteNetAdapter)
                 {
-                    isHost = liteNetAdapter.IsHosting;
-                }
-                else if (Networking.YargNetworkManager.Instance != null)
-                {
-                    isHost = Networking.YargNetworkManager.Instance.LocalUserIsHost();
+                    isHost = liteNetAdapter.HasHostAuthority;
                 }
             }
             
             if (ShowPlaylist.Count == 0)
             {
-                // Yellow button behavior: in multiplayer host gets quick-start, clients get add to set
-                string yellowLabel = (isMultiplayer && isHost) ? "Menu.MusicLibrary.QuickStart" : "Menu.MusicLibrary.AddToSet";
-                System.Action yellowAction = (isMultiplayer && isHost) ? (System.Action)QuickStartShow : AddToPlaylist;
-                
-                Navigator.Instance.PushScheme(new NavigationScheme(new()
+                // Build entries list - start with common entries
+                var entries = new System.Collections.Generic.List<NavigationScheme.Entry>
                 {
                     new NavigationScheme.Entry(MenuAction.Up, "Menu.Common.Up",
                         ctx =>
@@ -427,24 +346,34 @@ namespace YARG.Menu.MusicLibrary
                     new NavigationScheme.Entry(MenuAction.Green, "Menu.Common.Confirm",
                         () => CurrentSelection?.PrimaryButtonClick()),
                     new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", Back),
-                    new NavigationScheme.Entry(MenuAction.Yellow, yellowLabel, yellowAction),
-                    new NavigationScheme.Entry(MenuAction.Blue, "Menu.MusicLibrary.PlayShow",
-                        EnterShowMode),
-                    new NavigationScheme.Entry(MenuAction.Orange, "Menu.MusicLibrary.MoreOptions",
-                        OnButtonHit, OnButtonRelease),
-                }, false));
+                };
+                
+                // Yellow button: only for host (quick-start) or single player (add to set)
+                // Clients in multiplayer do NOT get yellow button - they add via green button
+                if (!isMultiplayer)
+                {
+                    entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Menu.MusicLibrary.AddToSet", AddToPlaylist));
+                }
+                else if (isHost)
+                {
+                    entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Menu.MusicLibrary.QuickStart", QuickStartShow));
+                }
+                
+                // For multiplayer, always show "View Setlist" for consistency; for single player, show "Play a Show"
+                string blueLabel = isMultiplayer ? "Menu.MusicLibrary.ViewSetlist" : "Menu.MusicLibrary.PlayShow";
+                entries.Add(new NavigationScheme.Entry(MenuAction.Blue, blueLabel, EnterShowMode));
+                entries.Add(new NavigationScheme.Entry(MenuAction.Orange, "Menu.MusicLibrary.MoreOptions", OnButtonHit, OnButtonRelease));
+                
+                Navigator.Instance.PushScheme(new NavigationScheme(entries, false));
             }
             else
             {
-                // Yellow button behavior: in multiplayer host gets quick-start, clients get add to set
-                string yellowLabel = (isMultiplayer && isHost) ? "Menu.MusicLibrary.QuickStart" : "Menu.MusicLibrary.AddToSet";
-                System.Action yellowAction = (isMultiplayer && isHost) ? (System.Action)QuickStartShow : AddToPlaylist;
-                
                 // Blue button behavior: in multiplayer go to setlist management, in single player start show
                 string blueLabel = isMultiplayer ? "Menu.MusicLibrary.ViewSetlist" : "Menu.MusicLibrary.StartSet";
                 System.Action blueAction = isMultiplayer ? (System.Action)EnterShowMode : StartSetlist;
                 
-                Navigator.Instance.PushScheme(new NavigationScheme(new()
+                // Build entries list
+                var entries = new System.Collections.Generic.List<NavigationScheme.Entry>
                 {
                     new NavigationScheme.Entry(MenuAction.Up, "Menu.Common.Up",
                         ctx =>
@@ -477,11 +406,23 @@ namespace YARG.Menu.MusicLibrary
                     new NavigationScheme.Entry(MenuAction.Green, "Menu.Common.Confirm",
                         () => CurrentSelection?.PrimaryButtonClick()),
                     new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", Back),
-                    new NavigationScheme.Entry(MenuAction.Yellow, yellowLabel, yellowAction),
-                    new NavigationScheme.Entry(MenuAction.Blue, blueLabel, blueAction),
-                    new NavigationScheme.Entry(MenuAction.Orange, "Menu.MusicLibrary.MoreOptions",
-                        OnButtonHit, OnButtonRelease),
-                }, false));
+                };
+                
+                // Yellow button: only for host (quick-start) or single player (add to set)
+                // Clients in multiplayer do NOT get yellow button - they add via green button
+                if (!isMultiplayer)
+                {
+                    entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Menu.MusicLibrary.AddToSet", AddToPlaylist));
+                }
+                else if (isHost)
+                {
+                    entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Menu.MusicLibrary.QuickStart", QuickStartShow));
+                }
+                
+                entries.Add(new NavigationScheme.Entry(MenuAction.Blue, blueLabel, blueAction));
+                entries.Add(new NavigationScheme.Entry(MenuAction.Orange, "Menu.MusicLibrary.MoreOptions", OnButtonHit, OnButtonRelease));
+                
+                Navigator.Instance.PushScheme(new NavigationScheme(entries, false));
             }
         }
 
@@ -664,6 +605,73 @@ namespace YARG.Menu.MusicLibrary
 
         private void ExitLibrary()
         {
+            var networkService = NetworkingServiceFactory.Instance;
+            bool isMultiplayer = networkService != null && networkService.IsNetworkActive;
+            // Use HasHostAuthority for unified host detection across in-game hosting and dedicated servers
+            bool isHost = isMultiplayer && networkService.HasHostAuthority;
+            
+            // If client in multiplayer, show leave lobby confirmation dialog
+            if (isMultiplayer && !isHost)
+            {
+                ShowLeaveLobbyDialog();
+                return;
+            }
+            
+            // Host or single-player: proceed with exit
+            PerformExitLibrary();
+        }
+        
+        private void ShowLeaveLobbyDialog()
+        {
+            if (DialogManager.Instance == null) return;
+            
+            // Don't show another dialog if one is already showing
+            if (DialogManager.Instance.IsDialogShowing)
+            {
+                Debug.Log("[MusicLibraryMenu] Dialog already showing, skipping leave lobby dialog");
+                return;
+            }
+            
+            var dialog = DialogManager.Instance.ShowMessage(
+                "Leave Lobby?",
+                "Are you sure you want to leave the lobby? You will be disconnected from the host."
+            );
+            
+            dialog.ClearButtons();
+            dialog.AddDialogButton("Cancel", MenuData.Colors.BrightButton, () => DialogManager.Instance.ClearDialog());
+            dialog.AddDialogButton("Leave Lobby", MenuData.Colors.CancelButton, () =>
+            {
+                DialogManager.Instance.ClearDialog();
+                
+                // Clean up music library state first
+                ShowPlaylist.Clear();
+                _previewCanceller?.Cancel();
+                _previewContext?.Dispose();
+                _previewContext = null;
+                StemSettings.ApplySettings = true;
+                
+                // Client disconnects from network
+                var networkService = NetworkingServiceFactory.Instance;
+                if (networkService != null)
+                {
+                    networkService.LeaveLobby();
+                }
+                
+                // Navigate back to lobby browser (OnlineMultiplayer menu)
+                // Pop menus until we reach OnlineMultiplayer
+                Debug.Log("[MusicLibraryMenu] Client leaving lobby - navigating to lobby browser");
+                while (MenuManager.Instance != null &&
+                       MenuManager.Instance.CurrentMenu != MenuManager.Menu.OnlineMultiplayer && 
+                       MenuManager.Instance.MenuStackCount > 1)
+                {
+                    MenuManager.Instance.PopMenu();
+                }
+                Debug.Log("[MusicLibraryMenu] Navigation complete");
+            });
+        }
+        
+        private void PerformExitLibrary()
+        {
             ShowPlaylist.Clear();
             _previewCanceller?.Cancel();
             _previewContext?.Dispose();
@@ -671,22 +679,19 @@ namespace YARG.Menu.MusicLibrary
             StemSettings.ApplySettings = true;
             
             // Sync menu navigation in multiplayer
+            // Use HasHostAuthority for unified host detection across in-game hosting and dedicated servers
             var networkService = NetworkingServiceFactory.Instance;
             if (networkService != null && 
                 networkService.IsNetworkActive &&
-                networkService.IsHosting)
+                networkService.HasHostAuthority)
             {
                 Debug.Log("[MusicLibraryMenu] Host exiting library - syncing to clients");
-                Networking.YargNetworkManager.Instance.RequestSyncMenuNavigation(popMenu: true);
-                Debug.Log("[MusicLibraryMenu] Sync complete, now popping menu locally");
-                
-                // If navigation stack is incomplete (< 4 menus), we came from gameplay after disconnect
-                // In this case, close the lobby directly since LobbyRoom isn't in the stack
-                if (MenuManager.Instance != null && !MenuManager.Instance.IsMenuInStack(MenuManager.Menu.LobbyRoom))
+                // Use unified PopAllPlayersMenu method
+                if (networkService is Networking.Abstraction.LiteNetNetworkingAdapter liteNetAdapter)
                 {
-                    Debug.Log("[MusicLibraryMenu] LobbyRoom menu missing from stack - closing lobby directly");
-                    networkService.LeaveLobby();
+                    liteNetAdapter.PopAllPlayersMenu();
                 }
+                Debug.Log("[MusicLibraryMenu] Sync complete, now popping menu locally");
             }
             
             Debug.Log($"[MusicLibraryMenu] Calling PopMenu - MenuManager.Instance null? {MenuManager.Instance == null}");
@@ -924,10 +929,17 @@ namespace YARG.Menu.MusicLibrary
 
             _heldInputs.Clear();
 
-            // Unsubscribe from multiplayer playlist updates
-            if (_multiplayerShowPlaylist != null)
+            // Unsubscribe from LiteNet setlist updates
+            if (_subscribedToLiteNetSetlist)
             {
-                _multiplayerShowPlaylist.OnPlaylistUpdated -= OnMultiplayerPlaylistUpdated;
+                var networkingService = NetworkingServiceFactory.Instance;
+                if (networkingService is LiteNetNetworkingAdapter liteNetAdapter)
+                {
+                    liteNetAdapter.OnSetlistUpdated -= OnLiteNetSetlistUpdated;
+                    liteNetAdapter.OnSetlistSongAdded -= OnLiteNetSongAdded;
+                    liteNetAdapter.OnSetlistSongRemoved -= OnLiteNetSongRemoved;
+                }
+                _subscribedToLiteNetSetlist = false;
             }
         }
 

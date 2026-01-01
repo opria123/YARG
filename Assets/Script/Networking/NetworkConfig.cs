@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Networking
 {
@@ -16,7 +17,7 @@ namespace YARG.Networking
         public int defaultMaxPlayers = 32;
         public int maxLocalPlayersPerClient = 4;
         public int maxDisplayedPlayers = 4;
-        public YargNetworkManager.LobbyPrivacyMode defaultPrivacyMode = YargNetworkManager.LobbyPrivacyMode.Public;
+        public LobbyPrivacyMode defaultPrivacyMode = LobbyPrivacyMode.Public;
 
         [Header("Network Settings")]
         public int connectionTimeout = 30;
@@ -37,7 +38,7 @@ namespace YARG.Networking
     {
         public string lobbyName;
         public int maxPlayers;
-        public YargNetworkManager.LobbyPrivacyMode privacyMode;
+        public LobbyPrivacyMode privacyMode;
         public string password;
         public bool allowMidGameJoin;
         public int minPlayers;
@@ -46,7 +47,7 @@ namespace YARG.Networking
         {
             lobbyName = "YARG Lobby";
             maxPlayers = 32;
-            privacyMode = YargNetworkManager.LobbyPrivacyMode.Public;
+            privacyMode = LobbyPrivacyMode.Public;
             password = string.Empty;
             allowMidGameJoin = false;
             minPlayers = 1;

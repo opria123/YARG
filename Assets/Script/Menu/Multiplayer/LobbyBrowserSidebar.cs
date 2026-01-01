@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Cysharp.Text;
 using TMPro;
 using UnityEngine;
@@ -13,7 +14,10 @@ using YARG.Menu.Data;
 using YARG.Menu.DifficultySelect;
 using YARG.Menu.Persistent;
 using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Networking.Bookmarks;
+using YARG.Networking.Settings;
+using YARG.Menu.Multiplayer.Settings;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -26,9 +30,20 @@ namespace YARG.Menu.Multiplayer
         private static int DefaultDirectConnectPort => NetworkTransportDefaults.DefaultUdpPort;
         private static int GetSuggestedPort()
         {
-            return YargNetworkManager.Instance != null
-                ? Mathf.Clamp(YargNetworkManager.Instance.SuggestedDirectConnectPort, 1, ushort.MaxValue)
-                : DefaultDirectConnectPort;
+            var networkService = NetworkingServiceFactory.Instance;
+            if (networkService != null)
+            {
+                int port = networkService.DefaultPort;
+                if (port > 0)
+                    return Mathf.Clamp(port, 1, ushort.MaxValue);
+            }
+            return DefaultDirectConnectPort;
+        }
+        
+        private static string GetPlayerName()
+        {
+            var networkService = NetworkingServiceFactory.Instance;
+            return networkService?.PlayerName ?? "YARG";
         }
 
 
@@ -94,6 +109,20 @@ namespace YARG.Menu.Multiplayer
         [SerializeField]
         private GameObject _passwordIcon;
 
+        [Header("Lobby Settings Icons")]
+        [SerializeField]
+        private Image _noFailIconImage;
+        
+        [Header("Lobby Game Modes")]
+        [SerializeField]
+        private Image _guitarIconImage;
+        [SerializeField]
+        private Image _drumsIconImage;
+        [SerializeField]
+        private Image _vocalsIconImage;
+        [SerializeField]
+        private Image _keysIconImage;
+
         [Header("Player List")]
         [SerializeField]
         private Transform _playerListContainer;
@@ -104,15 +133,7 @@ namespace YARG.Menu.Multiplayer
 
         [Header("Create Lobby Form")]
         [SerializeField]
-        private TMP_InputField _createLobbyNameInput;
-        [SerializeField]
-        private TMP_Dropdown _createLobbyMaxPlayersDropdown;
-        [SerializeField]
-        private TMP_Dropdown _createLobbyPrivacyDropdown;
-        [SerializeField]
-        private TMP_InputField _createLobbyPasswordInput;
-        [SerializeField]
-        private GameObject _createLobbyPasswordRow;
+        private SessionSettingsPanelBuilder _createLobbySettingsPanel;
         [SerializeField]
         private ColoredButton _createLobbySubmitButton;
         [SerializeField]
@@ -120,15 +141,7 @@ namespace YARG.Menu.Multiplayer
 
         [Header("Hosted Lobby Form")]
         [SerializeField]
-        private TMP_InputField _hostedLobbyNameInput;
-        [SerializeField]
-        private TMP_Dropdown _hostedLobbyMaxPlayersDropdown;
-        [SerializeField]
-        private TMP_Dropdown _hostedLobbyPrivacyDropdown;
-        [SerializeField]
-        private TMP_InputField _hostedLobbyPasswordInput;
-        [SerializeField]
-        private GameObject _hostedLobbyPasswordRow;
+        private SessionSettingsPanelBuilder _hostedLobbySettingsPanel;
         [SerializeField]
         private ColoredButton _hostedLobbyHostButton;
         [SerializeField]
@@ -143,6 +156,10 @@ namespace YARG.Menu.Multiplayer
         private ColoredButton _directConnectSubmitButton;
         [SerializeField]
         private Button _directConnectCancelButton;
+        
+        [Header("Join by Code")]
+        [SerializeField]
+        private TMP_InputField _lobbyCodeInput;
 
         private LobbyBrowserMenu _menu;
         private YARG.Networking.Abstraction.LobbyInfo _currentLobby;
@@ -158,9 +175,8 @@ namespace YARG.Menu.Multiplayer
         private bool _hasPassword;
         private bool _passwordToggleAvailable;
         private TMP_InputField _passwordEditInputField;
-        private bool _suppressHostedFieldCallbacks;
         private EditableField? _activeEditField;
-        private YargNetworkManager.LobbyPrivacyMode _currentPrivacyMode = YargNetworkManager.LobbyPrivacyMode.Public;
+        private LobbyPrivacyMode _currentPrivacyMode = LobbyPrivacyMode.Public;
         private int _defaultMaxPlayersOptionIndex;
         private bool _attemptedHostedContainerResolve;
         private bool IsEditing => _activeEditField.HasValue;
@@ -186,6 +202,7 @@ namespace YARG.Menu.Multiplayer
 
         public event Action<CreateLobbyFormData> CreateLobbySubmitted;
         public event Action<DirectConnectFormData> DirectConnectSubmitted;
+        public event Action<string> JoinByCodeSubmitted;
 
         private enum SidebarMode
         {
@@ -193,7 +210,8 @@ namespace YARG.Menu.Multiplayer
             Lobby,
             CreateLobby,
             HostedLobby,
-            DirectConnect
+            DirectConnect,
+            JoinGame  // New: Combined join mode (code + direct connect)
         }
 
         #region Initialization
@@ -223,9 +241,6 @@ namespace YARG.Menu.Multiplayer
             if (_createLobbyCancelButton != null)
                 _createLobbyCancelButton.onClick.AddListener(ClearLobby);
 
-            if (_createLobbyPrivacyDropdown != null)
-                _createLobbyPrivacyDropdown.onValueChanged.AddListener(OnCreateLobbyPrivacyChanged);
-
             if (_hostVisibilityToggle != null)
                 _hostVisibilityToggle.onClick.AddListener(ToggleHostVisibility);
 
@@ -241,24 +256,6 @@ namespace YARG.Menu.Multiplayer
             if (_passwordEditButton != null)
                 _passwordEditButton.onClick.AddListener(BeginPasswordEdit);
 
-            if (_hostedLobbyNameInput != null)
-            {
-                _hostedLobbyNameInput.onEndEdit.AddListener(OnHostedLobbyNameSubmitted);
-                _hostedLobbyNameInput.onSubmit.AddListener(OnHostedLobbyNameSubmitted);
-            }
-
-            if (_hostedLobbyMaxPlayersDropdown != null)
-                _hostedLobbyMaxPlayersDropdown.onValueChanged.AddListener(OnHostedLobbyMaxPlayersChanged);
-
-            if (_hostedLobbyPrivacyDropdown != null)
-                _hostedLobbyPrivacyDropdown.onValueChanged.AddListener(OnHostedLobbyPrivacyChanged);
-
-            if (_hostedLobbyPasswordInput != null)
-            {
-                _hostedLobbyPasswordInput.onEndEdit.AddListener(OnHostedLobbyPasswordSubmitted);
-                _hostedLobbyPasswordInput.onSubmit.AddListener(OnHostedLobbyPasswordSubmitted);
-            }
-
             if (_hostedLobbyHostButton != null)
                 _hostedLobbyHostButton.OnClick.AddListener(HandleHostedHost);
 
@@ -266,7 +263,7 @@ namespace YARG.Menu.Multiplayer
                 _hostedLobbyDeleteButton.OnClick.AddListener(HandleHostedDelete);
 
             if (_directConnectSubmitButton != null)
-                _directConnectSubmitButton.OnClick.AddListener(SubmitDirectConnectForm);
+                _directConnectSubmitButton.OnClick.AddListener(SubmitConnectForm);
 
             if (_directConnectCancelButton != null)
                 _directConnectCancelButton.onClick.AddListener(ClearLobby);
@@ -297,36 +294,9 @@ namespace YARG.Menu.Multiplayer
 
         private void PopulateDropdowns()
         {
-            if (_createLobbyMaxPlayersDropdown != null)
-            {
-                EnsureMaxPlayersDropdownOptions(_createLobbyMaxPlayersDropdown);
-                int optionCount = _createLobbyMaxPlayersDropdown.options.Count;
-                _defaultMaxPlayersOptionIndex = optionCount > 0
-                    ? Mathf.Clamp(_createLobbyMaxPlayersDropdown.value, 0, optionCount - 1)
-                    : 0;
-            }
-
-            EnsureMaxPlayersDropdownOptions(_hostedLobbyMaxPlayersDropdown);
-
-            EnsurePrivacyDropdownOptions(_createLobbyPrivacyDropdown);
-            EnsurePrivacyDropdownOptions(_hostedLobbyPrivacyDropdown);
-
-            UpdateCreateLobbyPasswordVisibility();
-            UpdateHostedLobbyPasswordVisibility();
-        }
-
-        private void OnCreateLobbyPrivacyChanged(int value)
-        {
-            UpdateCreateLobbyPasswordVisibility();
-        }
-
-        private void UpdateCreateLobbyPasswordVisibility()
-        {
-            bool showPassword = GetSelectedPrivacyMode() == YargNetworkManager.LobbyPrivacyMode.Private;
-            if (_createLobbyPasswordRow != null)
-            {
-                _createLobbyPasswordRow.SetActive(showPassword);
-            }
+            // SessionSettingsPanelBuilder handles dropdown population internally
+            // Keep default max players index for reference if needed
+            _defaultMaxPlayersOptionIndex = 0;
         }
 
         private void AttachEditableInputHandlers(GameObject container, Action confirmAction, EditableField? field = null)
@@ -432,73 +402,18 @@ namespace YARG.Menu.Multiplayer
 
             ShowMode(SidebarMode.CreateLobby);
 
-            if (!shouldReset)
-            {
-                if (focusFirstField && _createLobbyNameInput != null)
-                {
-                    FocusInput(_createLobbyNameInput);
-                }
-
-                UpdateCreateLobbyPasswordVisibility();
-                RefreshEditableButtons();
-                return;
-            }
-
-            var sourcePreset = _activePreset;
-
-            string suggestedName = sourcePreset?.lobbyName;
-            if (string.IsNullOrWhiteSpace(suggestedName))
-            {
-                string player = YargNetworkManager.Instance != null ? YargNetworkManager.Instance.PlayerName : "YARG";
-                suggestedName = ZString.Format("{0}'s Lobby", player);
-            }
-
-            if (_createLobbyNameInput != null)
-            {
-                SetInputFieldText(_createLobbyNameInput, suggestedName);
-                if (focusFirstField)
-                {
-                    FocusInput(_createLobbyNameInput);
-                }
-            }
-
-            if (_createLobbyMaxPlayersDropdown != null)
-            {
-                int optionIndex = -1;
-
-                if (sourcePreset != null && sourcePreset.maxPlayers > 0)
-                {
-                    optionIndex = FindMaxPlayersOptionIndex(_createLobbyMaxPlayersDropdown, sourcePreset.maxPlayers);
-                }
-                else if (_createLobbyMaxPlayersDropdown.options != null && _createLobbyMaxPlayersDropdown.options.Count > 0)
-                {
-                    optionIndex = Mathf.Clamp(_defaultMaxPlayersOptionIndex, 0, _createLobbyMaxPlayersDropdown.options.Count - 1);
-                }
-
-                if (optionIndex >= 0 && optionIndex < _createLobbyMaxPlayersDropdown.options.Count)
-                {
-                    _createLobbyMaxPlayersDropdown.value = optionIndex;
-                    _createLobbyMaxPlayersDropdown.RefreshShownValue();
-                }
-            }
-
-            if (_createLobbyPrivacyDropdown != null)
-            {
-                int privacyIndex = Mathf.Clamp((int)(sourcePreset?.PrivacyMode ?? YargNetworkManager.LobbyPrivacyMode.Public), 0, 1);
-                _createLobbyPrivacyDropdown.value = privacyIndex;
-            }
-
-            if (_createLobbyPasswordInput != null)
-            {
-                SetInputFieldText(_createLobbyPasswordInput, sourcePreset?.password ?? string.Empty);
-            }
-
-            UpdateCreateLobbyPasswordVisibility();
-            RefreshEditableButtons();
+            // Use SessionSettingsPanelBuilder for consistent UX
+            ApplyCreateLobbyToSettingsPanel(shouldReset, focusFirstField);
         }
 
         public void ShowDirectConnectForm(bool focusFirstField = false)
         {
+            // If already showing direct connect, don't reset the form - just preserve user input
+            if (_currentMode == SidebarMode.DirectConnect && !focusFirstField)
+            {
+                return;
+            }
+            
             _activePreset = null;
             _currentLobby = null;
             _activeBookmark = null;
@@ -519,7 +434,32 @@ namespace YARG.Menu.Multiplayer
             {
                 SetInputFieldText(_directConnectPasswordInput, string.Empty);
             }
+            
+            // Clear lobby code input
+            ClearLobbyCodeInput();
+            
             RefreshEditableButtons();
+        }
+
+        /// <summary>
+        /// Shows the "Host a Game" form. This is the new name for ShowCreateLobbyForm.
+        /// Includes session type selection (Automatic/Manual) in Advanced Options.
+        /// </summary>
+        public void ShowHostGameForm(HostedLobbyPreset preset, bool focusFirstField = false)
+        {
+            // For now, delegate to existing CreateLobby form
+            // TODO: Add Session Type (Automatic/Manual) toggle in Advanced Options
+            ShowCreateLobbyForm(preset, focusFirstField);
+        }
+
+        /// <summary>
+        /// Shows the "Join a Game" form with both lobby code and direct connect options.
+        /// </summary>
+        public void ShowJoinGameForm(bool focusFirstField = false)
+        {
+            // For now, delegate to existing DirectConnect form
+            // TODO: Add lobby code input above direct connect section
+            ShowDirectConnectForm(focusFirstField);
         }
 
         public void ShowHostedLobbyPreset(HostedLobbyPreset preset)
@@ -536,7 +476,10 @@ namespace YARG.Menu.Multiplayer
 
             ExitAllEditModes();
             ShowMode(SidebarMode.HostedLobby);
-            ApplyHostedPresetToFields(_activePreset);
+
+            // Use SessionSettingsPanelBuilder for consistent UX
+            ApplyHostedLobbyToSettingsPanel();
+
             RefreshEditableButtons();
         }
 
@@ -546,7 +489,7 @@ namespace YARG.Menu.Multiplayer
             _currentLobby = null;
             _activePreset = null;
             _activeBookmark = null;
-            _currentPrivacyMode = YargNetworkManager.LobbyPrivacyMode.Public;
+            _currentPrivacyMode = LobbyPrivacyMode.Public;
             ShowMode(SidebarMode.Empty);
             ClearPlayerList();
             SetHostAddress(string.Empty, false);
@@ -577,28 +520,38 @@ namespace YARG.Menu.Multiplayer
 
             if (_pingText != null)
             {
-                int ping = CalculatePing(lobby);
-                if (ping < 0)
+                // If lobby is not fresh (hasn't been seen recently), show as Offline
+                if (!lobby.IsFresh)
                 {
                     _pingText.text = TextColorer.StyleString("Offline", MenuData.Colors.PrimaryText.WithAlpha(0.45f), 600);
                 }
-                else
+                else if (lobby.Ping >= 0)
                 {
-                    Color pingColor = ping switch
+                    // We have an actual ping measurement
+                    Color pingColor = lobby.Ping switch
                     {
                         < 50 => new Color(0.3f, 1f, 0.3f),
                         < 100 => new Color(1f, 1f, 0.3f),
                         _ => new Color(1f, 0.3f, 0.3f)
                     };
-
-                    string pingValue = TextColorer.StyleString(ZString.Format("{0}ms", ping), pingColor, 600);
+                    string pingValue = TextColorer.StyleString(ZString.Format("{0}ms", lobby.Ping), pingColor, 600);
                     _pingText.text = pingValue;
+                }
+                else
+                {
+                    // Fresh lobby but no ping measurement - show as Online
+                    _pingText.text = TextColorer.StyleString("Online", new Color(0.3f, 1f, 0.3f), 600);
                 }
             }
 
             if (_privacyText != null)
             {
-                string privacyMode = lobby.PrivacyMode == YARG.Networking.Abstraction.LobbyPrivacyMode.Private ? "Private" : "Public";
+                string privacyMode = lobby.PrivacyMode switch
+                {
+                    YARG.Networking.Abstraction.LobbyPrivacyMode.Private => "Private",
+                    YARG.Networking.Abstraction.LobbyPrivacyMode.Unlisted => "Unlisted",
+                    _ => "Public"
+                };
                 _privacyText.text = ZString.Format("Privacy: {0}", privacyMode);
             }
 
@@ -606,9 +559,62 @@ namespace YARG.Menu.Multiplayer
             if (_passwordIcon != null)
                 _passwordIcon.SetActive(hasPassword);
 
-            _currentPrivacyMode = (YargNetworkManager.LobbyPrivacyMode)lobby.PrivacyMode;
+            _currentPrivacyMode = (LobbyPrivacyMode)lobby.PrivacyMode;
             SetPasswordValue(lobby.Password, hasPassword, hasPassword);
             RefreshEditableButtons();
+            
+            // Determine if server is offline (not seen recently)
+            bool isOffline = !lobby.IsFresh;
+            
+            // Display gameplay settings tags
+            PopulateLobbySettingsTags(lobby, isOffline);
+            
+            // Display game mode icons
+            PopulateGameModeIcons(lobby, isOffline);
+        }
+        
+        /// <summary>
+        /// Builds and displays the No Fail icon. Always visible, greyed out when disabled or offline.
+        /// </summary>
+        private void PopulateLobbySettingsTags(YARG.Networking.Abstraction.LobbyInfo lobby, bool isOffline)
+        {
+            if (_noFailIconImage == null)
+                return;
+            
+            // No Fail Mode icon - white when on, greyed when off or offline
+            bool noFailEnabled = lobby.NoFailMode && !isOffline;
+            _noFailIconImage.color = noFailEnabled ? Color.white : new Color(0.4f, 0.4f, 0.4f, 0.5f);
+        }
+        
+        /// <summary>
+        /// Updates game mode icon colors based on lobby settings.
+        /// </summary>
+        private void PopulateGameModeIcons(YARG.Networking.Abstraction.LobbyInfo lobby, bool isOffline)
+        {
+            // AllowedGameModes is actually a BLACKLIST - modes IN the list are DISABLED
+            var disabledModes = new HashSet<YARG.Core.GameMode>();
+            if (lobby.AllowedGameModes != null)
+            {
+                foreach (var mode in lobby.AllowedGameModes)
+                {
+                    disabledModes.Add(mode);
+                }
+            }
+            
+            // Mode is allowed if it's NOT in the blacklist AND server is online
+            // When offline, all icons are greyed out
+            UpdateIconColor(_guitarIconImage, !isOffline && !disabledModes.Contains(YARG.Core.GameMode.FiveFretGuitar));
+            UpdateIconColor(_drumsIconImage, !isOffline && !disabledModes.Contains(YARG.Core.GameMode.FourLaneDrums));
+            UpdateIconColor(_vocalsIconImage, !isOffline && !disabledModes.Contains(YARG.Core.GameMode.Vocals));
+            UpdateIconColor(_keysIconImage, !isOffline && !disabledModes.Contains(YARG.Core.GameMode.ProKeys));
+        }
+        
+        private void UpdateIconColor(Image icon, bool isEnabled)
+        {
+            if (icon != null)
+            {
+                icon.color = isEnabled ? Color.white : new Color(0.4f, 0.4f, 0.4f, 0.5f);
+            }
         }
 
         private void ApplyBookmarkOverlayData(LobbyBookmark bookmark)
@@ -669,8 +675,8 @@ namespace YARG.Menu.Multiplayer
             }
 
             _currentPrivacyMode = string.IsNullOrEmpty(bookmark.password)
-                ? YargNetworkManager.LobbyPrivacyMode.Public
-                : YargNetworkManager.LobbyPrivacyMode.Private;
+                ? LobbyPrivacyMode.Public
+                : LobbyPrivacyMode.Private;
             SetPasswordValue(bookmark.password, !string.IsNullOrEmpty(bookmark.password), true);
             RefreshEditableButtons();
         }
@@ -736,7 +742,9 @@ namespace YARG.Menu.Multiplayer
                 }
             }
 
-            if (!string.IsNullOrEmpty(hostName))
+            // For dedicated servers, don't add a phantom host entry - there's no actual host player
+            // Only add/promote host entry for regular lobbies
+            if (!string.IsNullOrEmpty(hostName) && !lobby.IsDedicatedServer)
             {
                 int hostIndex = entries.FindIndex(e => string.Equals(RemoveHostSuffix(e.DisplayName), hostName, StringComparison.OrdinalIgnoreCase));
                 if (hostIndex >= 0)
@@ -858,13 +866,6 @@ namespace YARG.Menu.Multiplayer
             {
                 _noPlayersText.gameObject.SetActive(false);
             }
-        }
-
-        private int CalculatePing(YARG.Networking.Abstraction.LobbyInfo lobby)
-        {
-            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-            // Return a dummy ping value for now
-            return UnityEngine.Random.Range(10, 120);
         }
 
         private string BuildEndpoint(string address, int port, string fallbackAddress, int fallbackPort)
@@ -1077,103 +1078,73 @@ namespace YARG.Menu.Multiplayer
 
         #region Hosted Preset Editing
 
+        /// <summary>
+        /// Password visibility is now handled by SessionSettingsPanelBuilder internally.
+        /// </summary>
         private void UpdateHostedLobbyPasswordVisibility()
         {
-            bool show = _currentMode == SidebarMode.HostedLobby &&
-                        _activePreset != null &&
-                        _activePreset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private;
-
-            if (_hostedLobbyPasswordRow != null)
-                _hostedLobbyPasswordRow.SetActive(show);
-
-            if (!show && _hostedLobbyPasswordInput != null)
-            {
-                _hostedLobbyPasswordInput.DeactivateInputField();
-            }
+            // SessionSettingsPanelBuilder handles password visibility based on privacy mode
         }
 
+        /// <summary>
+        /// Legacy method - now handled by SessionSettingsPanelBuilder.
+        /// Kept as stub for any remaining call sites.
+        /// </summary>
         private void ApplyHostedPresetToFields(HostedLobbyPreset preset)
         {
-            _suppressHostedFieldCallbacks = true;
-
-            string lobbyName = preset?.lobbyName ?? string.Empty;
-            SetInputFieldText(_hostedLobbyNameInput, lobbyName);
-
-            if (_hostedLobbyMaxPlayersDropdown != null)
-            {
-                EnsureMaxPlayersDropdownOptions(_hostedLobbyMaxPlayersDropdown);
-                int desiredPlayers = Mathf.Clamp(preset?.maxPlayers ?? 8, 2, 32);
-                int optionIndex = FindMaxPlayersOptionIndex(_hostedLobbyMaxPlayersDropdown, desiredPlayers);
-                if (optionIndex >= 0)
-                {
-                    _hostedLobbyMaxPlayersDropdown.value = optionIndex;
-                    _hostedLobbyMaxPlayersDropdown.RefreshShownValue();
-                }
-            }
-
-            if (_hostedLobbyPrivacyDropdown != null)
-            {
-                EnsurePrivacyDropdownOptions(_hostedLobbyPrivacyDropdown);
-                int privacyIndex = Mathf.Clamp((int)(preset?.PrivacyMode ?? YargNetworkManager.LobbyPrivacyMode.Public), 0, 1);
-                _hostedLobbyPrivacyDropdown.value = privacyIndex;
-                _hostedLobbyPrivacyDropdown.RefreshShownValue();
-            }
-
-            if (_hostedLobbyPasswordInput != null)
-            {
-                string password = preset != null && preset.PrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private
-                    ? preset.password ?? string.Empty
-                    : string.Empty;
-                SetInputFieldText(_hostedLobbyPasswordInput, password);
-            }
-
-            _suppressHostedFieldCallbacks = false;
-
-            UpdateHostedLobbyPasswordVisibility();
+            // Now handled by ApplyHostedLobbyToSettingsPanel via SessionSettingsPanelBuilder
+            ApplyHostedLobbyToSettingsPanel();
         }
 
+        /// <summary>
+        /// Resets the hosted form to default values via SessionSettingsPanelBuilder.
+        /// </summary>
         private void ResetHostedForm()
         {
-            _suppressHostedFieldCallbacks = true;
-
-            SetInputFieldText(_hostedLobbyNameInput, string.Empty);
-
-            if (_hostedLobbyMaxPlayersDropdown != null)
+            if (_hostedLobbySettingsPanel != null)
             {
-                EnsureMaxPlayersDropdownOptions(_hostedLobbyMaxPlayersDropdown);
-                if (_hostedLobbyMaxPlayersDropdown.options != null && _hostedLobbyMaxPlayersDropdown.options.Count > 0)
-                {
-                    int index = Mathf.Clamp(_defaultMaxPlayersOptionIndex, 0, _hostedLobbyMaxPlayersDropdown.options.Count - 1);
-                    _hostedLobbyMaxPlayersDropdown.value = index;
-                    _hostedLobbyMaxPlayersDropdown.RefreshShownValue();
-                }
+                _hostedLobbySettingsPanel.SetData(new SessionSettingsData());
             }
-
-            if (_hostedLobbyPrivacyDropdown != null)
-            {
-                EnsurePrivacyDropdownOptions(_hostedLobbyPrivacyDropdown);
-                _hostedLobbyPrivacyDropdown.value = (int)YargNetworkManager.LobbyPrivacyMode.Public;
-                _hostedLobbyPrivacyDropdown.RefreshShownValue();
-            }
-
-            SetInputFieldText(_hostedLobbyPasswordInput, string.Empty);
-
-            _suppressHostedFieldCallbacks = false;
-
-            UpdateHostedLobbyPasswordVisibility();
         }
 
-        private void CommitHostedPreset(string lobbyName = null, int? maxPlayers = null, YargNetworkManager.LobbyPrivacyMode? privacyMode = null, string password = null)
+        private void CommitHostedPreset(
+            string lobbyName = null, 
+            int? maxPlayers = null, 
+            LobbyPrivacyMode? privacyMode = null, 
+            SessionType? sessionType = null,
+            string password = null,
+            int? bandSize = null,
+            bool? noFailMode = null,
+            bool? sharedSongsOnly = null,
+            bool? allowModifiers = null,
+            bool? enablePresetSync = null,
+            bool? allowLateJoin = null,
+            List<int> allowedInstruments = null,
+            bool? localPlayersFirst = null)
         {
+            Debug.Log($"[LobbyBrowserSidebar] CommitHostedPreset: sessionType param={sessionType}, _activePreset.SessionType={_activePreset?.SessionType}");
             if (_activePreset == null)
                 return;
 
             string newName = lobbyName ?? (_activePreset.lobbyName ?? string.Empty);
             int newMaxPlayers = Mathf.Clamp(maxPlayers ?? _activePreset.maxPlayers, 2, 32);
             var newPrivacy = privacyMode ?? _activePreset.PrivacyMode;
+            var newSessionType = sessionType ?? _activePreset.SessionType;
+            Debug.Log($"[LobbyBrowserSidebar] CommitHostedPreset: newSessionType={newSessionType}");
             string newPassword = password ?? (_activePreset.password ?? string.Empty);
+            int newBandSize = Mathf.Clamp(bandSize ?? _activePreset.bandSize, 0, 8);
+            bool newNoFailMode = noFailMode ?? _activePreset.noFailMode;
+            bool newSharedSongsOnly = sharedSongsOnly ?? _activePreset.sharedSongsOnly;
+            bool newAllowModifiers = allowModifiers ?? _activePreset.allowModifiers;
+            bool newEnablePresetSync = enablePresetSync ?? _activePreset.enablePresetSync;
+            bool newAllowLateJoin = allowLateJoin ?? _activePreset.allowLateJoin;
+            var newAllowedInstruments = allowedInstruments ?? _activePreset.allowedInstruments ?? new List<int>();
+            bool newLocalPlayersFirst = localPlayersFirst ?? _activePreset.localPlayersFirst;
 
-            if (newPrivacy != YargNetworkManager.LobbyPrivacyMode.Private)
+            // Password rules based on privacy and session type
+            bool canHavePassword = newPrivacy == LobbyPrivacyMode.Private ||
+                                   (newPrivacy == LobbyPrivacyMode.Unlisted && newSessionType == SessionType.Server);
+            if (!canHavePassword)
             {
                 newPassword = string.Empty;
             }
@@ -1182,7 +1153,16 @@ namespace YARG.Menu.Multiplayer
                 !string.Equals(_activePreset.lobbyName ?? string.Empty, newName, StringComparison.Ordinal) ||
                 _activePreset.maxPlayers != newMaxPlayers ||
                 _activePreset.PrivacyMode != newPrivacy ||
-                !string.Equals(_activePreset.password ?? string.Empty, newPassword ?? string.Empty, StringComparison.Ordinal);
+                _activePreset.SessionType != newSessionType ||
+                !string.Equals(_activePreset.password ?? string.Empty, newPassword ?? string.Empty, StringComparison.Ordinal) ||
+                _activePreset.bandSize != newBandSize ||
+                _activePreset.noFailMode != newNoFailMode ||
+                _activePreset.sharedSongsOnly != newSharedSongsOnly ||
+                _activePreset.allowModifiers != newAllowModifiers ||
+                _activePreset.enablePresetSync != newEnablePresetSync ||
+                _activePreset.allowLateJoin != newAllowLateJoin ||
+                !InstrumentListsEqual(_activePreset.allowedInstruments, newAllowedInstruments) ||
+                _activePreset.localPlayersFirst != newLocalPlayersFirst;
 
             if (!changed)
                 return;
@@ -1194,8 +1174,17 @@ namespace YARG.Menu.Multiplayer
                     newName,
                     newMaxPlayers,
                     newPrivacy,
+                    newSessionType,
                     newPassword ?? string.Empty,
-                    updateHostedTimestamp: false);
+                    updateHostedTimestamp: false,
+                    newBandSize,
+                    newNoFailMode,
+                    newSharedSongsOnly,
+                    newAllowModifiers,
+                    newEnablePresetSync,
+                    newAllowLateJoin,
+                    newAllowedInstruments,
+                    newLocalPlayersFirst);
 
                 _activePreset = updated?.Clone();
                 ApplyHostedPresetToFields(_activePreset);
@@ -1205,69 +1194,50 @@ namespace YARG.Menu.Multiplayer
                 Debug.LogWarning($"[LobbyBrowserSidebar] Failed to save hosted lobby preset '{_activePreset?.id}': {ex}");
             }
         }
+        
+        private static bool InstrumentListsEqual(List<int> a, List<int> b)
+        {
+            if (a == null && b == null) return true;
+            if (a == null || b == null) return false;
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
+        }
 
         private void CommitHostedPresetFromFields()
         {
             if (_activePreset == null)
                 return;
 
-            string name = _hostedLobbyNameInput != null ? _hostedLobbyNameInput.text?.Trim() ?? string.Empty : _activePreset.lobbyName;
-            int players = GetSelectedMaxPlayers(_hostedLobbyMaxPlayersDropdown);
-            var privacy = _hostedLobbyPrivacyDropdown != null
-                ? (YargNetworkManager.LobbyPrivacyMode)Mathf.Clamp(_hostedLobbyPrivacyDropdown.value, 0, 1)
-                : _activePreset.PrivacyMode;
-            string password = _hostedLobbyPasswordInput != null ? _hostedLobbyPasswordInput.text ?? string.Empty : _activePreset.password;
-
-            CommitHostedPreset(name, players, privacy, password);
-        }
-
-        private void OnHostedLobbyNameSubmitted(string value)
-        {
-            if (_suppressHostedFieldCallbacks)
-                return;
-
-            string trimmed = value?.Trim() ?? string.Empty;
-            CommitHostedPreset(lobbyName: trimmed);
-        }
-
-        private void OnHostedLobbyMaxPlayersChanged(int optionIndex)
-        {
-            if (_suppressHostedFieldCallbacks)
-                return;
-
-            int players = ParseMaxPlayersOption(_hostedLobbyMaxPlayersDropdown, optionIndex);
-            CommitHostedPreset(maxPlayers: players);
-        }
-
-        private void OnHostedLobbyPrivacyChanged(int optionIndex)
-        {
-            if (_suppressHostedFieldCallbacks)
-                return;
-
-            var privacy = (YargNetworkManager.LobbyPrivacyMode)Mathf.Clamp(optionIndex, 0, 1);
-            string password = _hostedLobbyPasswordInput != null ? _hostedLobbyPasswordInput.text : string.Empty;
-
-            CommitHostedPreset(privacyMode: privacy, password: password);
-            UpdateHostedLobbyPasswordVisibility();
-
-            if (privacy == YargNetworkManager.LobbyPrivacyMode.Private && _hostedLobbyPasswordInput != null)
+            // Use SessionSettingsPanelBuilder for consistent UX
+            var data = GetHostedLobbyDataFromPanel();
+            if (data != null)
             {
-                FocusInput(_hostedLobbyPasswordInput);
+                CommitHostedPreset(
+                    data.LobbyName, 
+                    data.MaxPlayers, 
+                    data.PrivacyMode,
+                    data.SessionType, 
+                    data.Password, 
+                    data.BandSize, 
+                    data.NoFailMode, 
+                    data.SharedSongsOnly, 
+                    data.AllowModifiers, 
+                    data.EnablePresetSync, 
+                    data.AllowLateJoin,
+                    data.AllowedGameModes?.Select(g => (int)g).ToList(),
+                    data.LocalPlayersFirst);
             }
-        }
-
-        private void OnHostedLobbyPasswordSubmitted(string value)
-        {
-            if (_suppressHostedFieldCallbacks)
-                return;
-
-            string trimmed = value?.Trim() ?? string.Empty;
-            CommitHostedPreset(password: trimmed);
         }
 
         private void HandleHostedHost()
         {
+            Debug.Log($"[LobbyBrowserSidebar] HandleHostedHost: BEFORE commit - _activePreset.SessionType={_activePreset?.SessionType}");
             CommitHostedPresetFromFields();
+            Debug.Log($"[LobbyBrowserSidebar] HandleHostedHost: AFTER commit - _activePreset.SessionType={_activePreset?.SessionType}");
 
             if (_activePreset != null)
             {
@@ -1651,7 +1621,7 @@ namespace YARG.Menu.Multiplayer
 
             if (_currentMode == SidebarMode.Lobby)
             {
-                if (_currentPrivacyMode == YargNetworkManager.LobbyPrivacyMode.Private)
+                if (_currentPrivacyMode == LobbyPrivacyMode.Private)
                 {
                     showRow = true;
                 }
@@ -1771,12 +1741,9 @@ namespace YARG.Menu.Multiplayer
         {
             var markers = new List<Transform>(4);
 
-            if (_hostedLobbyNameInput != null)
-                markers.Add(_hostedLobbyNameInput.transform);
-            if (_hostedLobbyMaxPlayersDropdown != null)
-                markers.Add(_hostedLobbyMaxPlayersDropdown.transform);
-            if (_hostedLobbyPrivacyDropdown != null)
-                markers.Add(_hostedLobbyPrivacyDropdown.transform);
+            // Use the SessionSettingsPanelBuilder and buttons as markers
+            if (_hostedLobbySettingsPanel != null)
+                markers.Add(_hostedLobbySettingsPanel.transform);
             if (_hostedLobbyHostButton != null)
                 markers.Add(_hostedLobbyHostButton.transform);
             if (_hostedLobbyDeleteButton != null)
@@ -1857,46 +1824,55 @@ namespace YARG.Menu.Multiplayer
 
         private void SubmitCreateLobbyForm()
         {
-            string lobbyName = _createLobbyNameInput != null ? _createLobbyNameInput.text.Trim() : string.Empty;
-            if (string.IsNullOrEmpty(lobbyName))
+            // Use SessionSettingsPanelBuilder for consistent UX
+            var formData = GetCreateLobbyFormDataFromPanel();
+            if (formData.HasValue)
             {
-                ToastManager.ToastError("Lobby name can't be empty.");
-                FocusInput(_createLobbyNameInput);
-                return;
+                var data = formData.Value;
+                ToastManager.ToastInformation(ZString.Format("Hosting {0}...", data.LobbyName));
+                CreateLobbySubmitted?.Invoke(data);
             }
-
-            int maxPlayers = GetSelectedMaxPlayers();
-            if (maxPlayers < 2 || maxPlayers > 32)
-            {
-                ToastManager.ToastError("Max players must be between 2 and 32.");
-                return;
-            }
-
-            var privacyMode = GetSelectedPrivacyMode();
-            string password = string.Empty;
-
-            if (privacyMode == YargNetworkManager.LobbyPrivacyMode.Private)
-            {
-                password = _createLobbyPasswordInput != null ? _createLobbyPasswordInput.text.Trim() : string.Empty;
-                if (string.IsNullOrEmpty(password))
-                {
-                    ToastManager.ToastWarning("Set a password for private lobbies.");
-                    FocusInput(_createLobbyPasswordInput);
-                    return;
-                }
-            }
-
-            var data = new CreateLobbyFormData(
-                _activePreset?.id ?? string.Empty,
-                lobbyName,
-                maxPlayers,
-                privacyMode,
-                password);
-
-            ToastManager.ToastInformation(ZString.Format("Hosting {0}...", lobbyName));
-            CreateLobbySubmitted?.Invoke(data);
         }
 
+        private static int GetBandSizeFromInput(TMP_InputField input)
+        {
+            if (input == null)
+                return 0;
+            
+            if (int.TryParse(input.text, out int bandSize))
+                return Mathf.Clamp(bandSize, 0, 8);
+            
+            return 0;
+        }
+
+        /// <summary>
+        /// Smart connect handler - chooses between lobby code join and direct IP connect
+        /// based on which input field has content.
+        /// </summary>
+        private void SubmitConnectForm()
+        {
+            string lobbyCode = _lobbyCodeInput != null ? _lobbyCodeInput.text?.Trim().ToUpperInvariant() : string.Empty;
+            string endpointInput = _directConnectAddressInput != null ? _directConnectAddressInput.text?.Trim() : string.Empty;
+            
+            // Priority: Lobby code first (if it has content), then direct IP
+            if (!string.IsNullOrEmpty(lobbyCode))
+            {
+                // User entered a lobby code - use that
+                SubmitLobbyCode();
+            }
+            else if (!string.IsNullOrEmpty(endpointInput))
+            {
+                // User entered an IP/address - use direct connect
+                SubmitDirectConnectForm();
+            }
+            else
+            {
+                // Neither field has content - show error
+                ToastManager.ToastError("Enter a lobby code or IP address to connect.");
+                FocusInput(_lobbyCodeInput ?? _directConnectAddressInput);
+            }
+        }
+        
         private void SubmitDirectConnectForm()
         {
             string endpointInput = _directConnectAddressInput != null ? _directConnectAddressInput.text : string.Empty;
@@ -1913,6 +1889,39 @@ namespace YARG.Menu.Multiplayer
             var form = new DirectConnectFormData(address, port, displayName, password);
             ToastManager.ToastInformation(ZString.Format("Connecting to {0}...", EndpointUtility.FormatEndpoint(address, port)));
             DirectConnectSubmitted?.Invoke(form);
+        }
+        
+        private void SubmitLobbyCode()
+        {
+            string code = _lobbyCodeInput != null ? _lobbyCodeInput.text?.Trim().ToUpperInvariant() : string.Empty;
+            
+            if (string.IsNullOrEmpty(code))
+            {
+                ToastManager.ToastError("Enter a lobby code");
+                FocusInput(_lobbyCodeInput);
+                return;
+            }
+            
+            if (code.Length != 6)
+            {
+                ToastManager.ToastError("Code must be 6 characters");
+                FocusInput(_lobbyCodeInput);
+                return;
+            }
+            
+            ToastManager.ToastInformation(ZString.Format("Looking up lobby code {0}...", code));
+            JoinByCodeSubmitted?.Invoke(code);
+        }
+        
+        /// <summary>
+        /// Clears the lobby code input field.
+        /// </summary>
+        public void ClearLobbyCodeInput()
+        {
+            if (_lobbyCodeInput != null)
+            {
+                SetInputFieldText(_lobbyCodeInput, string.Empty);
+            }
         }
 
         private static void SetInputFieldText(TMP_InputField field, string value)
@@ -2014,13 +2023,14 @@ namespace YARG.Menu.Multiplayer
             if (dropdown == null)
                 return;
 
-            if (dropdown.options == null || dropdown.options.Count == 0)
+            if (dropdown.options == null || dropdown.options.Count < 3)
             {
                 dropdown.ClearOptions();
                 dropdown.AddOptions(new List<string>
                 {
                     "Public",
-                    "Private (Password)"
+                    "Private (Password)",
+                    "Unlisted (Direct Connect Only)"
                 });
             }
         }
@@ -2072,23 +2082,158 @@ namespace YARG.Menu.Multiplayer
             return 8;
         }
 
-        private int GetSelectedMaxPlayers()
+        #endregion
+
+        #region SessionSettingsPanelBuilder Integration
+
+        /// <summary>
+        /// Applies the current preset data to the create lobby settings panel.
+        /// </summary>
+        private void ApplyCreateLobbyToSettingsPanel(bool shouldReset, bool focusFirstField)
         {
-            int parsed = GetSelectedMaxPlayers(_createLobbyMaxPlayersDropdown);
-            return parsed > 0 ? parsed : 8;
+            if (_createLobbySettingsPanel == null)
+                return;
+
+            // Configure for lobby creation mode
+            _createLobbySettingsPanel.Configure(SettingsPanelMode.Create, SettingsPanelConfig.ForLobbyBrowser);
+
+            if (shouldReset)
+            {
+                var sourcePreset = _activePreset;
+
+                // Build suggested lobby name if empty
+                string lobbyName = sourcePreset?.lobbyName;
+                if (string.IsNullOrWhiteSpace(lobbyName))
+                {
+                    string player = GetPlayerName();
+                    lobbyName = ZString.Format("{0}'s Lobby", player);
+                }
+
+                // Convert stored instrument integers to GameMode list
+                List<GameMode> allowedGameModes = null;
+                if (sourcePreset?.allowedInstruments != null && sourcePreset.allowedInstruments.Count > 0)
+                {
+                    allowedGameModes = sourcePreset.allowedInstruments
+                        .Select(i => (GameMode)i)
+                        .Where(gm => Enum.IsDefined(typeof(GameMode), gm))
+                        .ToList();
+                }
+
+                var data = new SessionSettingsData
+                {
+                    LobbyName = lobbyName ?? string.Empty,
+                    MaxPlayers = sourcePreset?.maxPlayers ?? 4,
+                    PrivacyMode = sourcePreset?.PrivacyMode ?? LobbyPrivacyMode.Public,
+                    Password = sourcePreset?.password ?? string.Empty,
+                    BandSize = sourcePreset?.bandSize ?? 0,
+                    NoFailMode = sourcePreset?.noFailMode ?? false,
+                    SharedSongsOnly = sourcePreset?.sharedSongsOnly ?? true,
+                    AllowModifiers = sourcePreset?.allowModifiers ?? true,
+                    EnablePresetSync = sourcePreset?.enablePresetSync ?? true,
+                    AllowLateJoin = sourcePreset?.allowLateJoin ?? true,
+                    AllowedGameModes = allowedGameModes,
+                    LocalPlayersFirst = sourcePreset?.localPlayersFirst ?? false
+                };
+
+                _createLobbySettingsPanel.SetData(data);
+            }
+
+            if (focusFirstField)
+            {
+                _createLobbySettingsPanel.FocusFirstField();
+            }
         }
 
-        private static int GetSelectedMaxPlayers(TMP_Dropdown dropdown)
+        /// <summary>
+        /// Applies the current preset data to the hosted lobby settings panel.
+        /// </summary>
+        private void ApplyHostedLobbyToSettingsPanel()
         {
-            return ParseMaxPlayersOption(dropdown, dropdown != null ? dropdown.value : -1);
+            if (_hostedLobbySettingsPanel == null)
+                return;
+
+            // Configure for hosted lobby editing mode
+            _hostedLobbySettingsPanel.Configure(SettingsPanelMode.Create, SettingsPanelConfig.ForLobbyBrowser);
+
+            var sourcePreset = _activePreset;
+            
+            // Convert stored instrument integers to GameMode list
+            List<GameMode> allowedGameModes = null;
+            if (sourcePreset?.allowedInstruments != null && sourcePreset.allowedInstruments.Count > 0)
+            {
+                allowedGameModes = sourcePreset.allowedInstruments
+                    .Select(i => (GameMode)i)
+                    .Where(gm => Enum.IsDefined(typeof(GameMode), gm))
+                    .ToList();
+            }
+            
+            var data = new SessionSettingsData
+            {
+                LobbyName = sourcePreset?.lobbyName ?? string.Empty,
+                MaxPlayers = sourcePreset?.maxPlayers ?? 4,
+                PrivacyMode = sourcePreset?.PrivacyMode ?? LobbyPrivacyMode.Public,
+                SessionType = sourcePreset?.SessionType ?? SessionType.Server,
+                Password = sourcePreset?.password ?? string.Empty,
+                BandSize = sourcePreset?.bandSize ?? 0,
+                NoFailMode = sourcePreset?.noFailMode ?? false,
+                SharedSongsOnly = sourcePreset?.sharedSongsOnly ?? true,
+                AllowModifiers = sourcePreset?.allowModifiers ?? true,
+                EnablePresetSync = sourcePreset?.enablePresetSync ?? true,
+                AllowLateJoin = sourcePreset?.allowLateJoin ?? true,
+                AllowedGameModes = allowedGameModes,
+                LocalPlayersFirst = sourcePreset?.localPlayersFirst ?? false
+            };
+
+            _hostedLobbySettingsPanel.SetData(data);
         }
 
-        private YargNetworkManager.LobbyPrivacyMode GetSelectedPrivacyMode()
+        /// <summary>
+        /// Gets form data from the create lobby settings panel for submission.
+        /// </summary>
+        private CreateLobbyFormData? GetCreateLobbyFormDataFromPanel()
         {
-            if (_createLobbyPrivacyDropdown == null)
-                return YargNetworkManager.LobbyPrivacyMode.Public;
+            if (_createLobbySettingsPanel == null)
+                return null;
 
-            return (YargNetworkManager.LobbyPrivacyMode)Mathf.Clamp(_createLobbyPrivacyDropdown.value, 0, 1);
+            var error = _createLobbySettingsPanel.Validate();
+            if (!string.IsNullOrEmpty(error))
+            {
+                ToastManager.ToastError(error);
+                return null;
+            }
+
+            var data = _createLobbySettingsPanel.GetData();
+            Debug.Log($"[LobbyBrowserSidebar] GetCreateLobbyFormDataFromPanel: data.AllowLateJoin={data.AllowLateJoin}");
+            
+            return new CreateLobbyFormData(
+                _activePreset?.id ?? string.Empty,
+                data.LobbyName,
+                data.MaxPlayers,
+                data.PrivacyMode,
+                data.SessionType,
+                data.Password,
+                data.BandSize,
+                data.NoFailMode,
+                data.SharedSongsOnly,
+                data.AllowModifiers,
+                data.EnablePresetSync,
+                data.AllowLateJoin,
+                data.AllowedGameModes?.Select(g => (int)g).ToList() ?? new List<int>(),
+                data.LocalPlayersFirst
+            );
+        }
+
+        /// <summary>
+        /// Gets settings data from the hosted lobby settings panel for saving.
+        /// </summary>
+        private SessionSettingsData GetHostedLobbyDataFromPanel()
+        {
+            if (_hostedLobbySettingsPanel == null)
+                return null;
+
+            var data = _hostedLobbySettingsPanel.GetData();
+            Debug.Log($"[LobbyBrowserSidebar] GetHostedLobbyDataFromPanel: SessionType={data.SessionType}");
+            return data;
         }
 
         #endregion
@@ -2100,16 +2245,89 @@ namespace YARG.Menu.Multiplayer
             public string PresetId { get; }
             public string LobbyName { get; }
             public int MaxPlayers { get; }
-            public YargNetworkManager.LobbyPrivacyMode PrivacyMode { get; }
+            public LobbyPrivacyMode PrivacyMode { get; }
+            public SessionType SessionType { get; }
             public string Password { get; }
+            
+            // Extended gameplay settings
+            public int BandSize { get; }
+            public bool NoFailMode { get; }
+            public bool SharedSongsOnly { get; }
+            public bool AllowModifiers { get; }
+            
+            // Session settings
+            public bool EnablePresetSync { get; }
+            public bool AllowLateJoin { get; }
+            
+            // Instrument restrictions
+            public List<int> AllowedInstruments { get; }
+            public bool LocalPlayersFirst { get; }
 
-            public CreateLobbyFormData(string presetId, string lobbyName, int maxPlayers, YargNetworkManager.LobbyPrivacyMode privacyMode, string password)
+            public CreateLobbyFormData(string presetId, string lobbyName, int maxPlayers, LobbyPrivacyMode privacyMode, string password)
+                : this(presetId, lobbyName, maxPlayers, privacyMode, SessionType.Lobby, password, 0, false, true, true, true, true, new List<int>(), false)
+            {
+            }
+
+            public CreateLobbyFormData(
+                string presetId, 
+                string lobbyName, 
+                int maxPlayers, 
+                LobbyPrivacyMode privacyMode, 
+                string password,
+                int bandSize,
+                bool noFailMode,
+                bool sharedSongsOnly,
+                bool allowModifiers)
+                : this(presetId, lobbyName, maxPlayers, privacyMode, SessionType.Lobby, password, bandSize, noFailMode, sharedSongsOnly, allowModifiers, true, true, new List<int>(), false)
+            {
+            }
+
+            public CreateLobbyFormData(
+                string presetId, 
+                string lobbyName, 
+                int maxPlayers, 
+                LobbyPrivacyMode privacyMode, 
+                string password,
+                int bandSize,
+                bool noFailMode,
+                bool sharedSongsOnly,
+                bool allowModifiers,
+                bool enablePresetSync,
+                bool allowLateJoin)
+                : this(presetId, lobbyName, maxPlayers, privacyMode, SessionType.Lobby, password, bandSize, noFailMode, sharedSongsOnly, allowModifiers, enablePresetSync, allowLateJoin, new List<int>(), false)
+            {
+            }
+
+            public CreateLobbyFormData(
+                string presetId, 
+                string lobbyName, 
+                int maxPlayers, 
+                LobbyPrivacyMode privacyMode, 
+                SessionType sessionType,
+                string password,
+                int bandSize,
+                bool noFailMode,
+                bool sharedSongsOnly,
+                bool allowModifiers,
+                bool enablePresetSync,
+                bool allowLateJoin,
+                List<int> allowedInstruments,
+                bool localPlayersFirst)
             {
                 PresetId = presetId ?? string.Empty;
                 LobbyName = lobbyName ?? string.Empty;
                 MaxPlayers = maxPlayers;
                 PrivacyMode = privacyMode;
+                SessionType = sessionType;
                 Password = password ?? string.Empty;
+                BandSize = bandSize;
+                NoFailMode = noFailMode;
+                SharedSongsOnly = sharedSongsOnly;
+                AllowModifiers = allowModifiers;
+                EnablePresetSync = enablePresetSync;
+                AllowLateJoin = allowLateJoin;
+                AllowedInstruments = allowedInstruments ?? new List<int>();
+                LocalPlayersFirst = localPlayersFirst;
             }
         }
 

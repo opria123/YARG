@@ -379,7 +379,9 @@
             "NoPlayersConnected": "No players connected! Go to the profiles menu to connect a player.",
             "Play": "Play Song",
             "Search": "Search",
-            "MoreOptions": "<align=left><size=80%>More Options<br>(Hold) Navigate Sections</size></align>"
+            "MoreOptions": "<align=left><size=80%>More Options<br>(Hold) Navigate Sections</size></align>",
+            "ViewSetlist": "View Setlist",
+            "QuickStart": "Quick Start"
         },
         "ProfileInfo": {
             "Name": "Edit Profile",

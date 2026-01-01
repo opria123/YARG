@@ -168,39 +168,91 @@ Resolving conflicts:
 - Trigger the `Builds - Dedicated Server (Linux)` GitHub workflow or run the Unity build method `Editor.Build.DedicatedServerBuild.BuildLinuxServer` to generate a headless build under `Build/DedicatedServer`.
 - The workflow publishes a multi-use artifact and can push a ready-to-run Docker image to `ghcr.io/<namespace>/yarg-dedicated` when launched with Docker publishing enabled.
 
+### Configuration
+
+All server settings are configured via a JSON file: `dedicated_server.json`. On first run, a default config file is created in the persistent data directory.
+
+**Example configuration:**
+```json
+{
+  "server": {
+    "sessionName": "My YARG Server",
+    "port": 9050,
+    "maxPlayers": 16,
+    "password": "",
+    "privacyMode": "public",
+    "visibleOnLan": true,
+    "registerWithIntroducers": true
+  },
+  "gameplay": {
+    "bandSize": 0,
+    "noFailMode": false,
+    "sharedSongsOnly": true,
+    "allowModifiers": true,
+    "enablePresetSync": true,
+    "allowLateJoin": true,
+    "blockedGameModes": []
+  },
+  "timeouts": {
+    "idleMinutes": 30,
+    "readyUpMinutes": 5
+  },
+  "moderation": {
+    "voteToKickEnabled": true,
+    "voteToKickThreshold": 0.5,
+    "banListPath": "banned_ips.json"
+  },
+  "admin": {
+    "webPort": 8080,
+    "username": "admin",
+    "password": "changeme",
+    "allowRemoteAccess": false
+  }
+}
+```
+
+**Important notes:**
+- `sharedSongsOnly` is always `true` for dedicated servers (the server has no local songs)
+- Change the default admin password before deploying!
+- Set `allowRemoteAccess` to `true` only if you need to access the admin UI from outside localhost
+
 ### Using Docker
 
-- Pull the latest image: `docker pull ghcr.io/<namespace>/yarg-dedicated:latest`.
-- Run the container while exposing the transport port:
-  ```sh
-  docker run -d --name yarg-server \
-    -p 7777:7777/udp -p 7777:7777/tcp \
-    -e YARG_MAX_PLAYERS=4 \
-    -e YARG_PRIVACY=private \
-    -e YARG_PASSWORD=changeme \
-    -e YARG_LOBBY_NAME="Setlist Night" \
-    ghcr.io/<namespace>/yarg-dedicated:latest
-  ```
-- Supported environment variables (all optional):
-  - `YARG_MAX_PLAYERS` (2, 4, or 8; default 8)
-  - `YARG_PRIVACY` (`public` or `private`; default `public`)
-  - `YARG_PASSWORD` (required when privacy is `private`)
-  - `YARG_LOBBY_NAME` (displayed lobby name)
-  - `YARG_HOST_NAME` (name shown for the server owner)
+Pull the latest image and run with a mounted config volume:
+```sh
+docker run -d --name yarg-server \
+  -p 9050:9050/udp -p 9050:9050/tcp \
+  -p 8080:8080/tcp \
+  -v ./server-config:/app/config \
+  ghcr.io/<namespace>/yarg-dedicated:latest
+```
 
-You can override or extend the defaults by passing command-line arguments after the image name (for example `-max-players 8 -privacy public`).
+Place your `dedicated_server.json` in the `./server-config` directory before starting.
 
 ### Building Locally
 
-- From the repository root, run `Unity -batchmode -nographics -quit -projectPath "$(pwd)" -executeMethod Editor.Build.DedicatedServerBuild.BuildLinuxServer` to create the server build without opening the editor.
-- Copy the contents of `Build/DedicatedServer` to a Linux machine and launch `./YARGServer -batchmode -nographics -dedicated`.
-- Provide optional flags at launch time:
-  - `-max-players <2|4|8>`
-  - `-privacy <public|private>`
-  - `-password <value>`
-  - `-lobby-name "Custom Name"`
+1. From the repository root, build the server:
+   ```sh
+   Unity -batchmode -nographics -quit -projectPath "$(pwd)" -executeMethod Editor.Build.DedicatedServerBuild.BuildLinuxServer
+   ```
+2. Copy `Build/DedicatedServer` to your server machine
+3. Create `dedicated_server.json` in the same directory (or use `-persistent-data-path` to specify a config location)
+4. Launch: `./YARGServer -batchmode -nographics -dedicated`
 
-Private lobbies must include a password; if none is supplied the server will generate one and log it to the console output.
+### Admin Web Interface
+
+The server includes a built-in admin web interface for server management:
+- **URL:** `http://localhost:8080/` (or your server's IP if `allowRemoteAccess` is enabled)
+- **Features:** Player list, kick/ban controls, settings management, host promotion
+- **Authentication:** Username and password from config file
+
+### IP Ban List
+
+Banned players are stored in `banned_ips.json` (or the path specified in config). The ban list is IP-based to prevent players from rejoining with different profiles. Ban entries include:
+- IP address
+- Last known player names (for reference)
+- Ban reason and timestamp
+- Optional expiration time (0 = permanent)
 
 ## ✍️ Contributing and Credits
 

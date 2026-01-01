@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using TMPro;
 using UnityEngine;
 using UnityEngine.Serialization;
 using YARG.Assets.Script.Helpers;
@@ -62,6 +63,12 @@ namespace YARG.Gameplay.Player
 
         [SerializeField]
         protected CameraPositioner CameraPositioner;
+        
+        /// <summary>
+        /// Gets the camera positioner for this track. Used for setting initial state on spectator tracks.
+        /// </summary>
+        public CameraPositioner TrackCameraPositioner => CameraPositioner;
+        
         [SerializeField]
         protected HighwayCameraRendering HighwayCameraRendering;
         [SerializeField]
@@ -76,6 +83,11 @@ namespace YARG.Gameplay.Player
         protected IndicatorStripes IndicatorStripes;
         [SerializeField]
         protected HitWindowDisplay HitWindowDisplay;
+
+        [Header("Multiplayer Player Name")]
+        [SerializeField]
+        [Tooltip("Optional: TextMeshPro for showing remote player name on the track. Position this where you want the name to appear.")]
+        protected TextMeshPro _playerNameLabel;
 
         [SerializeField]
         private Transform _hudLocation;
@@ -126,6 +138,10 @@ namespace YARG.Gameplay.Player
         }
 
         protected float SongLength;
+        
+        // Revival countdown state
+        protected double _revivalCountdownEndTime = -1;
+        protected double _revivalCountdownDuration = 0;
 
         public virtual void Initialize(int index, YargPlayer player, SongChart chart, TrackView trackView,
             StemMixer mixer, int? lastHighScore)
@@ -229,6 +245,118 @@ namespace YARG.Gameplay.Player
         internal virtual void UpdateRemoteCountdown()
         {
         }
+
+        /// <summary>
+        /// Syncs happiness and fail state from network for remote players.
+        /// </summary>
+        /// <param name="happiness">The happiness value from the authoritative client.</param>
+        /// <param name="hasFailed">Whether the player has failed according to the authoritative client.</param>
+        internal virtual void SyncRemoteHappiness(float happiness, bool hasFailed)
+        {
+        }
+        
+        /// <summary>
+        /// Sets the initial fail state for spectator tracks.
+        /// This ensures the track starts in the correct visual state (lowered if failed).
+        /// </summary>
+        /// <param name="hasFailed">Whether the player has already failed.</param>
+        public virtual void SetInitialFailState(bool hasFailed)
+        {
+            // Override in derived class to set _didLowerTrack flag
+        }
+
+        /// <summary>
+        /// Initializes the player name label for multiplayer.
+        /// Shows the player's name on the track for remote players only.
+        /// </summary>
+        protected void InitializePlayerNameLabel(YargPlayer player)
+        {
+            if (_playerNameLabel == null)
+                return;
+                
+            // Only show for remote players in multiplayer
+            if (IsRemotePlayer && player?.Profile != null)
+            {
+                _playerNameLabel.text = player.Profile.Name;
+                _playerNameLabel.gameObject.SetActive(true);
+            }
+            else
+            {
+                _playerNameLabel.gameObject.SetActive(false);
+            }
+        }
+        
+        /// <summary>
+        /// Marks this track as disconnected. The track will be grayed out and stop updating,
+        /// but will remain in place to avoid shifting other players' tracks.
+        /// </summary>
+        public virtual void MarkAsDisconnected()
+        {
+            IsDisconnected = true;
+            
+            // Gray out the track material
+            if (TrackMaterial != null)
+            {
+                TrackMaterial.SetGrayedOut(true);
+            }
+            
+            // Update the player name label to show disconnected state
+            if (_playerNameLabel != null)
+            {
+                _playerNameLabel.color = new Color(0.5f, 0.5f, 0.5f, 0.7f); // Gray color
+                _playerNameLabel.text = $"[DISCONNECTED] {_playerNameLabel.text}";
+                _playerNameLabel.gameObject.SetActive(true);
+            }
+            
+            // Return all pooled objects and stop spawning
+            if (NotePool != null)
+            {
+                NotePool.ReturnAllObjects();
+            }
+            
+            if (BeatlinePool != null)
+            {
+                BeatlinePool.ReturnAllObjects();
+            }
+            
+            if (EffectPool != null)
+            {
+                EffectPool.ReturnAllObjects();
+            }
+            
+            // Hide/disable visual components
+            if (ComboMeter != null)
+            {
+                ComboMeter.gameObject.SetActive(false);
+            }
+            
+            if (StarPowerEffect != null)
+            {
+                StarPowerEffect.gameObject.SetActive(false);
+            }
+            
+            if (StarpowerBar != null)
+            {
+                StarpowerBar.gameObject.SetActive(false);
+            }
+            
+            if (SunburstEffects != null)
+            {
+                SunburstEffects.gameObject.SetActive(false);
+            }
+            
+            if (IndicatorStripes != null)
+            {
+                IndicatorStripes.gameObject.SetActive(false);
+            }
+            
+            if (HitWindowDisplay != null)
+            {
+                HitWindowDisplay.gameObject.SetActive(false);
+            }
+            
+            Debug.Log($"[TrackPlayer] Marked track as disconnected for player: {Player?.Profile?.Name}");
+        }
     }
 
     public abstract class TrackPlayer<TEngine, TNote> : TrackPlayer
@@ -305,6 +433,9 @@ namespace YARG.Gameplay.Player
             Engine = CreateEngine();
 
             base.ComboMeter.Initialize(player.EnginePreset, Engine.BaseParameters.MaxMultiplier);
+            
+            // Initialize persistent player name label for multiplayer (shows for remote players)
+            InitializePlayerNameLabel(player);
 
             Engine.OnComboIncrement += OnComboIncrement;
             Engine.OnComboReset += OnComboReset;
@@ -408,7 +539,11 @@ namespace YARG.Gameplay.Player
         protected virtual void FinishInitialization()
         {
             TrackMaterial.Initialize(Player.HighwayPreset);
-            CameraPositioner.Initialize(Player.CameraPreset);
+            // For spectator tracks (late-join or spectate mode), skip the auto-raise animation.
+            // Their initial state will be set via SetInitialState() after initialization.
+            // However, at song START (before IsSongStarted), remote players should animate too.
+            bool skipAutoRaise = IsRemotePlayer && GameManager.IsSongStarted;
+            CameraPositioner.Initialize(Player.CameraPreset, skipAutoRaise: skipAutoRaise);
             FinalizeTrackEffects();
         }
 
@@ -440,18 +575,30 @@ namespace YARG.Gameplay.Player
 
             BeatlineIndex = 0;
             ResetNoteCounters();
+            
+            // Clear revival countdown state
+            _revivalCountdownEndTime = -1;
+            _revivalCountdownDuration = 0;
 
             base.ResetPracticeSection();
         }
 
         protected override void UpdateVisuals(double visualTime)
         {
+            // For disconnected players, only scroll the track background - skip everything else
+            if (IsDisconnected)
+            {
+                TrackMaterial.SetTrackScroll(visualTime, NoteSpeed);
+                return;
+            }
+            
             // Allow the HUD to track the highway with animations
             TrackView.UpdateHUDPosition(HighwayIndex, HighwayCount);
 
             UpdateNotes(visualTime);
             UpdateBeatlines(visualTime);
             UpdateTrackEffects(visualTime);
+            UpdateRevivalCountdown();
 
             var stats = Engine.BaseStats;
 
@@ -525,11 +672,26 @@ namespace YARG.Gameplay.Player
             }
 
             bool isSongEnd = visualTime > SongLength;
-            bool shouldLowerTrack = isSongEnd || GameManager.PlayerHasFailed;
+            // Lower track if song ended OR if this specific player has failed (or whole band)
+            bool shouldLowerTrack = isSongEnd || HasPlayerFailed();
             if (!_didLowerTrack && shouldLowerTrack)
             {
                 _didLowerTrack = true;
                 CameraPositioner.Lower(isSongEnd);
+                if (IsRemotePlayer)
+                {
+                    Debug.Log($"[TrackPlayer] Lowering spectator track for '{Player?.Profile?.Name ?? "Unknown"}' (failed={HasPlayerFailed()}, songEnd={isSongEnd})");
+                }
+            }
+            // Raise track back up if player was revived (but not at song end)
+            else if (_didLowerTrack && !shouldLowerTrack && !isSongEnd)
+            {
+                _didLowerTrack = false;
+                CameraPositioner.Raise();
+                if (IsRemotePlayer)
+                {
+                    Debug.Log($"[TrackPlayer] Raising spectator track for '{Player?.Profile?.Name ?? "Unknown"}' (revived)");
+                }
             }
         }
 
@@ -830,6 +992,13 @@ namespace YARG.Gameplay.Player
 
         protected virtual void OnNoteHit(int index, TNote note)
         {
+            // Skip expensive effects for remote players (haptics, stem mute changes)
+            if (IsRemotePlayer)
+            {
+                LastCombo = Combo;
+                return;
+            }
+
             if (!GameManager.IsSeekingReplay)
             {
                 SetStemMuteState(false);
@@ -867,6 +1036,13 @@ namespace YARG.Gameplay.Player
                 IsFc = false;
             }
 
+            // Skip expensive effects for remote players (sound, camera punch, haptics)
+            if (IsRemotePlayer)
+            {
+                LastCombo = Combo;
+                return;
+            }
+
             if (!GameManager.IsSeekingReplay)
             {
                 SetStemMuteState(true);
@@ -901,7 +1077,52 @@ namespace YARG.Gameplay.Player
             _remoteStarPowerActive = isActive;
 
             EngineContainer?.SyncRemoteStarPowerState(isActive);
-            OnStarPowerStatus(isActive);
+            
+            // Call OnStarPowerStatusRemote instead of OnStarPowerStatus to avoid triggering
+            // revival logic. Remote player Star Power should only affect visuals/audio,
+            // not game mechanics like reviving players in the local player's band.
+            OnStarPowerStatusRemote(isActive);
+        }
+
+        internal override void SyncRemoteHappiness(float happiness, bool hasFailed)
+        {
+            if (!IsRemotePlayer || EngineContainer == null)
+            {
+                return;
+            }
+
+            // In NoFail mode, ignore fail state from network - players can't fail when NoFail is active.
+            // This ensures that if NoFail is enabled mid-session, remote players won't appear as failed.
+            if (GameManager != null && GameManager.IsNoFailActive)
+            {
+                hasFailed = false;
+            }
+
+            bool wasFailedBefore = EngineContainer.HasFailed;
+            EngineContainer.SyncRemoteHappiness(happiness, hasFailed);
+            
+            // Log state transitions for debugging
+            if (wasFailedBefore != hasFailed)
+            {
+                Debug.Log($"[TrackPlayer] Remote player '{Player?.Profile?.Name ?? "Unknown"}' fail state changed: {wasFailedBefore} -> {hasFailed} (happiness={happiness:F2})");
+            }
+        }
+        
+        /// <inheritdoc/>
+        public override void SetInitialFailState(bool hasFailed)
+        {
+            _didLowerTrack = hasFailed;
+            
+            // Also sync the engine container's fail state
+            if (EngineContainer != null)
+            {
+                // Use a low happiness value for failed state, normal for alive
+                float happiness = hasFailed ? 0f : 1f;
+                EngineContainer.SyncRemoteHappiness(happiness, hasFailed);
+            }
+            
+            Debug.Log($"[TrackPlayer] Set initial fail state for '{Player?.Profile?.Name ?? "Unknown"}': " +
+                $"hasFailed={hasFailed}, _didLowerTrack={_didLowerTrack}");
         }
 
         private void ApplyRemoteNoteResolution(TNote note, bool wasHit)
@@ -1103,6 +1324,53 @@ namespace YARG.Gameplay.Player
         protected virtual void OnCountdownChange(double countdownLength, double endTime)
         {
             TrackView.UpdateCountdown(countdownLength, endTime);
+        }
+        
+        /// <summary>
+        /// Shows a revival countdown when the player is revived via Star Power.
+        /// This gives the player visual warning before notes resume.
+        /// </summary>
+        /// <param name="gracePeriod">The grace period duration in seconds.</param>
+        public virtual void ShowRevivalCountdown(double gracePeriod)
+        {
+            // Calculate end time from current song time + grace period
+            double endTime = GameManager.SongTime + gracePeriod;
+            
+            // Store the revival countdown state for continuous updates
+            _revivalCountdownEndTime = endTime;
+            _revivalCountdownDuration = gracePeriod;
+            
+            // Initial update
+            TrackView.UpdateCountdown(gracePeriod, endTime);
+            
+            YargLogger.LogFormatDebug("[TrackPlayer] Showing revival countdown: {0}s, endTime={1}", gracePeriod, endTime);
+        }
+        
+        /// <summary>
+        /// Updates the revival countdown display if active.
+        /// Called every frame during UpdateVisuals.
+        /// </summary>
+        private void UpdateRevivalCountdown()
+        {
+            // Check if revival countdown is active
+            if (_revivalCountdownEndTime <= 0)
+            {
+                return;
+            }
+            
+            double currentTime = GameManager.SongTime;
+            double timeRemaining = _revivalCountdownEndTime - currentTime;
+            
+            if (timeRemaining <= 0)
+            {
+                // Countdown finished - clear state
+                _revivalCountdownEndTime = -1;
+                _revivalCountdownDuration = 0;
+                return;
+            }
+            
+            // Continue updating the countdown display
+            TrackView.UpdateCountdown(_revivalCountdownDuration, _revivalCountdownEndTime);
         }
 
         /// <summary>

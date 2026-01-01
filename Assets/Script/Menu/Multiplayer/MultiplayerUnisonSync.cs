@@ -2,208 +2,154 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using YARG.Core.Engine;
-using YARG.Gameplay;
-using YARG.Gameplay.Player;
-using YARG.Networking;
 using YARG.Networking.Abstraction;
 
 namespace YARG.Menu.Multiplayer
 {
     /// <summary>
-    /// Handles synchronization of unison phrase completions and bonus awards in networked multiplayer.
-    /// 
-    /// In local play, the EngineManager handles unisons internally since all engines are in one process.
-    /// In networked play, each client has its own EngineManager with only local engines, so we need to:
-    /// 1. Send unison phrase completions to the host
-    /// 2. Have the host track completions from all players
-    /// 3. Broadcast bonus awards when all players complete a unison phrase
+    /// Handles unison phrase synchronization for multiplayer.
+    /// Coordinates with the network layer to determine when all players in a band have hit a unison phrase.
+    /// Supports per-band unison tracking.
     /// </summary>
     public class MultiplayerUnisonSync : MonoBehaviour
     {
-        private bool _isInitialized;
-        private bool _isMultiplayer;
-        private bool _useLiteNet;
-        private LiteNetNetworkingAdapter _liteNetAdapter;
+        private LiteNetNetworkingAdapter _networkAdapter;
+        private int _totalPlayerCount;
+        private readonly List<EngineManager.EngineContainer> _localEngineContainers = new();
         
-        // Track which unison phrases have been locally completed to avoid duplicate sends
-        private HashSet<double> _locallyCompletedPhrases = new();
-        
-        // Track which bonus awards we've already processed to avoid duplicates
-        private HashSet<double> _processedBonusAwards = new();
-        
-        // Reference to the local player's engine container (for awarding bonuses)
-        private List<EngineManager.EngineContainer> _localEngineContainers = new();
-        
+        // Map of engine container to its band ID
+        private readonly Dictionary<EngineManager.EngineContainer, int> _containerBandMap = new();
+
+        /// <summary>
+        /// Event fired when a unison bonus should be awarded to players in a band.
+        /// Parameters: bandId, phraseTime, bonusMultiplier
+        /// </summary>
+        public event Action<int, double, float> OnUnisonBonusAwarded;
+
         private void Start()
         {
-            // Check if we're in multiplayer mode
-            bool isLiteNetActive = NetworkingServiceFactory.Instance?.IsNetworkActive == true;
-            bool isMirrorActive = !isLiteNetActive && 
-                                  YargNetworkManager.Instance != null && 
-                                  YargNetworkManager.Instance.isNetworkActive;
-            
-            if (!isLiteNetActive && !isMirrorActive)
+            _networkAdapter = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
+            if (_networkAdapter == null)
             {
-                _isMultiplayer = false;
-                Debug.Log("[MultiplayerUnisonSync] Not in multiplayer mode, disabling");
-                Destroy(this);
-                return;
+                Debug.LogWarning("[MultiplayerUnisonSync] No LiteNet adapter available - unison sync disabled");
             }
-            
-            _isMultiplayer = true;
-            _useLiteNet = isLiteNetActive;
-            
-            if (_useLiteNet)
-            {
-                _liteNetAdapter = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
-                if (_liteNetAdapter != null)
-                {
-                    // Subscribe to unison bonus awards from the network
-                    _liteNetAdapter.OnUnisonBonusAwarded += HandleUnisonBonusAwarded;
-                    Debug.Log("[MultiplayerUnisonSync] Initialized for LiteNet multiplayer");
-                }
-                else
-                {
-                    Debug.LogError("[MultiplayerUnisonSync] LiteNet adapter is null!");
-                    Destroy(this);
-                    return;
-                }
-            }
-            else
-            {
-                // TODO: Mirror support for unison sync
-                Debug.LogWarning("[MultiplayerUnisonSync] Mirror unison sync not yet implemented");
-            }
-            
-            _isInitialized = true;
         }
-        
-        private void OnDestroy()
-        {
-            if (_liteNetAdapter != null)
-            {
-                _liteNetAdapter.OnUnisonBonusAwarded -= HandleUnisonBonusAwarded;
-                _liteNetAdapter.ResetUnisonTracking();
-            }
-            
-            _localEngineContainers.Clear();
-            _locallyCompletedPhrases.Clear();
-            _processedBonusAwards.Clear();
-        }
-        
+
         /// <summary>
-        /// Registers an engine container for unison bonus tracking.
-        /// Should be called when players are initialized.
+        /// Registers a local engine container for unison tracking.
         /// </summary>
-        public void RegisterEngineContainer(EngineManager.EngineContainer container)
+        /// <param name="container">The engine container.</param>
+        /// <param name="bandId">The band ID this container belongs to.</param>
+        public void RegisterEngineContainer(EngineManager.EngineContainer container, int bandId = 0)
         {
-            if (container == null) return;
-            
-            if (!_localEngineContainers.Contains(container))
+            if (container != null && !_localEngineContainers.Contains(container))
             {
                 _localEngineContainers.Add(container);
-                Debug.Log($"[MultiplayerUnisonSync] Registered engine container {container.EngineId}");
+                _containerBandMap[container] = bandId;
+                Debug.Log($"[MultiplayerUnisonSync] Registered engine container for band {bandId} (total: {_localEngineContainers.Count})");
             }
         }
         
         /// <summary>
-        /// Sets the total number of players participating in unisons.
-        /// Should be called when gameplay starts.
+        /// Unregisters an engine container from unison tracking.
+        /// </summary>
+        public void UnregisterEngineContainer(EngineManager.EngineContainer container)
+        {
+            if (container != null)
+            {
+                _localEngineContainers.Remove(container);
+                _containerBandMap.Remove(container);
+            }
+        }
+        
+        /// <summary>
+        /// Clears all registered engine containers.
+        /// </summary>
+        public void ClearEngineContainers()
+        {
+            _localEngineContainers.Clear();
+            _containerBandMap.Clear();
+        }
+
+        /// <summary>
+        /// Sets the total number of players for unison tracking (includes remote players).
         /// </summary>
         public void SetTotalPlayerCount(int count)
         {
-            if (_liteNetAdapter != null)
-            {
-                _liteNetAdapter.SetUnisonPlayerCount(count);
-            }
-            
-            // Clear tracking for new game
-            _locallyCompletedPhrases.Clear();
-            _processedBonusAwards.Clear();
-            
+            _totalPlayerCount = count;
             Debug.Log($"[MultiplayerUnisonSync] Total player count set to {count}");
         }
         
         /// <summary>
-        /// Called when the local player completes a star power phrase that is part of a unison.
+        /// Sets the expected player count for a specific band.
         /// </summary>
-        /// <param name="phraseTime">The start time of the unison phrase</param>
-        /// <param name="phraseEndTime">The end time of the unison phrase</param>
+        public void SetBandPlayerCount(int bandId, int count)
+        {
+            _networkAdapter?.SetBandUnisonPlayerCount(bandId, count);
+            Debug.Log($"[MultiplayerUnisonSync] Band {bandId} player count set to {count}");
+        }
+
+        /// <summary>
+        /// Called when a local player hits a unison phrase.
+        /// </summary>
+        /// <param name="bandId">The band the player belongs to.</param>
+        /// <param name="phraseTime">The start time of the unison phrase.</param>
+        /// <param name="phraseEndTime">The end time of the unison phrase.</param>
+        public void OnLocalUnisonPhraseHit(int bandId, double phraseTime, double phraseEndTime)
+        {
+            if (_networkAdapter == null)
+                return;
+
+            // Get local player key
+            var localPlayer = _networkAdapter.GetLocalPlayer();
+            if (localPlayer == null)
+            {
+                Debug.LogWarning("[MultiplayerUnisonSync] No local player found for unison hit");
+                return;
+            }
+
+            // Report to network layer
+            if (!_networkAdapter.IsHosting)
+            {
+                // Client sends to host
+                _networkAdapter.SendUnisonPhraseHit(bandId, phraseTime, phraseEndTime);
+            }
+            // Host handles unison coordination through the handler
+        }
+        
+        /// <summary>
+        /// Called when a local player hits a unison phrase (legacy, uses bandId=0).
+        /// </summary>
         public void OnLocalUnisonPhraseHit(double phraseTime, double phraseEndTime)
         {
-            if (!_isInitialized || !_isMultiplayer)
-                return;
-            
-            // Use rounded key for deduplication
-            double phraseKey = Math.Round(phraseTime * 10) / 10;
-            
-            // Check if we've already sent this phrase
-            if (_locallyCompletedPhrases.Contains(phraseKey))
-            {
-                Debug.Log($"[MultiplayerUnisonSync] Already sent phrase completion for {phraseKey:F3}");
-                return;
-            }
-            
-            _locallyCompletedPhrases.Add(phraseKey);
-            
-            Debug.Log($"[MultiplayerUnisonSync] Local unison phrase hit at {phraseTime:F3}");
-            
-            if (_useLiteNet && _liteNetAdapter != null)
-            {
-                _liteNetAdapter.SendUnisonPhraseHit(phraseTime, phraseEndTime);
-            }
-            // TODO: Mirror support
+            OnLocalUnisonPhraseHit(0, phraseTime, phraseEndTime);
         }
-        
+
         /// <summary>
-        /// Handles the network event when a unison bonus should be awarded.
+        /// Called by the network layer when a unison bonus is awarded for a band.
         /// </summary>
-        private void HandleUnisonBonusAwarded(double phraseTime)
+        public void HandleNetworkUnisonBonus(int bandId, double phraseTime)
         {
-            // Use rounded key for deduplication
-            double phraseKey = Math.Round(phraseTime * 10) / 10;
+            Debug.Log($"[MultiplayerUnisonSync] Received network unison bonus for band {bandId}, phrase at {phraseTime}");
             
-            // Check if we've already processed this bonus
-            if (_processedBonusAwards.Contains(phraseKey))
-            {
-                Debug.Log($"[MultiplayerUnisonSync] Already processed bonus for phrase {phraseKey:F3}");
-                return;
-            }
-            
-            _processedBonusAwards.Add(phraseKey);
-            
-            Debug.Log($"[MultiplayerUnisonSync] Awarding unison bonus for phrase at {phraseTime:F3} to {_localEngineContainers.Count} local engines");
-            
-            // Award bonus to all local engine containers
+            // Award bonus to local engine containers that belong to this band
             foreach (var container in _localEngineContainers)
             {
-                try
+                if (_containerBandMap.TryGetValue(container, out var containerBandId) && containerBandId == bandId)
                 {
-                    // Directly award the bonus through the engine
-                    container.Engine.AwardUnisonBonus();
-                    Debug.Log($"[MultiplayerUnisonSync] Awarded unison bonus to engine {container.EngineId}");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[MultiplayerUnisonSync] Failed to award unison bonus to engine {container.EngineId}: {ex.Message}");
+                    container?.SendCommand(EngineManager.EngineCommandType.AwardUnisonBonus);
                 }
             }
+            
+            OnUnisonBonusAwarded?.Invoke(bandId, phraseTime, 1.0f);
         }
         
         /// <summary>
-        /// Resets the sync state. Called when practice section resets or song restarts.
+        /// Called by the network layer when a unison bonus is awarded (legacy, uses bandId=0).
         /// </summary>
-        public void Reset()
+        public void HandleNetworkUnisonBonus(double phraseTime)
         {
-            _locallyCompletedPhrases.Clear();
-            _processedBonusAwards.Clear();
-            
-            if (_liteNetAdapter != null)
-            {
-                _liteNetAdapter.ResetUnisonTracking();
-            }
-            
-            Debug.Log("[MultiplayerUnisonSync] Reset unison tracking state");
+            HandleNetworkUnisonBonus(0, phraseTime);
         }
     }
 }

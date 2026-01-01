@@ -157,12 +157,13 @@ namespace YARG.Menu.MusicLibrary
             MusicLibraryMenu.ResetMainLibraryIndex();
 
             // Check if we're in multiplayer mode
-            bool isMultiplayer = NetworkingServiceFactory.Instance != null && 
-                                 NetworkingServiceFactory.Instance.IsNetworkActive;
+            var networkService = NetworkingServiceFactory.Instance;
+            bool isMultiplayer = networkService != null && networkService.IsNetworkActive;
 
             if (isMultiplayer)
             {
-                // In multiplayer, selecting a song adds it to the setlist
+                // In multiplayer, clicking a song adds it to the setlist
+                // Use "View Setlist" or navigation scheme to start the show
                 Debug.Log($"[SongViewType] Adding song to multiplayer setlist: {SongEntry.Name}");
                 
                 // Add to the multiplayer show playlist
@@ -170,8 +171,6 @@ namespace YARG.Menu.MusicLibrary
                 
                 // Show feedback to user
                 Menu.Persistent.ToastManager.ToastSuccess(Localization.Localize.Key("Menu.MusicLibrary.AddedToSet"));
-                
-                // Note: Host will start the show with the "Start Set" button
             }
             else
             {

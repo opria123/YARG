@@ -66,6 +66,10 @@ namespace YARG.Gameplay.Player
         private const int NEEDLES_COUNT = 7;
 
         private SongChart _chart;
+        
+        // Revival countdown state
+        private double _revivalCountdownEndTime = -1;
+        private double _revivalCountdownDuration = 0;
 
         public void Initialize(int index, int vocalIndex, YargPlayer player, SongChart chart,
             VocalsPlayerHUD hud, VocalPercussionTrack percussionTrack, int? lastHighScore, float trackSpeed)
@@ -121,6 +125,13 @@ namespace YARG.Gameplay.Player
             _percussionTrack = percussionTrack;
 
             _hud.ShowPlayerName(player, needleIndex);
+            
+            // Initialize persistent player name label for remote players in multiplayer
+            // Use harmony color if available for better visual identification
+            Color? harmonyColor = player.Profile.HarmonyIndex >= 0 && player.Profile.HarmonyIndex < VocalTrack.Colors.Length
+                ? VocalTrack.Colors[player.Profile.HarmonyIndex]
+                : null;
+            _hud.InitializePersistentPlayerName(player, needleIndex, IsRemotePlayer, harmonyColor);
 
             // Create and start an input context for the mic
             if (!Player.IsReplay && player.Bindings != null && player.Bindings.Microphone != null)
@@ -297,6 +308,7 @@ namespace YARG.Gameplay.Player
         {
             UpdatePercussionPhrase(visualTime);
             UpdateSingNeedle();
+            UpdateRevivalCountdown();
 
             float fill = 0f;
             int multiplier;
@@ -325,14 +337,25 @@ namespace YARG.Gameplay.Player
 
             // In multiplayer, don't double the score multiplier in the strikeline element
             // Otherwise, it looks like the band multiplier applies on top of the score multiplier
-            var engineStats = Engine.EngineStats;
-            int displayMultiplier = GameManager.TotalPlayers > 1 && engineStats.IsStarPowerActive
-                ? engineStats.ScoreMultiplier / 2
-                : engineStats.ScoreMultiplier;
+            int displayMultiplier;
+            if (IsRemotePlayer)
+            {
+                // For remote players, use the synced values from network
+                displayMultiplier = GameManager.TotalPlayers > 1 && isStarPowerActive
+                    ? multiplier / 2
+                    : multiplier;
+            }
+            else
+            {
+                // For local players, use the engine stats
+                var engineStats = Engine.EngineStats;
+                displayMultiplier = GameManager.TotalPlayers > 1 && engineStats.IsStarPowerActive
+                    ? engineStats.ScoreMultiplier / 2
+                    : engineStats.ScoreMultiplier;
+            }
 
-            // Update HUD
-            _hud.UpdateInfo(fill, displayMultiplier,
-                (float) Engine.GetStarPowerBarAmount(), Engine.EngineStats.IsStarPowerActive);
+            // Update HUD with the correct values for this player type
+            _hud.UpdateInfo(fill, displayMultiplier, starPowerPercent, isStarPowerActive);
         }
 
         private void ShowTextNotifications(bool isLastPhrase)
@@ -683,6 +706,50 @@ namespace YARG.Gameplay.Player
             }
 
             return (closest, octaveShift);
+        }
+        
+        /// <summary>
+        /// Shows a revival countdown when the player is revived via Star Power.
+        /// </summary>
+        /// <param name="gracePeriod">The grace period duration in seconds.</param>
+        public override void ShowRevivalCountdown(double gracePeriod)
+        {
+            // Calculate end time from current song time + grace period
+            double endTime = GameManager.SongTime + gracePeriod;
+            
+            // Store the revival countdown state for continuous updates
+            _revivalCountdownEndTime = endTime;
+            _revivalCountdownDuration = gracePeriod;
+            
+            // Initial update
+            GameManager.VocalTrack?.UpdateCountdown(gracePeriod, endTime);
+        }
+        
+        /// <summary>
+        /// Updates the revival countdown display if active.
+        /// Called every frame during UpdateVisuals.
+        /// </summary>
+        private void UpdateRevivalCountdown()
+        {
+            // Check if revival countdown is active
+            if (_revivalCountdownEndTime <= 0)
+            {
+                return;
+            }
+            
+            double currentTime = GameManager.SongTime;
+            double timeRemaining = _revivalCountdownEndTime - currentTime;
+            
+            if (timeRemaining <= 0)
+            {
+                // Countdown finished - clear state
+                _revivalCountdownEndTime = -1;
+                _revivalCountdownDuration = 0;
+                return;
+            }
+            
+            // Continue updating the countdown display
+            GameManager.VocalTrack?.UpdateCountdown(_revivalCountdownDuration, _revivalCountdownEndTime);
         }
 
         public override (ReplayFrame Frame, ReplayStats Stats) ConstructReplayData()

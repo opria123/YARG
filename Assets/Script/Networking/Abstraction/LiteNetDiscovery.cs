@@ -53,6 +53,16 @@ namespace YARG.Networking.Abstraction
         public int DiscoveryPort => _discoveryPort;
         
         /// <summary>
+        /// Whether this discovery handler is currently advertising a lobby.
+        /// </summary>
+        public bool IsAdvertising => _isAdvertising;
+        
+        /// <summary>
+        /// The name of the currently advertised lobby, or null if not advertising.
+        /// </summary>
+        public string? AdvertisedLobbyName => _advertisedLobby?.LobbyName;
+        
+        /// <summary>
         /// Get all currently discovered lobbies.
         /// </summary>
         public IReadOnlyDictionary<string, LobbyInfo> DiscoveredLobbies
@@ -76,6 +86,13 @@ namespace YARG.Networking.Abstraction
             // Wire up events from DiscoveryManager
             _discoveryManager.LobbyDiscovered += info =>
             {
+                var lobbyInfo = ConvertToLobbyInfo(info);
+                UnityMainThreadDispatcher.EnqueueAction(() => OnLobbyDiscovered?.Invoke(lobbyInfo));
+            };
+            
+            _discoveryManager.LobbyUpdated += info =>
+            {
+                // Also fire OnLobbyDiscovered for updates so the UI refreshes
                 var lobbyInfo = ConvertToLobbyInfo(info);
                 UnityMainThreadDispatcher.EnqueueAction(() => OnLobbyDiscovered?.Invoke(lobbyInfo));
             };
@@ -114,6 +131,8 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         public void StopAdvertising()
         {
+            // Log stack trace to help debug unexpected advertising stops
+            Debug.Log($"[LiteNetDiscovery] StopAdvertising called! Stack trace:\n{System.Environment.StackTrace}");
             _advertisedLobby = null;
             _isAdvertising = false;
             Debug.Log("[LiteNetDiscovery] Stopped advertising lobby");
@@ -159,6 +178,47 @@ namespace YARG.Networking.Abstraction
             }
         }
         
+        /// <summary>
+        /// Handle an unconnected message from raw byte array.
+        /// This overload is used when the transport provides raw bytes instead of a NetPacketReader.
+        /// </summary>
+        public bool HandleUnconnectedMessage(IPEndPoint remoteEndPoint, byte[] data, NetManager netManager)
+        {
+            // Log every unconnected message received for debugging
+            Debug.Log($"[LiteNetDiscovery] HandleUnconnectedMessage from {remoteEndPoint}, {data.Length} bytes, isAdvertising={_isAdvertising}, hasLobby={_advertisedLobby != null}");
+            
+            if (!_isAdvertising || _advertisedLobby == null)
+            {
+                Debug.Log($"[LiteNetDiscovery] Not handling: isAdvertising={_isAdvertising}, advertisedLobby={((_advertisedLobby != null) ? _advertisedLobby.LobbyName : "null")}");
+                return false;
+            }
+            
+            if (data.Length < DiscoveryProtocol.MIN_PACKET_SIZE)
+            {
+                Debug.Log($"[LiteNetDiscovery] Packet too small: {data.Length} < {DiscoveryProtocol.MIN_PACKET_SIZE}");
+                return false;
+            }
+            
+            try
+            {
+                if (!DiscoveryProtocol.IsRequest(data))
+                {
+                    Debug.Log($"[LiteNetDiscovery] Not a discovery request (first byte: {(data.Length > 0 ? data[0].ToString("X2") : "empty")})");
+                    return false;
+                }
+                
+                // This is a discovery request, send a response
+                Debug.Log($"[LiteNetDiscovery] Received discovery request from {remoteEndPoint}");
+                SendDiscoveryResponse(netManager, remoteEndPoint);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[LiteNetDiscovery] Error handling unconnected message: {ex.Message}");
+                return false;
+            }
+        }
+        
         private void SendDiscoveryResponse(NetManager netManager, IPEndPoint remoteEndPoint)
         {
             if (_advertisedLobby == null)
@@ -183,7 +243,18 @@ namespace YARG.Networking.Abstraction
                     PublicAddress = _advertisedLobby.PublicAddress ?? "",
                     TransportId = _advertisedLobby.TransportId ?? "LiteNetLib",
                     PlayerNames = _advertisedLobby.PlayerNames ?? Array.Empty<string>(),
-                    PlayerInstruments = _advertisedLobby.PlayerInstruments ?? Array.Empty<int>()
+                    PlayerInstruments = _advertisedLobby.PlayerInstruments ?? Array.Empty<int>(),
+                    // Gameplay settings for lobby browser preview
+                    NoFailMode = _advertisedLobby.NoFailMode,
+                    SharedSongsOnly = _advertisedLobby.SharedSongsOnly,
+                    BandSize = _advertisedLobby.BandSize,
+                    AllowedGameModes = _advertisedLobby.AllowedGameModes != null 
+                        ? ConvertGameModesToInts(_advertisedLobby.AllowedGameModes)
+                        : Array.Empty<int>(),
+                    // Session type for bookmark eligibility
+                    SessionType = _advertisedLobby.SessionType,
+                    // Dedicated server flag
+                    IsDedicatedServer = _advertisedLobby.IsDedicatedServer
                 };
                 
                 // Use DiscoveryResponseBuilder from YARG.Net
@@ -204,6 +275,19 @@ namespace YARG.Networking.Abstraction
             }
         }
         
+        private static int[] ConvertGameModesToInts(List<YARG.Core.GameMode> gameModes)
+        {
+            if (gameModes == null || gameModes.Count == 0)
+                return Array.Empty<int>();
+            
+            var result = new int[gameModes.Count];
+            for (int i = 0; i < gameModes.Count; i++)
+            {
+                result[i] = (int)gameModes[i];
+            }
+            return result;
+        }
+        
         #endregion
         
         #region Client-Side (Discovery)
@@ -211,12 +295,22 @@ namespace YARG.Networking.Abstraction
         /// <summary>
         /// Start listening for discovery responses using LiteNetLib's NetManager.
         /// This ensures proper packet formatting for unconnected messages.
+        /// This method is idempotent - calling it when discovery is already running is a no-op.
         /// </summary>
         public void StartDiscovery()
         {
+            // If discovery client already exists and is running, don't restart it
+            // This prevents port changes during active discovery which can cause missed responses
+            if (_discoveryNetManager != null && _isRunning)
+            {
+                Debug.Log("[LiteNetDiscovery] Discovery client already running, keeping existing instance");
+                return;
+            }
+            
+            // If we have a stale/stopped discovery client, clean it up first
             if (_discoveryNetManager != null)
             {
-                Debug.Log("[LiteNetDiscovery] Discovery client already exists, stopping first");
+                Debug.Log("[LiteNetDiscovery] Discovery client exists but not running, cleaning up first");
                 StopDiscovery();
             }
             
@@ -226,6 +320,8 @@ namespace YARG.Networking.Abstraction
                 _discoveryNetManager = new NetManager(this)
                 {
                     UnconnectedMessagesEnabled = true,
+                    BroadcastReceiveEnabled = true, // Enable broadcast for LAN discovery
+                    ReuseAddress = true, // Allow multiple processes on same machine (ParrelSync)
                     AutoRecycle = true
                 };
                 
@@ -507,7 +603,7 @@ namespace YARG.Networking.Abstraction
                 // Set the IP address from the endpoint
                 lobbyInfo.IpAddress = remoteEndPoint.Address.ToString();
                 
-                Debug.Log($"[LiteNetDiscovery] Parsed lobby: {lobbyInfo.LobbyName} ({lobbyInfo.CurrentPlayers}/{lobbyInfo.MaxPlayers} players)");
+                Debug.Log($"[LiteNetDiscovery] Parsed lobby: {lobbyInfo.LobbyName} ({lobbyInfo.CurrentPlayers}/{lobbyInfo.MaxPlayers} players, IsDedicatedServer={lobbyInfo.IsDedicatedServer})");
                 
                 // Store/update using DiscoveryManager
                 lock (_lobbiesLock)
@@ -551,6 +647,15 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         private static LobbyInfo ConvertToLobbyInfo(DiscoveredLobbyInfo info)
         {
+            // Calculate ping as time since last seen (in milliseconds)
+            // This gives us a rough indication of responsiveness
+            var timeSinceSeen = DateTime.UtcNow - info.LastSeen;
+            int estimatedPing = (int)Math.Min(Math.Max(timeSinceSeen.TotalMilliseconds, 0), 999);
+            
+            // If very fresh (within 100ms), assume good ping
+            if (estimatedPing < 100)
+                estimatedPing = Math.Max(1, estimatedPing);
+            
             return new LobbyInfo
             {
                 LobbyId = info.LobbyId,
@@ -567,8 +672,36 @@ namespace YARG.Networking.Abstraction
                 IpAddress = info.IpAddress,
                 IsActive = info.IsActive,
                 PlayerNames = info.PlayerNames,
-                PlayerInstruments = info.PlayerInstruments
+                PlayerInstruments = info.PlayerInstruments,
+                LastSeen = info.LastSeen,
+                Ping = estimatedPing,
+                // Gameplay settings for lobby browser preview
+                NoFailMode = info.NoFailMode,
+                SharedSongsOnly = info.SharedSongsOnly,
+                BandSize = info.BandSize,
+                AllowedGameModes = ConvertIntsToGameModes(info.AllowedGameModes),
+                // Session type for bookmark eligibility
+                SessionType = info.SessionType,
+                // Dedicated server flag
+                IsDedicatedServer = info.IsDedicatedServer
             };
+        }
+        
+        private static List<YARG.Core.GameMode> ConvertIntsToGameModes(int[] gameModeInts)
+        {
+            var result = new List<YARG.Core.GameMode>();
+            if (gameModeInts == null || gameModeInts.Length == 0)
+                return result;
+            
+            foreach (var modeInt in gameModeInts)
+            {
+                // GameMode enum uses byte as underlying type, so cast to byte for IsDefined check
+                if (modeInt >= 0 && modeInt <= 255 && Enum.IsDefined(typeof(YARG.Core.GameMode), (byte)modeInt))
+                {
+                    result.Add((YARG.Core.GameMode)modeInt);
+                }
+            }
+            return result;
         }
 
         #endregion
@@ -590,6 +723,12 @@ namespace YARG.Networking.Abstraction
         private static readonly object _initLock = new();
         private static readonly Queue<Action> _pendingActions = new();
         private static bool _isQuitting;
+        private static int _mainThreadId;
+        
+        /// <summary>
+        /// Returns true if the current thread is the main Unity thread.
+        /// </summary>
+        public static bool IsMainThread => System.Threading.Thread.CurrentThread.ManagedThreadId == _mainThreadId;
         
         /// <summary>
         /// Initialize the dispatcher on the main thread. Call this from a MonoBehaviour's Awake or Start.
@@ -597,6 +736,9 @@ namespace YARG.Networking.Abstraction
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void Initialize()
         {
+            // Capture main thread ID during initialization (runs on main thread)
+            _mainThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
+            
             if (_instance != null) return;
             
             lock (_initLock)

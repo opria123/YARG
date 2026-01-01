@@ -1,9 +1,7 @@
-﻿using System.Diagnostics;
-using Cysharp.Text;
+﻿using Cysharp.Text;
 using TMPro;
 using UnityEngine;
 using YARG.Core.Game;
-using YARG.Core.Logging;
 
 namespace YARG.Gameplay.Visuals
 {
@@ -28,6 +26,7 @@ namespace YARG.Gameplay.Visuals
         private Material _noFcRingMaterial;
 
         private TextMeshPro[] _textCache;
+        private bool _isDisconnected;
 
         public void Initialize(EnginePreset preset, int maxMultiplier)
         {
@@ -73,6 +72,43 @@ namespace YARG.Gameplay.Visuals
         public void SetFullCombo(bool isFc)
         {
             _ringMesh.sharedMaterial = isFc ? _fcRingMaterial : _noFcRingMaterial;
+        }
+        
+        /// <summary>
+        /// Sets the combo meter to a grayed out/disconnected state.
+        /// </summary>
+        public void SetDisconnected(bool disconnected)
+        {
+            _isDisconnected = disconnected;
+            
+            if (disconnected)
+            {
+                // Gray out the multiplier text
+                if (_multiplierText != null)
+                {
+                    _multiplierText.color = new Color(0.5f, 0.5f, 0.5f, 0.5f);
+                    _multiplierText.enabled = false;
+                }
+                
+                // Gray out all cached text as well
+                if (_textCache != null)
+                {
+                    foreach (var text in _textCache)
+                    {
+                        if (text != null)
+                        {
+                            text.color = new Color(0.5f, 0.5f, 0.5f, 0.5f);
+                            text.enabled = false;
+                        }
+                    }
+                }
+                
+                // Set combo mesh to grayed state (index 0 or hide)
+                if (_comboMesh != null)
+                {
+                    _comboMesh.material.SetFloat(_spriteIndexProperty, 0);
+                }
+            }
         }
     }
 }

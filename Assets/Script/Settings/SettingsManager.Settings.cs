@@ -17,14 +17,13 @@ using YARG.Menu;
 using YARG.Menu.MusicLibrary;
 using YARG.Menu.Persistent;
 using YARG.Menu.Settings;
-using YARG.Networking;
+using YARG.Networking.Abstraction;
 using YARG.Playback;
 using YARG.Player;
 using YARG.Scores;
 using YARG.Settings.Types;
 using YARG.Song;
 using YARG.Venue;
-using kcp2k;
 using static FidelityFX.FSR3.Fsr3Upscaler;
 
 namespace YARG.Settings
@@ -501,15 +500,9 @@ namespace YARG.Settings
 
             private static void NetworkPortCallback(int value)
             {
-                if (YargNetworkManager.Instance == null)
-                {
-                    return;
-                }
-
-                if (YargNetworkManager.Instance.TryGetComponent<KcpTransport>(out var kcpTransport))
-                {
-                    kcpTransport.Port = (ushort) value;
-                }
+                // Port setting is stored and used when creating a new lobby
+                // The LiteNet adapter will use the port from settings when starting
+                Debug.Log($"[Settings] Network port updated to {value}");
             }
 
             private static void SetLogLevelCallback(LogLevel level)

@@ -84,12 +84,23 @@ namespace YARG.Menu.ScoreScreen
             Stats = stats;
         }
 
-        public virtual void SetCardContents()
+        /// <summary>
+        /// Sets the card contents. Returns true if stats were available, false if placeholder was shown.
+        /// Derived classes should check the return value and skip their own stat display if false.
+        /// </summary>
+        public virtual bool SetCardContents()
         {
             _playerName.text = Player.Profile.Name;
 
             _instrument.text = Player.Profile.CurrentInstrument.ToLocalizedName();
             _difficulty.text = Player.Profile.CurrentDifficulty.ToDisplayName();
+
+            // Handle null stats (remote players in band mode don't have local stats)
+            if (Stats == null)
+            {
+                SetRemotePlayerCardContents();
+                return false;
+            }
 
             // Set percent
             _accuracyPercent.text = $"{Mathf.FloorToInt(Stats.Percent * 100f)}%";
@@ -159,6 +170,38 @@ namespace YARG.Menu.ScoreScreen
                 var icon = Instantiate(_modifierIconPrefab, _modifierIconContainer);
                 icon.InitializeForModifier(modifier);
             }
+            
+            return true;
+        }
+
+        /// <summary>
+        /// Sets card contents for remote players who don't have local stats.
+        /// Shows basic player info with placeholder values for stats.
+        /// </summary>
+        protected virtual void SetRemotePlayerCardContents()
+        {
+            // Set a gray color for players without stats
+            _colorizer.SetCardColor(ScoreCardColorizer.ScoreCardColor.Gray);
+            HideTag(); // No tag needed
+
+            // Show placeholder text for stats
+            _accuracyPercent.text = "---";
+            _score.text = "---";
+            _starView.SetStars(0);
+
+            // Use gray for placeholder values
+            string placeholder = "<color=#888888>---</color>";
+            _notesHit.text = placeholder;
+            _maxStreak.text = placeholder;
+            _notesMissed.text = placeholder;
+            _starpowerPhrases.text = placeholder;
+            _bandBonusScore.text = placeholder;
+            _averageOffset.text = placeholder;
+
+            // Set background icon
+            _instrumentIcon.sprite = Addressables
+                .LoadAssetAsync<Sprite>($"InstrumentIcons[{Player.Profile.CurrentInstrument.ToResourceName()}]")
+                .WaitForCompletion();
         }
 
         private void ShowTag(string tagText)
@@ -189,6 +232,6 @@ namespace YARG.Menu.ScoreScreen
     {
         YargPlayer Player { get; }
         void ScrollStats(float delta);
-        void SetCardContents();
+        bool SetCardContents();
     }
 }

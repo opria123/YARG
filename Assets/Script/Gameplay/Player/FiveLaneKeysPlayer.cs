@@ -429,6 +429,28 @@ namespace YARG.Assets.Script.Gameplay.Player
             }
         }
 
+        public override void MarkAsDisconnected()
+        {
+            base.MarkAsDisconnected();
+            
+            // Hide the fret array (keys/strike zone)
+            if (_fretArray != null)
+            {
+                _fretArray.gameObject.SetActive(false);
+            }
+            
+            // Return shift and range indicator pools
+            if (_shiftIndicatorPool != null)
+            {
+                _shiftIndicatorPool.ReturnAllObjects();
+            }
+            
+            if (_rangeIndicatorPool != null)
+            {
+                _rangeIndicatorPool.ReturnAllObjects();
+            }
+        }
+
         private void InitializeRangeShift(double time = 0)
         {
             var firstShiftAfterFirstNote = false;

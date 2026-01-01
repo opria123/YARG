@@ -173,5 +173,32 @@ namespace YARG.Gameplay.HUD
         {
             _textNotifications.ShowNotification(notificationType);
         }
+
+        /// <summary>
+        /// Shows the player name persistently for remote players in multiplayer.
+        /// Uses the existing PlayerNameDisplay but in persistent mode (doesn't fade out).
+        /// </summary>
+        /// <param name="player">The player to display</param>
+        /// <param name="needleId">The vocal needle ID</param>
+        /// <param name="isRemotePlayer">Whether this is a remote player (no local input bindings)</param>
+        /// <param name="harmonyColor">Optional color to match the player's harmony needle color</param>
+        public void InitializePersistentPlayerName(YargPlayer player, int needleId, bool isRemotePlayer, Color? harmonyColor = null)
+        {
+            if (_playerNameDisplay == null)
+            {
+                if (isRemotePlayer)
+                {
+                    Debug.LogWarning($"[VocalsPlayerHUD] _playerNameDisplay is null for remote player '{player?.Profile?.Name}'");
+                }
+                return;
+            }
+            
+            // Only show persistent name for remote players
+            if (isRemotePlayer)
+            {
+                _playerNameDisplay.ShowPlayerPersistent(player, needleId, harmonyColor);
+                Debug.Log($"[VocalsPlayerHUD] Showing persistent player name for remote player '{player?.Profile?.Name}'");
+            }
+        }
     }
 }

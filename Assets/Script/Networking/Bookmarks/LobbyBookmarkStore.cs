@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UnityEngine;
-using YARG.Networking;
+using YARG.Networking.Abstraction;
+using YARG.Networking.Settings;
 
 namespace YARG.Networking.Bookmarks
 {
@@ -20,6 +21,7 @@ namespace YARG.Networking.Bookmarks
         private readonly List<LobbyBookmark> _favorites = new();
         private readonly List<LobbyBookmark> _recents = new();
         private readonly List<HostedLobbyPreset> _myLobbies = new();
+        private readonly List<SessionPreset> _sessionPresets = new();
 
         private readonly string _storagePath;
 
@@ -27,7 +29,15 @@ namespace YARG.Networking.Bookmarks
 
         public IReadOnlyList<LobbyBookmark> Favorites => _favorites;
         public IReadOnlyList<LobbyBookmark> Recents => _recents;
+        /// <summary>
+        /// Legacy lobby presets. Use SessionPresets for new code.
+        /// </summary>
+        [Obsolete("Use SessionPresets instead")]
         public IReadOnlyList<HostedLobbyPreset> MyLobbies => _myLobbies;
+        /// <summary>
+        /// New session presets (Server and Lobby configurations).
+        /// </summary>
+        public IReadOnlyList<SessionPreset> SessionPresets => _sessionPresets;
 
         public event Action Changed;
 
@@ -313,11 +323,74 @@ namespace YARG.Networking.Bookmarks
             }
         }
 
-        public HostedLobbyPreset UpsertMyLobby(string id, string lobbyName, int maxPlayers, YargNetworkManager.LobbyPrivacyMode privacyMode, string password, bool updateHostedTimestamp)
+        public HostedLobbyPreset UpsertMyLobby(string id, string lobbyName, int maxPlayers, LobbyPrivacyMode privacyMode, string password, bool updateHostedTimestamp)
+        {
+            return UpsertMyLobby(id, lobbyName, maxPlayers, privacyMode, SessionType.Lobby, password, updateHostedTimestamp, 0, false, true, true, true, true, new List<int>(), false);
+        }
+
+        public HostedLobbyPreset UpsertMyLobby(
+            string id, 
+            string lobbyName, 
+            int maxPlayers, 
+            LobbyPrivacyMode privacyMode, 
+            string password, 
+            bool updateHostedTimestamp,
+            int bandSize,
+            bool noFailMode,
+            bool sharedSongsOnly,
+            bool allowModifiers)
+        {
+            return UpsertMyLobby(id, lobbyName, maxPlayers, privacyMode, SessionType.Lobby, password, updateHostedTimestamp, 
+                bandSize, noFailMode, sharedSongsOnly, allowModifiers, true, true, new List<int>(), false);
+        }
+
+        public HostedLobbyPreset UpsertMyLobby(
+            string id, 
+            string lobbyName, 
+            int maxPlayers, 
+            LobbyPrivacyMode privacyMode, 
+            string password, 
+            bool updateHostedTimestamp,
+            int bandSize,
+            bool noFailMode,
+            bool sharedSongsOnly,
+            bool allowModifiers,
+            bool enablePresetSync,
+            bool allowLateJoin)
+        {
+            return UpsertMyLobby(id, lobbyName, maxPlayers, privacyMode, SessionType.Lobby, password, updateHostedTimestamp,
+                bandSize, noFailMode, sharedSongsOnly, allowModifiers, enablePresetSync, allowLateJoin,
+                new List<int>(), false);
+        }
+
+        public HostedLobbyPreset UpsertMyLobby(
+            string id, 
+            string lobbyName, 
+            int maxPlayers, 
+            LobbyPrivacyMode privacyMode, 
+            SessionType sessionType,
+            string password, 
+            bool updateHostedTimestamp,
+            int bandSize,
+            bool noFailMode,
+            bool sharedSongsOnly,
+            bool allowModifiers,
+            bool enablePresetSync,
+            bool allowLateJoin,
+            List<int> allowedInstruments,
+            bool localPlayersFirst)
         {
             string normalizedName = string.IsNullOrWhiteSpace(lobbyName) ? "My Lobby" : lobbyName.Trim();
             int clampedPlayers = Mathf.Clamp(maxPlayers, 2, 32);
-            string normalizedPassword = privacyMode == YargNetworkManager.LobbyPrivacyMode.Private ? (password ?? string.Empty) : string.Empty;
+            int clampedBandSize = Mathf.Clamp(bandSize, 0, 8);
+            // Password rules:
+            // - Private: always allow password (required)
+            // - Unlisted + Server: allow password (optional, for direct connect)
+            // - Unlisted + Lobby: no password (code is the secret)
+            // - Public: no password
+            bool canHavePassword = privacyMode == LobbyPrivacyMode.Private ||
+                                   (privacyMode == LobbyPrivacyMode.Unlisted && sessionType == SessionType.Server);
+            string normalizedPassword = canHavePassword ? (password ?? string.Empty) : string.Empty;
 
             HostedLobbyPreset preset = null;
             if (!string.IsNullOrWhiteSpace(id))
@@ -335,9 +408,18 @@ namespace YARG.Networking.Bookmarks
                     lobbyName = normalizedName,
                     maxPlayers = clampedPlayers,
                     privacyMode = (int)privacyMode,
+                    sessionType = (int)sessionType,
                     password = normalizedPassword,
                     createdAt = now,
-                    lastHostedAt = updateHostedTimestamp ? now : 0
+                    lastHostedAt = updateHostedTimestamp ? now : 0,
+                    bandSize = clampedBandSize,
+                    noFailMode = noFailMode,
+                    sharedSongsOnly = sharedSongsOnly,
+                    allowModifiers = allowModifiers,
+                    enablePresetSync = enablePresetSync,
+                    allowLateJoin = allowLateJoin,
+                    allowedInstruments = allowedInstruments ?? new List<int>(),
+                    localPlayersFirst = localPlayersFirst
                 };
 
                 _myLobbies.Insert(0, preset);
@@ -347,7 +429,16 @@ namespace YARG.Networking.Bookmarks
                 preset.lobbyName = normalizedName;
                 preset.maxPlayers = clampedPlayers;
                 preset.PrivacyMode = privacyMode;
+                preset.SessionType = sessionType;
                 preset.password = normalizedPassword;
+                preset.bandSize = clampedBandSize;
+                preset.noFailMode = noFailMode;
+                preset.sharedSongsOnly = sharedSongsOnly;
+                preset.allowModifiers = allowModifiers;
+                preset.enablePresetSync = enablePresetSync;
+                preset.allowLateJoin = allowLateJoin;
+                preset.allowedInstruments = allowedInstruments ?? new List<int>();
+                preset.localPlayersFirst = localPlayersFirst;
 
                 if (updateHostedTimestamp)
                 {
@@ -398,11 +489,200 @@ namespace YARG.Networking.Bookmarks
             return false;
         }
 
+        #region SessionPreset Methods
+
+        /// <summary>
+        /// Creates or updates a session preset.
+        /// </summary>
+        public SessionPreset UpsertSessionPreset(SessionPreset preset, bool updateHostedTimestamp = false)
+        {
+            if (preset == null)
+                return null;
+
+            preset.EnsureIdentifiers();
+            preset.Normalize();
+
+            var existing = _sessionPresets.FirstOrDefault(p => string.Equals(p.id, preset.id, StringComparison.Ordinal));
+            if (existing != null)
+            {
+                // Update existing
+                int index = _sessionPresets.IndexOf(existing);
+                _sessionPresets[index] = preset;
+            }
+            else
+            {
+                _sessionPresets.Insert(0, preset);
+            }
+
+            if (updateHostedTimestamp)
+            {
+                preset.TouchHostedTimestamp();
+            }
+
+            SortSessionPresets();
+            Save();
+            Changed?.Invoke();
+
+            return preset;
+        }
+
+        /// <summary>
+        /// Gets a session preset by ID.
+        /// </summary>
+        public SessionPreset GetSessionPreset(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                return null;
+
+            return _sessionPresets.FirstOrDefault(p => string.Equals(p.id, id, StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// Updates the hosted timestamp for a session preset.
+        /// </summary>
+        public void TouchSessionPresetHosted(string id)
+        {
+            var preset = GetSessionPreset(id);
+            if (preset == null)
+                return;
+
+            preset.TouchHostedTimestamp();
+            SortSessionPresets();
+            Save();
+            Changed?.Invoke();
+        }
+
+        /// <summary>
+        /// Removes a session preset by ID.
+        /// </summary>
+        public bool RemoveSessionPreset(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                return false;
+
+            int removed = _sessionPresets.RemoveAll(p => string.Equals(p.id, id, StringComparison.Ordinal));
+            if (removed > 0)
+            {
+                Save();
+                Changed?.Invoke();
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Gets all session presets of a specific type.
+        /// </summary>
+        public IReadOnlyList<SessionPreset> GetSessionPresetsByType(SessionType type)
+        {
+            return _sessionPresets.Where(p => p.SessionType == type).ToList();
+        }
+
+        /// <summary>
+        /// Gets lobby-type session presets.
+        /// </summary>
+        public IReadOnlyList<SessionPreset> GetLobbyPresets()
+        {
+            return GetSessionPresetsByType(SessionType.Lobby);
+        }
+
+        /// <summary>
+        /// Gets server-type session presets.
+        /// </summary>
+        public IReadOnlyList<SessionPreset> GetServerPresets()
+        {
+            return GetSessionPresetsByType(SessionType.Server);
+        }
+
+        #endregion
+
+        #region Migration
+
+        /// <summary>
+        /// Migrates legacy HostedLobbyPreset entries to SessionPreset format.
+        /// Only migrates if the preset hasn't already been migrated.
+        /// </summary>
+        private void MigrateLegacyPresets()
+        {
+            if (_myLobbies == null || _myLobbies.Count == 0)
+                return;
+
+            bool migrated = false;
+            var existingIds = new HashSet<string>(_sessionPresets.Select(p => p.id));
+
+            foreach (var legacy in _myLobbies)
+            {
+                if (legacy == null || existingIds.Contains(legacy.id))
+                    continue;
+
+                var newPreset = ConvertLegacyPreset(legacy);
+                _sessionPresets.Add(newPreset);
+                migrated = true;
+
+                Debug.Log($"[LobbyBookmarkStore] Migrated legacy preset '{legacy.lobbyName}' to SessionPreset");
+            }
+
+            if (migrated)
+            {
+                SortSessionPresets();
+                // Note: We don't clear _myLobbies to maintain backwards compatibility
+                // The legacy list will be removed in a future version
+            }
+        }
+
+        /// <summary>
+        /// Converts a legacy HostedLobbyPreset to the new SessionPreset format.
+        /// </summary>
+        private static SessionPreset ConvertLegacyPreset(HostedLobbyPreset legacy)
+        {
+            // Map old LobbyPrivacyMode to new SessionPrivacyMode
+            // Old: Public=0, Private=1
+            // New: Public=0, Private=1, Unlisted=2
+            var privacyMode = legacy.privacyMode switch
+            {
+                0 => SessionPrivacyMode.Public,
+                1 => SessionPrivacyMode.Private,
+                _ => SessionPrivacyMode.Public
+            };
+
+            return new SessionPreset
+            {
+                id = legacy.id,
+                presetName = legacy.lobbyName,
+                sessionType = (int)SessionType.Lobby, // Legacy presets were all lobbies
+                createdAt = legacy.createdAt,
+                lastHostedAt = legacy.lastHostedAt,
+
+                sessionName = legacy.lobbyName,
+                port = 9050, // Default port (wasn't stored in legacy)
+                password = legacy.password,
+                privacyMode = (int)privacyMode,
+
+                maxPlayers = legacy.maxPlayers,
+                bandSize = legacy.bandSize,
+
+                visibleOnLan = true,
+                registerWithIntroducers = true,
+
+                noFailMode = legacy.noFailMode,
+                sharedSongsOnly = legacy.sharedSongsOnly,
+                allowModifiers = legacy.allowModifiers,
+                enablePresetSync = legacy.enablePresetSync,
+                allowLateJoin = legacy.allowLateJoin,
+                allowedInstruments = legacy.allowedInstruments?.ToList() ?? new List<int>(),
+                localPlayersFirstValue = legacy.localPlayersFirst
+            };
+        }
+
+        #endregion
+
         private void Load()
         {
             _favorites.Clear();
             _recents.Clear();
             _myLobbies.Clear();
+            _sessionPresets.Clear();
 
             if (!File.Exists(_storagePath))
             {
@@ -424,6 +704,7 @@ namespace YARG.Networking.Bookmarks
                     _recents.AddRange(payload.recents.Where(entry => !string.IsNullOrWhiteSpace(entry.address)));
                 }
 
+                // Load legacy myLobbies
                 if (payload.myLobbies != null)
                 {
                     foreach (var preset in payload.myLobbies)
@@ -439,9 +720,29 @@ namespace YARG.Networking.Bookmarks
                             preset.lobbyName = "My Lobby";
                         }
 
+                        // Debug: Log what we loaded for allowedInstruments
+                        Debug.Log($"[LobbyBookmarkStore] Load: myLobby '{preset.lobbyName}' allowedInstruments = [{string.Join(", ", preset.allowedInstruments ?? new List<int>())}]");
+
                         _myLobbies.Add(preset);
                     }
                 }
+
+                // Load new sessionPresets
+                if (payload.sessionPresets != null)
+                {
+                    foreach (var preset in payload.sessionPresets)
+                    {
+                        if (preset == null)
+                            continue;
+
+                        preset.EnsureIdentifiers();
+                        preset.Normalize();
+                        _sessionPresets.Add(preset);
+                    }
+                }
+
+                // Migrate legacy myLobbies to sessionPresets if not already migrated
+                MigrateLegacyPresets();
             }
             catch (Exception ex)
             {
@@ -449,6 +750,7 @@ namespace YARG.Networking.Bookmarks
             }
 
             SortMyLobbies();
+            SortSessionPresets();
         }
 
         private void Save()
@@ -459,10 +761,31 @@ namespace YARG.Networking.Bookmarks
                 {
                     favorites = _favorites.Select(entry => entry.Clone()).ToList(),
                     recents = _recents.Select(entry => entry.Clone()).ToList(),
-                    myLobbies = _myLobbies.Select(entry => entry.Clone()).ToList()
+                    myLobbies = _myLobbies.Select(entry => entry.Clone()).ToList(),
+                    sessionPresets = _sessionPresets.Select(entry => entry.Clone()).ToList()
                 };
 
+                // Debug: Log what we're saving for myLobbies
+                if (payload.myLobbies != null && payload.myLobbies.Count > 0)
+                {
+                    var first = payload.myLobbies[0];
+                    Debug.Log($"[LobbyBookmarkStore] Save: myLobbies[0].allowedInstruments = [{string.Join(", ", first.allowedInstruments ?? new List<int>())}]");
+                }
+
                 var json = JsonUtility.ToJson(payload, true);
+                
+                // Debug: Log a snippet of the JSON to verify allowedInstruments
+                if (json.Contains("allowedInstruments"))
+                {
+                    int idx = json.IndexOf("allowedInstruments");
+                    int endIdx = Math.Min(idx + 100, json.Length);
+                    Debug.Log($"[LobbyBookmarkStore] Save JSON snippet: ...{json.Substring(idx, endIdx - idx)}...");
+                }
+                else
+                {
+                    Debug.LogWarning("[LobbyBookmarkStore] Save: JSON does NOT contain 'allowedInstruments' field!");
+                }
+                
                 File.WriteAllText(_storagePath, json);
             }
             catch (Exception ex)
@@ -497,6 +820,20 @@ namespace YARG.Networking.Bookmarks
             });
         }
 
+        private void SortSessionPresets()
+        {
+            if (_sessionPresets == null) return;
+            _sessionPresets.Sort((a, b) =>
+            {
+                // Sort by last hosted (most recent first), then by created (most recent first)
+                int hostedCompare = b.lastHostedAt.CompareTo(a.lastHostedAt);
+                if (hostedCompare != 0)
+                    return hostedCompare;
+
+                return b.createdAt.CompareTo(a.createdAt);
+            });
+        }
+
         /// <summary>
         /// Return favorites ordered with online entries first (based on provided endpoint keys), then by createdAt desc.
         /// </summary>
@@ -516,6 +853,7 @@ namespace YARG.Networking.Bookmarks
             public List<LobbyBookmark> favorites;
             public List<LobbyBookmark> recents;
             public List<HostedLobbyPreset> myLobbies;
+            public List<SessionPreset> sessionPresets;
         }
 
         private static bool ApplyBookmarkUpdate(List<LobbyBookmark> list, string originalKey,

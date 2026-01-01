@@ -10,11 +10,16 @@ namespace YARG.Menu.ScoreScreen
         [SerializeField]
         private TextMeshProUGUI _overhits;
 
-        public override void SetCardContents()
+        public override bool SetCardContents()
         {
-            base.SetCardContents();
+            if (!base.SetCardContents())
+            {
+                // Stats are null (remote player), placeholder was shown, skip keys-specific stats
+                return false;
+            }
 
             _overhits.text = WrapWithColor(Stats.Overhits);
+            return true;
         }
     }
 }

@@ -51,6 +51,7 @@
     "com.veriorpies.parrelsync": "https://github.com/VeriorPies/ParrelSync.git?path=/ParrelSync",
     "fidelityfx.fsr": "https://github.com/ndepoel/FSR3Unity.git?path=/Packages/fidelityfx.fsr",
     "in.yarg.core": "file:../YARG.Core/YARG.Core",
+    "in.yarg.net": "file:../YARG.Networking/src/YARG.Net",
     "jp.keijiro.minis": "https://github.com/TheNathannator/Minis.git?path=/Packages/jp.keijiro.minis#yarg",
     "com.alexeyperov.unity-dependencies-hunter": "https://github.com/AlexeyPerov/Unity-Dependencies-Hunter.git#upm",
     "com.unity.modules.accessibility": "1.0.0",

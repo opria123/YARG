@@ -6,7 +6,7 @@ using System;
 using YARG.Helpers.Extensions;
 using YARG.Menu.Data;
 using YARG.Menu.ListMenu;
-using YARG.Networking;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Menu.Multiplayer
 {
@@ -167,9 +167,23 @@ namespace YARG.Menu.Multiplayer
                 return GetOfflinePingColor();
             }
 
-            // TODO: lastSeen property doesn't exist in abstraction LobbyInfo
-            // For now, just return online color if we have lobby info
-            return new Color(0.35f, 0.92f, 0.55f);
+            // Check freshness based on LastSeen timestamp
+            var timeSinceSeen = lobby.TimeSinceLastSeen;
+            if (timeSinceSeen.TotalSeconds < 5)
+            {
+                // Fresh - green
+                return new Color(0.35f, 0.92f, 0.55f);
+            }
+            else if (timeSinceSeen.TotalSeconds < 15)
+            {
+                // Stale - yellow
+                return new Color(0.92f, 0.85f, 0.35f);
+            }
+            else
+            {
+                // Very stale - orange/red
+                return new Color(0.92f, 0.55f, 0.35f);
+            }
         }
 
         private void HideAllPingIcons()

@@ -15,6 +15,7 @@ using YARG.Input;
 using YARG.Playback;
 using YARG.Player;
 using YARG.Settings;
+using YARG.Networking.Abstraction;
 
 namespace YARG.Gameplay.Player
 {
@@ -27,7 +28,7 @@ namespace YARG.Gameplay.Player
         /// <summary>
         /// Network player data for multiplayer. Only set for multiplayer games.
         /// </summary>
-        private Networking.NetworkPlayerData _networkPlayerData;
+        private NetworkPlayerData _networkPlayerData;
         private IRemotePlayerSimulation _remoteSimulation;
 
         public float NoteSpeed
@@ -104,6 +105,51 @@ namespace YARG.Gameplay.Player
         protected bool IsStemMuted;
 
         protected bool IsRemotePlayer => Player.Bindings == null;
+        
+        /// <summary>
+        /// Whether this player has been marked as disconnected during gameplay.
+        /// Disconnected players are grayed out but not removed to preserve layout.
+        /// </summary>
+        public bool IsDisconnected { get; protected set; }
+        
+        /// <summary>
+        /// Whether this specific player has failed (happiness at or below fail threshold).
+        /// A failed player can be revived via Star Power from another player.
+        /// In NoFail mode, this always returns false since players cannot actually fail.
+        /// </summary>
+        public bool HasPlayerFailed()
+        {
+            // In NoFail mode, players cannot fail - return false regardless of engine state
+            if (GameManager != null && GameManager.IsNoFailActive)
+            {
+                return false;
+            }
+            
+            // For remote players (spectator tracks), use only the engine's fail state from network sync.
+            // Don't check GameManager.PlayerHasFailed because that reflects the LOCAL band's state,
+            // not the spectated player's state. The remote player's fail state is synced via
+            // SyncRemoteHappiness() which sets EngineContainer.HasFailed.
+            if (IsRemotePlayer)
+            {
+                if (EngineContainer != null)
+                {
+                    return EngineContainer.HasFailed;
+                }
+                return false;
+            }
+            
+            // For local players: if the whole band has failed, this player is definitely failed
+            if (GameManager.PlayerHasFailed)
+                return true;
+                
+            // Check individual player fail state
+            if (EngineContainer != null)
+            {
+                return EngineContainer.HasFailed;
+            }
+            
+            return false;
+        }
 
         private List<GameInput> _replayInputs;
 
@@ -180,10 +226,16 @@ namespace YARG.Gameplay.Player
                 return;
             }
 
-            // All players (local and remote) now process inputs:
-            // - Local players: inputs from controller (via OnGameInput callback)
-            // - Remote players: inputs from network queue (via UpdateInputs)
-            UpdateInputs(GameManager.InputTime);
+            // Skip input processing for disconnected players, but still update visuals
+            // so the track keeps scrolling (looks better than frozen)
+            if (!IsDisconnected)
+            {
+                // All players (local and remote) now process inputs:
+                // - Local players: inputs from controller (via OnGameInput callback)
+                // - Remote players: inputs from network queue (via UpdateInputs)
+                UpdateInputs(GameManager.InputTime);
+            }
+            
             UpdateVisuals(GameManager.VisualTime);
         }
 
@@ -267,7 +319,8 @@ namespace YARG.Gameplay.Player
             {
                 // Remote multiplayer players are simulated locally via NetworkPlayerData snapshots.
                 // Skip engine input processing to avoid generating artificial misses.
-                _remoteSimulation?.ApplyRemoteState(time);
+                // Use VisualTime so notes resolve when they visually pass the strikeline.
+                _remoteSimulation?.ApplyRemoteState(GameManager.VisualTime);
                 evaluationTime = time;
                 runEngineUpdate = false;
             }
@@ -336,12 +389,12 @@ namespace YARG.Gameplay.Player
         /// <summary>
         /// Sets the NetworkPlayerData reference for this player (used in multiplayer).
         /// </summary>
-        public void SetNetworkPlayerData(Networking.NetworkPlayerData networkPlayerData)
+        public void SetNetworkPlayerData(NetworkPlayerData networkPlayerData)
         {
             _networkPlayerData = networkPlayerData;
         }
 
-        internal Networking.NetworkPlayerData NetworkPlayerData => _networkPlayerData;
+        internal NetworkPlayerData NetworkPlayerData => _networkPlayerData;
 
         internal void RegisterRemoteSimulation(IRemotePlayerSimulation simulation)
         {
@@ -352,11 +405,12 @@ namespace YARG.Gameplay.Player
         /// Find the NetworkPlayerData that corresponds to this BasePlayer.
         /// Used for remote players to receive network inputs.
         /// </summary>
-        private Networking.NetworkPlayerData FindNetworkPlayerDataForThisPlayer()
+        private NetworkPlayerData FindNetworkPlayerDataForThisPlayer()
         {
-            if (Networking.YargNetworkManager.Instance == null) return null;
+            var liteNetAdapter = NetworkingServiceFactory.Instance as LiteNetNetworkingAdapter;
+            if (liteNetAdapter == null) return null;
             
-            var allNetworkPlayers = Networking.YargNetworkManager.Instance.GetAllPlayers();
+            var allNetworkPlayers = liteNetAdapter.GetAllPlayers();
             var allGamePlayers = GameManager.Players;
             
             // Find our index in the GameManager.Players list
@@ -381,8 +435,13 @@ namespace YARG.Gameplay.Player
         
         protected void OnGameInput(ref GameInput input)
         {
-            // Ignore completely if the song hasn't started yet or player failed
-            if (!GameManager.Started || GameManager.PlayerHasFailed)
+            // Ignore completely if the song hasn't started yet
+            if (!GameManager.Started)
+                return;
+                
+            // Ignore if this specific player has failed (can still be revived)
+            // Check individual player fail state, not just band-wide fail
+            if (HasPlayerFailed())
                 return;
 
             // Ignore while paused
@@ -461,6 +520,35 @@ namespace YARG.Gameplay.Player
             }
         }
 
+        /// <summary>
+        /// Called when a remote/spectator player's Star Power status changes.
+        /// Similar to OnStarPowerStatus but does NOT trigger revival logic.
+        /// Remote player Star Power should only affect visuals/audio, not game mechanics
+        /// like reviving players in the local player's band.
+        /// </summary>
+        protected virtual void OnStarPowerStatusRemote(bool active)
+        {
+            var deploySample = SfxSample.StarPowerDeploy;
+            if (SettingsManager.Settings.UseCrowdFx.Value == CrowdFxMode.Enabled)
+            {
+                deploySample = SfxSample.StarPowerDeployCrowd;
+            }
+
+            if (!GameManager.Paused)
+            {
+                GlobalAudioHandler.PlaySoundEffect(active
+                    ? deploySample
+                    : SfxSample.StarPowerRelease);
+
+                SetStarPowerFX(active);
+            }
+
+            // Pass isFromRemotePlayer=true so revival logic is NOT triggered
+            GameManager.ChangeStarPowerStatus(active, isFromRemotePlayer: true);
+            
+            // Don't update haptics for remote players - it's not their controller
+        }
+
         protected abstract bool InterceptInput(ref GameInput input);
 
         protected virtual void OnInputQueued(GameInput input)
@@ -491,6 +579,17 @@ namespace YARG.Gameplay.Player
             }
 
             return starScoreThresh;
+        }
+        
+        /// <summary>
+        /// Shows a revival countdown when the player is revived via Star Power.
+        /// Override in derived classes to implement visual feedback.
+        /// </summary>
+        /// <param name="gracePeriod">The grace period duration in seconds.</param>
+        public virtual void ShowRevivalCountdown(double gracePeriod)
+        {
+            // Base implementation does nothing - derived classes can override
+            // TrackPlayer implements this to show the countdown on the track
         }
 
         public abstract (ReplayFrame Frame, ReplayStats Stats) ConstructReplayData();
