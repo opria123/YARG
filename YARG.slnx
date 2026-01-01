@@ -1,9 +1,16 @@
 ﻿<Solution>
   <Project Path="Assembly-CSharp.csproj" />
-  <Project Path="YARG.Core.Package.csproj" />
   <Project Path="YARG.Net.csproj" />
   <Project Path="Assembly-CSharp-firstpass.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
   <Project Path="ZString-Ext.csproj" />
+  <Project Path="YARG.Editor.Submodules.csproj" />
+  <Folder Name="/YARG.Core/">
+    <Project Path="YARG.Core.Package.csproj" />
+    <Project Path="YARG.Core/ReplayCli/ReplayCli.csproj" />
+    <Project Path="YARG.Core/TestConsole/TestConsole.csproj" />
+    <Project Path="YARG.Core/YARG.Core.Benchmarks/YARG.Core.Benchmarks.csproj" />
+    <Project Path="YARG.Core/YARG.Core.UnitTests/YARG.Core.UnitTests.csproj" />
+  </Folder>
   <Project Path="Assembly-CSharp-Editor-firstpass.csproj" />
 </Solution>

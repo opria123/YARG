@@ -542,7 +542,8 @@ namespace YARG.Networking.DedicatedServer
                     // Save config to disk
                     _config.Save();
 
-                    // TODO: Broadcast settings update to connected clients
+                    // NOTE: Settings changes via web admin are applied on next session start.
+                    // Live broadcasting would require additional INetworkingService methods.
                     OnAdminAction?.Invoke("SettingsChanged", $"Settings updated by {session.Username}");
                     Debug.Log($"[DedicatedServerWebAdmin] Settings updated by {session.Username}");
                 }
@@ -1537,7 +1538,7 @@ namespace YARG.Networking.DedicatedServer
 
         private string GetServerState()
         {
-            // TODO: Get actual server state from game manager
+            // Determine server state from networking service and game manager
             var networkService = NetworkingServiceFactory.Instance;
             if (networkService == null || !networkService.IsHosting) return "Offline";
 

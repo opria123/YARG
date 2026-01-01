@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
@@ -984,7 +984,7 @@ namespace YARG.Gameplay
                     if (trackPlayer.gameObject.activeSelf)
                     {
                         // Remove from rendering but keep alive (we might need to show again)
-                        _trackViewManager._highwayCameraRendering.RemoveTrackPlayer(trackPlayer);
+                        _trackViewManager.HighwayCameraRendering.RemoveTrackPlayer(trackPlayer);
                         trackPlayer.gameObject.SetActive(false);
                         
                         // Also hide the TrackView UI element to prevent layout issues
@@ -1038,7 +1038,7 @@ namespace YARG.Gameplay
                     if (!trackPlayer.gameObject.activeSelf)
                     {
                         trackPlayer.gameObject.SetActive(true);
-                        _trackViewManager._highwayCameraRendering.AddTrackPlayer(trackPlayer);
+                        _trackViewManager.HighwayCameraRendering.AddTrackPlayer(trackPlayer);
                         
                         // Also show the TrackView UI element
                         if (trackPlayer.TrackView != null)
@@ -1182,7 +1182,7 @@ namespace YARG.Gameplay
                 
                 // Setup player
                 var trackPlayer = playerObject.GetComponent<TrackPlayer>();
-                var trackView = _trackViewManager.CreateTrackView(trackPlayer, yargPlayer);
+                var trackView = _trackViewManager.CreateTrackView();
                 trackPlayer.Initialize(highwayIndex, yargPlayer, Chart, trackView, _mixer, null);
                 
                 // Add RemotePlayerSimulation to receive network state
@@ -1203,7 +1203,7 @@ namespace YARG.Gameplay
                 playerObject.name = $"LateJoinSpectator_{networkPlayer.PlayerName}";
                 
                 _players.Add(trackPlayer);
-                _trackViewManager._highwayCameraRendering.AddTrackPlayer(trackPlayer);
+                _trackViewManager.HighwayCameraRendering.AddTrackPlayer(trackPlayer);
                 
                 createdCount++;
             }
@@ -1351,7 +1351,7 @@ namespace YARG.Gameplay
                 
                 // Setup player
                 var trackPlayer = playerObject.GetComponent<TrackPlayer>();
-                var trackView = _trackViewManager.CreateTrackView(trackPlayer, yargPlayer);
+                var trackView = _trackViewManager.CreateTrackView();
                 trackPlayer.Initialize(highwayIndex, yargPlayer, Chart, trackView, _mixer, null);
                 
                 // Add RemotePlayerSimulation to receive network state
@@ -1424,7 +1424,7 @@ namespace YARG.Gameplay
                 trackPlayer.gameObject.SetActive(true);
                 
                 // Add to camera rendering (order matters for HUD alignment)
-                _trackViewManager._highwayCameraRendering.AddTrackPlayer(trackPlayer);
+                _trackViewManager.HighwayCameraRendering.AddTrackPlayer(trackPlayer);
                 
                 revealedCount++;
             }
@@ -1496,7 +1496,7 @@ namespace YARG.Gameplay
                 
                 if (track is TrackPlayer trackPlayer)
                 {
-                    _trackViewManager._highwayCameraRendering.RemoveTrackPlayer(trackPlayer);
+                    _trackViewManager.HighwayCameraRendering.RemoveTrackPlayer(trackPlayer);
                 }
                 
                 Destroy(track.gameObject);

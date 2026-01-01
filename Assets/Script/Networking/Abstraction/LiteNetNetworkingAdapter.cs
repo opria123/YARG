@@ -78,6 +78,10 @@ namespace YARG.Networking.Abstraction
         private AuthenticationHandler _authenticationHandler;
         private LobbyHandler _lobbyHandler;
         private PacketRouter _packetRouter;
+        
+        // New decomposed managers (gradual migration from monolithic adapter)
+        // These provide cleaner interfaces for player, lobby, and gameplay management
+        private Managers.INetworkManagers _managers;
 
         private LobbyInfo _currentLobby;
         private string _playerName = "Player";
@@ -788,6 +792,13 @@ namespace YARG.Networking.Abstraction
                 _lobbyHandler = new LobbyHandler(_discovery, _defaultPort, (name, isHost, isLocal) => CreateLiteNetPlayerData(name, isHost, isLocal));
                 _packetRouter = new PacketRouter(() => _isHosting);
                 
+                // Initialize new decomposed managers for gradual migration
+                _managers = new Managers.NetworkManagers(
+                    _discovery,
+                    _defaultPort,
+                    (name, isHost, isLocal, instrument, difficulty, connectionId) => 
+                        CreateLiteNetPlayerData(name, isHost, isLocal, instrument, difficulty, connectionId));
+                
                 // Wire up new handler events
                 _connectionHandler.OnPlayerJoined += player => OnPlayerJoined?.Invoke(player);
                 _connectionHandler.OnPlayerLeft += player => OnPlayerLeft?.Invoke(player);
@@ -911,6 +922,10 @@ namespace YARG.Networking.Abstraction
                 _lobbyHandler = null;
                 _packetRouter?.Dispose();
                 _packetRouter = null;
+                
+                // Dispose new decomposed managers
+                _managers?.Dispose();
+                _managers = null;
                 
                 if (_discovery != null)
                 {
@@ -1091,7 +1106,6 @@ namespace YARG.Networking.Abstraction
                     
                     NetworkLogger.Info($"Client connected, firing OnLobbyJoined for lobby: {_currentLobby.LobbyName}");
                     OnLobbyJoined?.Invoke(_currentLobby);
-                    OnLobbyJoined?.Invoke(_currentLobby);
                     
                     // NOTE: Initial player state (instrument/difficulty) is sent in SendPlayerIdentityToServer
                     // after the handshake completes, so the host has created our player data first.
@@ -1243,14 +1257,8 @@ namespace YARG.Networking.Abstraction
                     NetworkLogger.Info($"Client: Connection endpoint={connection.EndPoint}, connectionId={connection.Id}");
                     
                     // Also verify this matches the connection in _connectionMap
-                    foreach (var kvp in _connectionMap)
-                    {
-                        NetworkLogger.Info($"Client: _connectionMap entry: id={kvp.Key}, endpoint={kvp.Value.EndPoint}, matches={kvp.Key == connection.Id}");
-                    }
-                    
-                    NetworkLogger.Info($"Client: About to call connection.Send for HandshakeRequest...");
                     connection.Send(message, ChannelType.ReliableOrdered);
-                    NetworkLogger.Info($"Client: Sent {message.Length} bytes to server ({identities.Count} players)");
+                    NetworkLogger.Info($"Client: Sent handshake ({message.Length} bytes, {identities.Count} players)");
                     
                     _handshakeSent = true;
                     
@@ -1353,20 +1361,8 @@ namespace YARG.Networking.Abstraction
             
             var packetType = (PacketType)payload.Span[0];
             
-            // Debug: Log ALL received packets to diagnose networking issues
-            NetworkLogger.Info($"[OnTransportPayloadReceived] PacketType={(int)packetType} ({packetType}), Length={payload.Length}, IsHosting={_isHosting}, from={connection?.EndPoint}");
-            
-            // Explicit logging for critical packet types
-            if (packetType == PacketType.HandshakeRequest)
-            {
-                NetworkLogger.Info($"[OnTransportPayloadReceived] >>> HANDSHAKE REQUEST RECEIVED! IsHosting={_isHosting}, from={connection?.EndPoint}");
-            }
-            
-            // Extra logging for ready state specifically
-            if (packetType == PacketType.LobbyReadyState)
-            {
-                NetworkLogger.Info($"[OnTransportPayloadReceived] >> LobbyReadyState packet detected! About to route to handler.");
-            }
+            // Per-packet logging - verbose only (stripped in release builds)
+            NetworkLogger.Verbose($"[Packet] Received {packetType} ({payload.Length} bytes) from {connection?.EndPoint}");
             
             switch (packetType)
             {
@@ -2258,7 +2254,7 @@ namespace YARG.Networking.Abstraction
                 _currentLobby.AllowedGameModes.Clear();
                 _currentLobby.AllowedGameModes.AddRange(gameModeBlacklist);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Updated lobby info for discovery: NoFail={noFailMode}, SharedSongs={sharedSongsOnly}, BandSize={bandSize}, GameModes={_currentLobby.AllowedGameModes.Count}");
+                NetworkLogger.Verbose($"Updated lobby info for discovery: NoFail={noFailMode}, SharedSongs={sharedSongsOnly}, BandSize={bandSize}");
             }
             
             byte[] message = YARG.Net.Packets.SessionSettingsBinaryPackets.BuildSessionSettingsSyncPacket(
@@ -2274,7 +2270,7 @@ namespace YARG.Networking.Abstraction
                 allowedGameModes,
                 localPlayersFirst);
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Broadcasting session settings to {_connectionMap.Count} clients (lobby={lobbyName}, maxPlayers={maxPlayers}, gameModes={allowedGameModes?.Count ?? 0})");
+            NetworkLogger.Info($"Host: Broadcasting session settings to {_connectionMap.Count} clients");
             BroadcastPacketToClients(message, "session settings");
             return true;
         }
@@ -2316,7 +2312,7 @@ namespace YARG.Networking.Abstraction
             
             if (justInitialized || forceReinitialize)
             {
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Initialized BandManager with band size: {bandSize}, seed: {stableSeed}");
+                NetworkLogger.Verbose($"Initialized BandManager with band size: {bandSize}, seed: {stableSeed}");
                 
                 // Assign all current players to bands
                 AssignCurrentPlayersToBands(bandManager);
@@ -2429,13 +2425,13 @@ namespace YARG.Networking.Abstraction
                 bool allAssigned = playerIds.All(pid => bandManager.GetPlayerBandId(pid) >= 0);
                 if (allAssigned)
                 {
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Players from connection '{connectionKey}' already assigned to bands");
+                    NetworkLogger.Verbose($"Players from connection '{connectionKey}' already assigned to bands");
                     continue;
                 }
                 
                 // Assign players to a band
                 int assignedBandId = bandManager.AssignClientPlayersToBand(effectiveConnectionId, playerIds, isLocalConnection);
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Assigned {playerIds.Count} players from '{connectionKey}' to band {assignedBandId}");
+                NetworkLogger.Verbose($"Assigned {playerIds.Count} players from '{connectionKey}' to band {assignedBandId}");
             }
         }
         
@@ -2533,7 +2529,7 @@ namespace YARG.Networking.Abstraction
             message.Serialize(writer);
             var packet = writer.CopyData();
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Broadcasting track order with {playerOrder?.Count ?? 0} players");
+            NetworkLogger.Verbose($"Host: Broadcasting track order with {playerOrder?.Count ?? 0} players");
             BroadcastPacketToClients(packet, "track order");
         }
         
@@ -2641,7 +2637,7 @@ namespace YARG.Networking.Abstraction
                 return;
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Player '{playerName}' finished loading from connection {connection.Id}");
+            NetworkLogger.Info($"Host: Player '{playerName}' finished loading");
             
             // Find connection key from connection ID - use connection ID to identify the specific player
             string connKey = connection.Id.ToString();
@@ -2655,7 +2651,7 @@ namespace YARG.Networking.Abstraction
                     if (player != null && string.Equals(player.PlayerName, playerName, StringComparison.Ordinal))
                     {
                         player.SetGameplayReadyServer(true);
-                        NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Player '{playerName}' (conn={connKey}) marked as gameplay ready");
+                        NetworkLogger.Verbose($"Player '{playerName}' (conn={connKey}) marked gameplay ready");
                         found = true;
                     }
                 }
@@ -2673,7 +2669,7 @@ namespace YARG.Networking.Abstraction
                             string.Equals(player.PlayerName, playerName, StringComparison.Ordinal))
                         {
                             player.SetGameplayReadyServer(true);
-                            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Player '{playerName}' (fallback) marked as gameplay ready");
+                            NetworkLogger.Verbose($"Player '{playerName}' (fallback) marked gameplay ready");
                             found = true;
                             break;
                         }
@@ -2684,7 +2680,7 @@ namespace YARG.Networking.Abstraction
             
             if (!found)
             {
-                NetworkLogger.Warn($"[LiteNetNetworkingAdapter] Host: Could not find player '{playerName}' (conn={connKey}) to mark as gameplay ready");
+                NetworkLogger.Warn($"Host: Could not find player '{playerName}' to mark gameplay ready");
             }
             
             // Check if all players are now ready
@@ -2696,8 +2692,7 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         private void CheckAndBroadcastAllLoadReady()
         {
-            // Debug: Log the current state of all players
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] CheckAndBroadcastAllLoadReady: Checking {_connectedPlayers.Count} connection groups");
+            NetworkLogger.Verbose($"[CheckAndBroadcastAllLoadReady] Checking {_connectedPlayers.Count} connection groups");
             int totalPlayers = 0;
             int readyPlayers = 0;
             foreach (var kvp in _connectedPlayers)
@@ -2711,19 +2706,19 @@ namespace YARG.Networking.Abstraction
                         {
                             readyPlayers++;
                         }
-                        NetworkLogger.Info($"[LiteNetNetworkingAdapter]   Player '{player.PlayerName}' (IsLocal={player.IsLocalUser}, GameplayReady={player.GameplayReady})");
+                        NetworkLogger.Verbose($"  Player '{player.PlayerName}' (GameplayReady={player.GameplayReady})");
                     }
                 }
             }
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] CheckAndBroadcastAllLoadReady: {readyPlayers}/{totalPlayers} players ready");
+            NetworkLogger.Verbose($"[CheckAndBroadcastAllLoadReady] {readyPlayers}/{totalPlayers} players ready");
             
             if (!AreAllPlayersGameplayReady())
             {
-                NetworkLogger.Info("[LiteNetNetworkingAdapter] Not all players ready yet - waiting");
+                NetworkLogger.Verbose("[CheckAndBroadcastAllLoadReady] Not all players ready - waiting");
                 return;
             }
             
-            NetworkLogger.Info("[LiteNetNetworkingAdapter] Host: All players loaded - broadcasting start signal");
+            NetworkLogger.Info("Host: All players loaded - broadcasting start signal");
             
             // Broadcast to all clients
             byte[] message = GameplayBinaryPackets.BuildGameplayAllLoadReadyPacket();
@@ -2779,7 +2774,7 @@ namespace YARG.Networking.Abstraction
                 return;
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Received session settings from host (lobby={lobbyName}, maxPlayers={maxPlayers}, gameModes={allowedGameModes?.Count ?? 0})");
+            NetworkLogger.Info($"Client: Received session settings from host");
             
             UnityMainThreadDispatcher.EnqueueAction(() =>
             {
@@ -3639,7 +3634,7 @@ namespace YARG.Networking.Abstraction
                         foreach (var kvp in message.PlayerNames)
                         {
                             _remotePlayerIdToName[kvp.Key] = kvp.Value;
-                            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Stored player mapping: {kvp.Key} -> '{kvp.Value}'");
+                            NetworkLogger.Verbose($"Stored player mapping: {kvp.Key} -> '{kvp.Value}'");
                         }
                         
                         // Create NetworkPlayerData entries for remote players we don't already know about
@@ -3711,10 +3706,10 @@ namespace YARG.Networking.Abstraction
                                 player.NetworkPlayerId = playerId;
                                 if (!string.IsNullOrEmpty(playerName) && player.PlayerName != playerName)
                                 {
-                                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Updating host player name from '{player.PlayerName}' to '{playerName}'");
+                                    NetworkLogger.Verbose($"Updating host player name from '{player.PlayerName}' to '{playerName}'");
                                     player.PlayerName = playerName;
                                 }
-                                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Updated NetworkPlayerId for host player '{playerName}': {playerId} (matched _pendingHostPlayerId)");
+                                NetworkLogger.Verbose($"Updated NetworkPlayerId for host player '{playerName}': {playerId}");
                                 existingPlayerIds.Add(playerId);
                                 updatedExisting = true;
                                 break;
@@ -3733,7 +3728,7 @@ namespace YARG.Networking.Abstraction
                             // Found a local player with matching name and no NetworkPlayerId
                             // This is likely our own local player - update its ID
                             player.NetworkPlayerId = playerId;
-                            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Updated NetworkPlayerId for local player '{playerName}': {playerId}");
+                            NetworkLogger.Verbose($"Updated NetworkPlayerId for local player '{playerName}': {playerId}");
                             existingPlayerIds.Add(playerId);
                             updatedExisting = true;
                             break;
@@ -3756,7 +3751,7 @@ namespace YARG.Networking.Abstraction
                     newRemotePlayers.Add(remotePlayer);
                     existingPlayerIds.Add(playerId);
                     
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Created NetworkPlayerData for remote player '{playerName}' ({playerId})");
+                    NetworkLogger.Verbose($"Created NetworkPlayerData for remote player '{playerName}' ({playerId})");
                 }
             }
             
@@ -3769,7 +3764,7 @@ namespace YARG.Networking.Abstraction
                     _connectedPlayers["remote"] = remotePlayers;
                 }
                 remotePlayers.AddRange(newRemotePlayers);
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Added {newRemotePlayers.Count} remote players (total remote: {remotePlayers.Count})");
+                NetworkLogger.Verbose($"Added {newRemotePlayers.Count} remote players (total: {remotePlayers.Count})");
                 
                 // Apply any pending preset sync data to the newly added players
                 ApplyPendingPresets(newRemotePlayers);
@@ -3839,7 +3834,7 @@ namespace YARG.Networking.Abstraction
                 connection.Send(data, ChannelType.ReliableOrdered);
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Broadcasted band assignments to {_connectionMap.Count} clients ({message.Assignments?.Count ?? 0} players, {message.BandNames?.Count ?? 0} bands, {message.PlayerNames?.Count ?? 0} player names)");
+            NetworkLogger.Verbose($"Host: Broadcasted band assignments to {_connectionMap.Count} clients ({message.Assignments?.Count ?? 0} players)");
         }
         
         /// <summary>
@@ -3868,7 +3863,7 @@ namespace YARG.Networking.Abstraction
             byte[] data = writer.CopyData();
             
             connection.Send(data, ChannelType.ReliableOrdered);
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Sent band assignments to {connection.EndPoint}");
+            NetworkLogger.Verbose($"Host: Sent band assignments to {connection.EndPoint}");
         }
         
         /// <summary>
@@ -3901,7 +3896,7 @@ namespace YARG.Networking.Abstraction
                 connection.Send(data, ChannelType.ReliableOrdered);
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Broadcasted band name change to {_connectionMap.Count} clients (band {bandId} -> '{newName}')");
+            NetworkLogger.Verbose($"Host: Broadcasted band name change to {_connectionMap.Count} clients (band {bandId} -> '{newName}')");
         }
         
         /// <summary>
@@ -3926,7 +3921,7 @@ namespace YARG.Networking.Abstraction
                 var message = new Bands.BandNameChangeRequestMessage();
                 message.Deserialize(reader);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Received band name change request from client - band {message.BandId}, player {message.RequestingPlayerId}");
+                NetworkLogger.Verbose($"Host: Received band name change request - band {message.BandId}, player {message.RequestingPlayerId}");
                 
                 UnityMainThreadDispatcher.EnqueueAction(() =>
                 {
@@ -3969,7 +3964,7 @@ namespace YARG.Networking.Abstraction
             byte[] data = writer.CopyData();
             
             _serverConnection.Send(data, ChannelType.ReliableOrdered);
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Sent band name change request (band {bandId})");
+            NetworkLogger.Verbose($"Client: Sent band name change request (band {bandId})");
         }
         
         /// <summary>
@@ -3995,7 +3990,7 @@ namespace YARG.Networking.Abstraction
                 var message = new Bands.BandScoreUpdateMessage();
                 message.Deserialize(reader);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Received band score update - band {message.BandId}, score {message.TotalScore}");
+                NetworkLogger.Verbose($"Host: Received band score update - band {message.BandId}, score {message.TotalScore}");
                 
                 // Update the band score in BandManager
                 var bandManager = Bands.BandManager.Instance;
@@ -4140,7 +4135,7 @@ namespace YARG.Networking.Abstraction
                 var message = new Bands.BandFailedMessage();
                 message.Deserialize(reader);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Band {message.BandId} failed with score {message.FinalScore}");
+                NetworkLogger.Info($"Host: Band {message.BandId} failed with score {message.FinalScore}");
                 
                 // Mark band as failed in BandManager
                 var bandManager = Bands.BandManager.Instance;
@@ -4180,7 +4175,7 @@ namespace YARG.Networking.Abstraction
                 var message = new Bands.BandFailedMessage();
                 message.Deserialize(reader);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Band {message.BandId} failed with score {message.FinalScore}");
+                NetworkLogger.Info($"Client: Band {message.BandId} failed with score {message.FinalScore}");
                 
                 // Mark band as failed in BandManager
                 var bandManager = Bands.BandManager.Instance;
@@ -4282,7 +4277,7 @@ namespace YARG.Networking.Abstraction
         /// <param name="playerName">Optional: specific player to send presets for. If null, sends for all local players.</param>
         public void SendLocalPlayerPresets(string playerName = null)
         {
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] SendLocalPlayerPresets called: playerName='{playerName ?? "ALL"}', isHosting={_isHosting}");
+            NetworkLogger.Verbose($"SendLocalPlayerPresets: playerName='{playerName ?? "ALL"}', isHosting={_isHosting}");
             
             if (_isHosting)
             {
@@ -4305,7 +4300,7 @@ namespace YARG.Networking.Abstraction
                 return;
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Local player count: {localPlayers.Count}");
+            NetworkLogger.Verbose($"Local player count: {localPlayers.Count}");
             
             // If specific player name provided, filter to just that player
             var playersToSync = string.IsNullOrEmpty(playerName)
@@ -4317,12 +4312,12 @@ namespace YARG.Networking.Abstraction
             {
                 if (localPlayer == null) continue;
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Sending preset sync for player '{localPlayer.Profile.Name}'");
+                NetworkLogger.Verbose($"Sending preset sync for player '{localPlayer.Profile.Name}'");
                 SendPresetSyncForPlayer(localPlayer);
                 syncCount++;
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Sent preset sync for {syncCount} player(s)");
+            NetworkLogger.Verbose($"Sent preset sync for {syncCount} player(s)");
         }
         
         /// <summary>
@@ -4351,7 +4346,7 @@ namespace YARG.Networking.Abstraction
             var networkId = GetLocalPlayerNetworkId(localPlayer.Profile.Name);
             var playerId = networkId ?? localPlayer.Profile.Id;
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] SendPresetSyncForPlayer: name='{localPlayer.Profile.Name}', networkId={networkId?.ToString() ?? "NULL"}, playerId={playerId}");
+            NetworkLogger.Verbose($"SendPresetSyncForPlayer: name='{localPlayer.Profile.Name}', networkId={networkId?.ToString() ?? "NULL"}, playerId={playerId}");
             
             // Build and send the packet
             byte[] packet = PlayerPresetBinaryPackets.BuildPresetSyncPacket(
@@ -4362,7 +4357,7 @@ namespace YARG.Networking.Abstraction
                 themePresetId, themeJson);
             
             _serverConnection.Send(packet, ChannelType.ReliableOrdered);
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Sent preset sync for player '{localPlayer.Profile.Name}' with playerId={playerId}");
+            NetworkLogger.Verbose($"Client: Sent preset sync for player '{localPlayer.Profile.Name}' playerId={playerId}");
         }
         
         /// <summary>
@@ -4434,7 +4429,7 @@ namespace YARG.Networking.Abstraction
             }
             
             string connectionKey = connection.Id.ToString();
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Received preset sync for playerId={parsed.PlayerId} from connection {connectionKey}");
+            NetworkLogger.Verbose($"Host: Received preset sync for playerId={parsed.PlayerId} from connection {connectionKey}");
             
             UnityMainThreadDispatcher.EnqueueAction(() =>
             {
@@ -4442,10 +4437,10 @@ namespace YARG.Networking.Abstraction
                 NetworkPlayerData? targetPlayer = null;
                 if (_connectedPlayers.TryGetValue(connectionKey, out var players))
                 {
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Connection {connectionKey} has {players.Count} player(s)");
+                    NetworkLogger.Verbose($"Host: Connection {connectionKey} has {players.Count} player(s)");
                     foreach (var p in players)
                     {
-                        NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Checking player '{p.PlayerName}' with NetworkPlayerId={p.NetworkPlayerId}");
+                        NetworkLogger.Verbose($"Host: Checking player '{p.PlayerName}' NetworkPlayerId={p.NetworkPlayerId}");
                     }
                     
                     // Find by PlayerId - must match exactly
@@ -4469,7 +4464,7 @@ namespace YARG.Networking.Abstraction
                     parsed.ColorProfileId, parsed.ColorProfileJson,
                     parsed.ThemePresetId, parsed.ThemePresetJson);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Updated presets for player '{targetPlayer.PlayerName}' (NetworkPlayerId={targetPlayer.NetworkPlayerId})");
+                NetworkLogger.Verbose($"Host: Updated presets for player '{targetPlayer.PlayerName}' (NetworkPlayerId={targetPlayer.NetworkPlayerId})");
                 
                 // Broadcast to all clients
                 BroadcastPlayerPresets(targetPlayer);
@@ -4490,7 +4485,7 @@ namespace YARG.Networking.Abstraction
                 return;
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Received preset sync for player {parsed.PlayerId}");
+            NetworkLogger.Verbose($"Client: Received preset sync for player {parsed.PlayerId}");
             
             UnityMainThreadDispatcher.EnqueueAction(() =>
             {
@@ -4515,7 +4510,7 @@ namespace YARG.Networking.Abstraction
                 if (targetPlayer == null)
                 {
                     // Player not found yet - store in pending cache for later
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Player {parsed.PlayerId} not found, caching preset for later");
+                    NetworkLogger.Verbose($"Client: Player {parsed.PlayerId} not found, caching preset for later");
                     _pendingPresets[parsed.PlayerId] = (
                         parsed.CameraPresetId, parsed.CameraPresetJson,
                         parsed.HighwayPresetId, parsed.HighwayPresetJson,
@@ -4531,7 +4526,7 @@ namespace YARG.Networking.Abstraction
                     parsed.ColorProfileId, parsed.ColorProfileJson,
                     parsed.ThemePresetId, parsed.ThemePresetJson);
                 
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Updated presets for player '{targetPlayer.PlayerName}'");
+                NetworkLogger.Verbose($"Client: Updated presets for player '{targetPlayer.PlayerName}'");
             });
         }
         
@@ -4554,7 +4549,7 @@ namespace YARG.Networking.Abstraction
                         presetData.ThemePresetId, presetData.ThemePresetJson);
                     
                     _pendingPresets.Remove(player.NetworkPlayerId);
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Applied pending preset data to player '{player.PlayerName}'");
+                    NetworkLogger.Verbose($"Applied pending preset data to player '{player.PlayerName}'");
                 }
             }
         }
@@ -4578,7 +4573,7 @@ namespace YARG.Networking.Abstraction
                 conn.Send(packet, ChannelType.ReliableOrdered);
             }
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Broadcast presets for player '{player.PlayerName}' to {_connectionMap.Count} clients");
+            NetworkLogger.Verbose($"Host: Broadcast presets for player '{player.PlayerName}' to {_connectionMap.Count} clients");
         }
         
         /// <summary>
@@ -4588,25 +4583,21 @@ namespace YARG.Networking.Abstraction
         private Guid? GetLocalPlayerNetworkId(string playerName)
         {
             string localKey = _isHosting ? "host" : "local";
-            NetworkLogger.Info($"[GetLocalPlayerNetworkId] Looking for player '{playerName}' in '{localKey}' bucket");
             
             if (_connectedPlayers.TryGetValue(localKey, out var players))
             {
-                NetworkLogger.Info($"[GetLocalPlayerNetworkId] Found {players.Count} player(s) in '{localKey}' bucket");
                 foreach (var player in players)
                 {
-                    NetworkLogger.Info($"[GetLocalPlayerNetworkId] Checking: '{player.PlayerName}' vs '{playerName}'");
                     if (player.PlayerName == playerName)
                     {
-                        NetworkLogger.Info($"[GetLocalPlayerNetworkId] MATCH! Returning NetworkPlayerId={player.NetworkPlayerId}");
                         return player.NetworkPlayerId;
                     }
                 }
-                NetworkLogger.Warn($"[GetLocalPlayerNetworkId] No matching player found for '{playerName}'");
+                NetworkLogger.Warn($"GetLocalPlayerNetworkId: No matching player found for '{playerName}'");
             }
             else
             {
-                NetworkLogger.Warn($"[GetLocalPlayerNetworkId] No '{localKey}' bucket found in _connectedPlayers");
+                NetworkLogger.Warn($"GetLocalPlayerNetworkId: No '{localKey}' bucket found in _connectedPlayers");
             }
             return null;
         }
@@ -4632,7 +4623,7 @@ namespace YARG.Networking.Abstraction
             try
             {
                 var json = Newtonsoft.Json.JsonConvert.SerializeObject(preset, PresetJsonSettings);
-                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Serialized preset to JSON, length={json?.Length ?? 0}");
+                NetworkLogger.Verbose($"Serialized preset to JSON, length={json?.Length ?? 0}");
                 return json;
             }
             catch (Exception ex)
@@ -4825,7 +4816,7 @@ namespace YARG.Networking.Abstraction
                 allowedModes,
                 preset.LocalPlayersFirst);
             
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Sending session settings to new client {connection.EndPoint} (gameModes={allowedModes.Count}, LocalPlayersFirst={preset.LocalPlayersFirst})");
+            NetworkLogger.Verbose($"Host: Sending session settings to client {connection.EndPoint} (gameModes={allowedModes.Count}, LocalPlayersFirst={preset.LocalPlayersFirst})");
             
             try
             {
@@ -4849,7 +4840,7 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         private void SendAllPlayerPresetsToClient(INetConnection connection)
         {
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Sending all player presets to new client {connection.EndPoint}");
+            NetworkLogger.Verbose($"Host: Sending all player presets to new client {connection.EndPoint}");
             
             foreach (var kvp in _connectedPlayers)
             {
@@ -4865,7 +4856,7 @@ namespace YARG.Networking.Abstraction
                         player.ThemePresetId, player.ThemePresetJson);
                     
                     connection.Send(packet, ChannelType.ReliableOrdered);
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Sent preset sync for '{player.PlayerName}' to new client");
+                    NetworkLogger.Verbose($"Host: Sent preset sync for '{player.PlayerName}' to new client");
                 }
             }
         }
@@ -6029,7 +6020,7 @@ namespace YARG.Networking.Abstraction
                 {
                     if (shouldLog)
                     {
-                        NetworkLogger.Info($"[LiteNetNetworkingAdapter] Creating remote player entry for '{playerName}' (from another client)");
+                        NetworkLogger.Verbose($"Creating remote player entry for '{playerName}' (from another client)");
                     }
                     
                     // Create a new NetworkPlayerData for this remote player
@@ -6044,7 +6035,7 @@ namespace YARG.Networking.Abstraction
                             targetPlayer.NetworkPlayerId = kvp.Key;
                             if (shouldLog)
                             {
-                                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Assigned NetworkPlayerId {kvp.Key} to remote player '{playerName}'");
+                                NetworkLogger.Verbose($"Assigned NetworkPlayerId {kvp.Key} to remote player '{playerName}'");
                             }
                             break;
                         }
@@ -6063,7 +6054,7 @@ namespace YARG.Networking.Abstraction
                     
                     if (shouldLog)
                     {
-                        NetworkLogger.Info($"[LiteNetNetworkingAdapter] Added remote player '{playerName}' to connected players (total remote: {remotePlayers.Count})");
+                        NetworkLogger.Verbose($"Added remote player '{playerName}' to connected players (total remote: {remotePlayers.Count})");
                     }
                 }
             }
@@ -6215,7 +6206,7 @@ namespace YARG.Networking.Abstraction
             }
             
             _autoStartOnAllReady = enabled;
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Auto-start on all ready: {enabled}");
+            NetworkLogger.Info($"Auto-start on all ready: {enabled}");
         }
         
         /// <summary>
@@ -6318,7 +6309,7 @@ namespace YARG.Networking.Abstraction
             }
             
             string playerName = GetPlayerNameFromProfile();
-            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Sending gameplay load ready for '{playerName}'");
+            NetworkLogger.Verbose($"Sending gameplay load ready for '{playerName}'");
             
             if (_isHosting)
             {
@@ -6330,7 +6321,7 @@ namespace YARG.Networking.Abstraction
                         if (player != null && player.IsLocalUser)
                         {
                             player.SetGameplayReadyServer(true);
-                            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host: Local player '{player.PlayerName}' marked as gameplay ready");
+                            NetworkLogger.Verbose($"Host: Local player '{player.PlayerName}' marked as gameplay ready");
                         }
                     }
                 }
@@ -6345,7 +6336,7 @@ namespace YARG.Networking.Abstraction
                 foreach (var conn in _connectionMap.Values)
                 {
                     conn.Send(message, ChannelType.ReliableOrdered);
-                    NetworkLogger.Info($"[LiteNetNetworkingAdapter] Client: Sent gameplay load ready to host");
+                    NetworkLogger.Verbose($"Client: Sent gameplay load ready to host");
                     break; // Only need to send to host once
                 }
             }
@@ -7630,9 +7621,7 @@ namespace YARG.Networking.Abstraction
 
         public void LeaveLobby()
         {
-            // Debug: Log stack trace to find who is calling LeaveLobby unexpectedly
-            Debug.Log($"[LiteNet] LeaveLobby() called - Stack trace:\n{System.Environment.StackTrace}");
-            NetworkLogger.Info(" Leaving lobby");
+            NetworkLogger.Info("Leaving lobby");
 
             try
             {

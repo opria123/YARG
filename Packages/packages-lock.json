@@ -408,6 +408,7 @@
       "depth": 0,
       "source": "local",
       "dependencies": {}
+    },
     "io.github.gkngkc.unity-standalone-file-browser": {
       "version": "https://github.com/wyrdough/UnityStandaloneFileBrowser.git?path=Packages/StandaloneFileBrowser#upm",
       "depth": 0,

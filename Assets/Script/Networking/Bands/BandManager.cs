@@ -969,33 +969,6 @@ namespace YARG.Networking.Bands
             OnBandsChanged?.Invoke();
         }
 
-        /// <summary>
-        /// Exports current band assignments for network sync (legacy).
-        /// </summary>
-        [Obsolete("Use ExportSyncData() for full sync including band names")]
-        public Dictionary<Guid, int> ExportAssignments()
-        {
-            return new Dictionary<Guid, int>(_playerBandAssignments);
-        }
-
-        /// <summary>
-        /// Imports band assignments from network sync (legacy).
-        /// </summary>
-        [Obsolete("Use ImportSyncData() for full sync including band names")]
-        public void ImportAssignments(Dictionary<Guid, int> assignments, Guid localPlayerId)
-        {
-            _playerBandAssignments.Clear();
-            _bands.Clear();
-
-            foreach (var kvp in assignments)
-            {
-                bool isLocal = kvp.Key == localPlayerId;
-                AssignToBandInternal(kvp.Key, kvp.Value, -1, isLocal);
-            }
-
-            OnBandsChanged?.Invoke();
-        }
-
         #region Internal Methods
 
         private void AssignToBandInternal(Guid playerId, int bandId, int connectionId, bool isLocalPlayer)

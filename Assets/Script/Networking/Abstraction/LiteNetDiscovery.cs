@@ -9,6 +9,7 @@ using LiteNetLib;
 using LiteNetLib.Utils;
 using UnityEngine;
 using YARG.Net.Directory;
+using YARG.Networking.Abstraction.Handlers;
 
 namespace YARG.Networking.Abstraction
 {
@@ -32,7 +33,6 @@ namespace YARG.Networking.Abstraction
         
         // Client-side state - uses DiscoveryManager from YARG.Net
         private readonly DiscoveryManager _discoveryManager = new();
-        private readonly object _lobbiesLock = new();
         
         // Configuration
         private int _discoveryPort = 7777; // Default to same as game port
@@ -69,15 +69,13 @@ namespace YARG.Networking.Abstraction
         {
             get
             {
-                lock (_lobbiesLock)
+                // DiscoveryManager.Lobbies already returns a copy with its own locking
+                var result = new Dictionary<string, LobbyInfo>();
+                foreach (var kvp in _discoveryManager.Lobbies)
                 {
-                    var result = new Dictionary<string, LobbyInfo>();
-                    foreach (var kvp in _discoveryManager.Lobbies)
-                    {
-                        result[kvp.Key] = ConvertToLobbyInfo(kvp.Value);
-                    }
-                    return result;
+                    result[kvp.Key] = ConvertToLobbyInfo(kvp.Value);
                 }
+                return result;
             }
         }
 
@@ -131,11 +129,9 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         public void StopAdvertising()
         {
-            // Log stack trace to help debug unexpected advertising stops
-            Debug.Log($"[LiteNetDiscovery] StopAdvertising called! Stack trace:\n{System.Environment.StackTrace}");
             _advertisedLobby = null;
             _isAdvertising = false;
-            Debug.Log("[LiteNetDiscovery] Stopped advertising lobby");
+            NetworkLogger.Info("[LiteNetDiscovery] Stopped advertising lobby");
         }
         
         /// <summary>
@@ -398,10 +394,8 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         public void ClearDiscoveredLobbies()
         {
-            lock (_lobbiesLock)
-            {
-                _discoveryManager.Clear();
-            }
+            // NOTE: Don't hold _lobbiesLock here - DiscoveryManager has its own internal locking
+            _discoveryManager.Clear();
             Debug.Log("[LiteNetDiscovery] Cleared discovered lobbies");
         }
         
@@ -606,18 +600,17 @@ namespace YARG.Networking.Abstraction
                 Debug.Log($"[LiteNetDiscovery] Parsed lobby: {lobbyInfo.LobbyName} ({lobbyInfo.CurrentPlayers}/{lobbyInfo.MaxPlayers} players, IsDedicatedServer={lobbyInfo.IsDedicatedServer})");
                 
                 // Store/update using DiscoveryManager
-                lock (_lobbiesLock)
+                // NOTE: Don't hold _lobbiesLock here - DiscoveryManager has its own internal locking
+                // and fires events while holding its lock. We handle events via the constructor callbacks.
+                bool isNew = _discoveryManager.AddOrUpdate(lobbyInfo);
+                
+                if (isNew)
                 {
-                    bool isNew = _discoveryManager.AddOrUpdate(lobbyInfo);
-                    
-                    if (isNew)
-                    {
-                        Debug.Log($"[LiteNetDiscovery] Discovered new lobby: {lobbyInfo.LobbyName} at {remoteEndPoint}");
-                    }
-                    else
-                    {
-                        Debug.Log($"[LiteNetDiscovery] Updated existing lobby: {lobbyInfo.LobbyName}");
-                    }
+                    Debug.Log($"[LiteNetDiscovery] Discovered new lobby: {lobbyInfo.LobbyName} at {remoteEndPoint}");
+                }
+                else
+                {
+                    Debug.Log($"[LiteNetDiscovery] Updated existing lobby: {lobbyInfo.LobbyName}");
                 }
             }
             catch (Exception ex)
@@ -632,10 +625,8 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         public void CleanupOldLobbies(TimeSpan timeout)
         {
-            lock (_lobbiesLock)
-            {
-                _discoveryManager.CleanupOldLobbies(timeout);
-            }
+            // NOTE: Don't hold _lobbiesLock here - DiscoveryManager has its own internal locking
+            _discoveryManager.CleanupOldLobbies(timeout);
         }
         
         #endregion

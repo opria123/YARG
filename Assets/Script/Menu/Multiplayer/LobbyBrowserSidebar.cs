@@ -447,8 +447,7 @@ namespace YARG.Menu.Multiplayer
         /// </summary>
         public void ShowHostGameForm(HostedLobbyPreset preset, bool focusFirstField = false)
         {
-            // For now, delegate to existing CreateLobby form
-            // TODO: Add Session Type (Automatic/Manual) toggle in Advanced Options
+            // Delegates to CreateLobby form which includes Session Type in settings panel
             ShowCreateLobbyForm(preset, focusFirstField);
         }
 
@@ -457,8 +456,7 @@ namespace YARG.Menu.Multiplayer
         /// </summary>
         public void ShowJoinGameForm(bool focusFirstField = false)
         {
-            // For now, delegate to existing DirectConnect form
-            // TODO: Add lobby code input above direct connect section
+            // Delegates to DirectConnect form which includes lobby code input
             ShowDirectConnectForm(focusFirstField);
         }
 

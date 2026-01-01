@@ -481,8 +481,8 @@ namespace YARG.Networking.DedicatedServer
         {
             Debug.Log($"[DedicatedServerManager] Timeout warning for {playerName}: {secondsRemaining}s remaining");
             
-            // TODO: Send warning message to player via chat or notification
-            // This could be implemented when a proper in-game notification system exists
+            // NOTE: Requires in-game notification/chat system to send warnings to players.
+            // For now, the warning is only logged server-side.
         }
         
         private void HandleVoteKickRequired(Guid playerId, string playerName, string reason)

@@ -14,6 +14,11 @@ namespace YARG.Gameplay.HUD
         private GameObject _vocalHudPrefab;
         [SerializeField]
         private HighwayCameraRendering _highwayCameraRendering;
+        
+        /// <summary>
+        /// Public accessor to HighwayCameraRendering for spectator track management.
+        /// </summary>
+        public HighwayCameraRendering HighwayCameraRendering => _highwayCameraRendering;
 
         [Header("References")]
         [SerializeField]
@@ -79,6 +84,22 @@ namespace YARG.Gameplay.HUD
         public void AddTrackPlayer(TrackPlayer trackPlayer)
         {
             _highwayCameraRendering.AddTrackPlayer(trackPlayer);
+        }
+        
+        /// <summary>
+        /// Removes a track player from the highway camera rendering.
+        /// </summary>
+        public void RemoveTrackPlayer(TrackPlayer trackPlayer)
+        {
+            _highwayCameraRendering.RemoveTrackPlayer(trackPlayer);
+        }
+        
+        /// <summary>
+        /// Updates HUD scale for all track views. Called after tracks are added/removed.
+        /// </summary>
+        public void SetAllHUDScale()
+        {
+            _highwayCameraRendering.RecalculateScaleFactors();
         }
 
         protected override void GameplayDestroy()

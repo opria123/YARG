@@ -327,9 +327,6 @@ namespace YARG.Networking
 
         private void OnDestroy()
         {
-            // Log why OnDestroy is being called - helpful for debugging unexpected shutdowns
-            Debug.Log($"[DedicatedServer] OnDestroy called! Stack trace:\n{System.Environment.StackTrace}");
-            
             IsRunning = false;
             
             // Clean up dedicated server manager

@@ -31,7 +31,6 @@ namespace YARG.Networking.DedicatedServer
         private readonly object _stateLock = new();
         
         private bool _readyUpPhaseActive;
-        private DateTime _readyUpPhaseStartTime;
         private bool _isDisposed;
         
         // Warning threshold (warn at 75% of timeout)
@@ -188,7 +187,6 @@ namespace YARG.Networking.DedicatedServer
             lock (_stateLock)
             {
                 _readyUpPhaseActive = true;
-                _readyUpPhaseStartTime = DateTime.UtcNow;
                 var deadline = DateTime.UtcNow.AddMinutes(ReadyUpTimeoutMinutes);
                 
                 foreach (var state in _playerStates.Values)

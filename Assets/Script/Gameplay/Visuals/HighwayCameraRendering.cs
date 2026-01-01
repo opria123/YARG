@@ -308,7 +308,7 @@ namespace YARG.Gameplay.Visuals
             _highwayPositions.RemoveAt(index);
             
             // Recalculate scale and camera bounds
-            Scale = CalculateScale(_cameras.Count);
+            RecalculateScaleFactors();
             UpdateCameraProjectionMatrices();
             RecalculateFadeParams();
             RecalculateCameraBounds();
