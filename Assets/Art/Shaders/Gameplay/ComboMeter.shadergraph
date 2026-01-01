@@ -14,9 +14,6 @@
         },
         {
             "m_Id": "2077381317d245eb9174a1338465d17c"
-        },
-        {
-            "m_Id": "eb95a163a71c4b85a30c09dc7c62abe6"
         }
     ],
     "m_Keywords": [],
@@ -1555,8 +1552,8 @@
     "m_ObjectId": "488ef1a07cca4420976fb4ff1eea51ec",
     "m_Title": "Sprite Index to UV",
     "m_Position": {
-        "x": -3219.000244140625,
-        "y": 426.9999694824219
+        "x": -3219.0,
+        "y": 427.0000305175781
     }
 }
 
@@ -3477,38 +3474,6 @@
 }
 
 {
-    "m_SGVersion": 3,
-    "m_Type": "UnityEditor.ShaderGraph.Internal.ColorShaderProperty",
-    "m_ObjectId": "eb95a163a71c4b85a30c09dc7c62abe6",
-    "m_Guid": {
-        "m_GuidSerialized": "dcd3bd0f-1de7-4dd1-922a-aa271922545b"
-    },
-    "m_Name": "Custom Preset Color",
-    "m_DefaultRefNameVersion": 1,
-    "m_RefNameGeneratedByDisplayName": "Custom Preset Color",
-    "m_DefaultReferenceName": "_Custom_Preset_Color",
-    "m_OverrideReferenceName": "_CustomPresetColor",
-    "m_GeneratePropertyBlock": true,
-    "m_UseCustomSlotLabel": false,
-    "m_CustomSlotLabel": "",
-    "m_DismissedVersion": 0,
-    "m_Precision": 0,
-    "overrideHLSLDeclaration": false,
-    "hlslDeclarationOverride": 0,
-    "m_Hidden": false,
-    "m_PerRendererData": false,
-    "m_customAttributes": [],
-    "m_Value": {
-        "r": 0.0,
-        "g": 0.0,
-        "b": 0.0,
-        "a": 0.0
-    },
-    "isMainColor": false,
-    "m_ColorMode": 0
-}
-
-{
     "m_SGVersion": 0,
     "m_Type": "UnityEditor.ShaderGraph.Vector2Node",
     "m_ObjectId": "ec9b547f2dde4ad592c693d93c1a66a7",
@@ -3573,9 +3538,6 @@
         },
         {
             "m_Id": "2077381317d245eb9174a1338465d17c"
-        },
-        {
-            "m_Id": "eb95a163a71c4b85a30c09dc7c62abe6"
         }
     ]
 }

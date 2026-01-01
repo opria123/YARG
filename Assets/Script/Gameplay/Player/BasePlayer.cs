@@ -10,6 +10,7 @@ using YARG.Core.Logging;
 using YARG.Core.Replays;
 using YARG.Gameplay.HUD;
 using YARG.Helpers.Extensions;
+using YARG.Helpers.UI;
 using YARG.Input;
 using YARG.Playback;
 using YARG.Player;
@@ -113,6 +114,15 @@ namespace YARG.Gameplay.Player
             InputViewer = FindFirstObjectByType<BaseInputViewer>();
 
             IsFc = true;
+        }
+
+        private void Update()
+        {
+            //Ensure hud elements get repositioned on screen size change
+            if (ScreenSizeDetector.HasScreenSizeChanged)
+            {
+                UpdateVisuals(GameManager.VisualTime);
+            }
         }
 
         protected void Start()

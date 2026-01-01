@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using UnityEngine.Serialization;
 using YARG.Assets.Script.Helpers;
 using YARG.Core;
 using YARG.Core.Audio;
@@ -25,10 +24,6 @@ namespace YARG.Gameplay.Player
         public const float NOTE_SPAWN_OFFSET     = 5f;
 
         public const float TRACK_WIDTH  = 2f;
-        public const float TRACK_HEIGHT = 100f;
-
-        public const float HUD_TOP_ELEMENT_HEIGHT = 0.15f;
-        public const float HUD_CENTER_ELEMENT_DEPTH = 1.5f;
 
         public static int HighwayCount = 1;
 
@@ -74,16 +69,6 @@ namespace YARG.Gameplay.Player
         [field: Header("Star Power Trim Effect")]
         [SerializeField]
         protected StarPowerEffectElement StarPowerEffect;
-
-        // Multiply by the reciprocal of 1 / player count to prevent the HUD from being too close to the highway;
-        public Vector2 HUDTopElementViewportPosition =>
-            TrackCamera.WorldToViewportPoint(_hudLocation.position.WithY(
-                HUD_TOP_ELEMENT_HEIGHT * (1 / HighwayCameraRendering.CalculateScale(HighwayCount)) + TRACK_HEIGHT));
-
-        public Vector2 HUDCenterElementViewportPosition =>
-            TrackCamera.WorldToViewportPoint(_hudLocation.position
-                .WithY(TRACK_HEIGHT)
-                .WithZ(STRIKE_LINE_POS + HUD_CENTER_ELEMENT_DEPTH));
 
         protected List<Beatline> Beatlines;
 

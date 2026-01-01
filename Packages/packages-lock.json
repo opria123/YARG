@@ -59,7 +59,7 @@
       "url": "https://package.openupm.com"
     },
     "com.thenathannator.hidrogen": {
-      "version": "0.5.0",
+      "version": "0.5.2",
       "depth": 0,
       "source": "registry",
       "dependencies": {
@@ -395,6 +395,13 @@
       "depth": 0,
       "source": "local",
       "dependencies": {}
+    },
+    "io.github.gkngkc.unity-standalone-file-browser": {
+      "version": "https://github.com/wyrdough/UnityStandaloneFileBrowser.git?path=Packages/StandaloneFileBrowser#upm",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {},
+      "hash": "9ee3c1276182c00758ff506e5e1d4be894b9749e"
     },
     "jp.keijiro.minis": {
       "version": "https://github.com/TheNathannator/Minis.git?path=/Packages/jp.keijiro.minis#yarg",
