@@ -9,7 +9,6 @@ using UnityEngine;
 using YARG.Core;
 using YARG.Core.Audio;
 using YARG.Core.Chart;
-using YARG.Core.IO;
 using YARG.Core.Logging;
 using YARG.Core.Replays;
 using YARG.Gameplay.HUD;
@@ -594,11 +593,11 @@ namespace YARG.Gameplay
 
                         // Setup player
                         var trackPlayer = playerObject.GetComponent<TrackPlayer>();
-                        var trackView = _trackViewManager.CreateTrackView(trackPlayer, player);
+                        var trackView = _trackViewManager.CreateTrackView();
                         trackPlayer.Initialize(highwayIndex, player, Chart, trackView, _mixer, lastHighScore);
 
                         _players.Add(trackPlayer);
-                        _trackViewManager._highwayCameraRendering.AddTrackPlayer(trackPlayer);
+                        _trackViewManager.AddTrackPlayer(trackPlayer);
                         
                         // MULTIPLAYER: Attach visualizer for remote players
                         if (_multiplayerSync != null)
@@ -663,8 +662,6 @@ namespace YARG.Gameplay
                         state.Audible += 2;
                     }
                 }
-                // Set the hud scale (position is handled by TrackPlayer)
-                _trackViewManager.SetAllHUDScale();
             }
             catch (Exception ex)
             {

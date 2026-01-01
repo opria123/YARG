@@ -85,24 +85,30 @@ namespace YARG.Gameplay.HUD
             _meterRedTweener = _fillImage.DOColor(ColorProfile.DefaultRed.ToUnityColor(), 0.25f).
                 SetLoops(-1, LoopType.Yoyo).
                 SetEase(Ease.InOutSine).
-                SetAutoKill(false).Pause();
+                SetAutoKill(false).
+                Pause().
+                SetLink(_fillImage.gameObject);
 
             _meterYellowTweener = _fillImage.DOColor(ColorProfile.DefaultYellow.ToUnityColor(), 0.25f).
                 SetAutoKill(false).
-                Pause();
+                Pause().
+                SetLink(_fillImage.gameObject);
 
             _meterGreenTweener = _fillImage.DOColor(ColorProfile.DefaultGreen.ToUnityColor(), 0.25f).
                 SetAutoKill(false).
-                Pause();
+                Pause().
+                SetLink(_fillImage.gameObject);
 
             // 0.8f is an arbitrary placeholder
             _bandFillTweener = _fillImage.DOFillAmount(0.8f, 0.125f).
-                SetAutoKill(false);
+                SetAutoKill(false).
+                SetLink(_fillImage.gameObject);
 
             // This is set up to move the container offscreen, but may later be used to move it back on
             _meterPositionTweener = _meterContainer.transform.DOMoveY(-400f, 0.5f).
                 SetAutoKill(false).
-                Pause();
+                Pause().
+                SetLink(_meterContainer);
 
 
             // attach the slider instances to the scene and apply the correct icon
@@ -114,8 +120,8 @@ namespace YARG.Gameplay.HUD
                 var xOffset = SPRITE_INITIAL_OFFSET + (SPRITE_OVERLAP_OFFSET * i);
                 _xPosVectors[i] = new Vector2(xOffset, 0);
 
-                _xposTweeners[i] = _playerSliders[i].handleRect.DOAnchorPosX(_xPosVectors[i].x, 0.125f).SetAutoKill(false);
-                _needleSliders[i].handleRect.DOAnchorPosX(SPRITE_INITIAL_OFFSET, 0.125f).SetAutoKill(false);
+                _xposTweeners[i] = _playerSliders[i].handleRect.DOAnchorPosX(_xPosVectors[i].x, 0.125f).SetAutoKill(false).SetLink(_playerSliders[i].gameObject);
+                _needleSliders[i].handleRect.DOAnchorPosX(SPRITE_INITIAL_OFFSET, 0.125f).SetAutoKill(false).SetLink(_needleSliders[i].gameObject);
 
                 var handleImage = _playerSliders[i].handleRect.GetComponentInChildren<Image>();
                 var spriteName = _players[i].GetInstrumentSprite();
@@ -130,8 +136,8 @@ namespace YARG.Gameplay.HUD
                 _needleSliders[i].gameObject.SetActive(true);
 
                 // Cached for reuse because starting a new tween generates garbage
-                _playerHappinessTweeners[i] = _playerSliders[i].DOValue(_players[i].Happiness, 0.5f).SetAutoKill(false);
-                _needleHappinessTweeners[i] = _needleSliders[i].DOValue(_players[i].Happiness, 0.5f).SetAutoKill(false);
+                _playerHappinessTweeners[i] = _playerSliders[i].DOValue(_players[i].Happiness, 0.5f).SetAutoKill(false).SetLink(_playerSliders[i].gameObject);
+                _needleHappinessTweeners[i] = _needleSliders[i].DOValue(_players[i].Happiness, 0.5f).SetAutoKill(false).SetLink(_needleSliders[i].gameObject);
                 _previousPlayerHappiness[i] = _players[i].Happiness;
             }
 
