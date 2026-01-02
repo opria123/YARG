@@ -1396,6 +1396,114 @@ namespace YARG.Networking.Session
                 YargLogger.LogWarning($"[SessionManager] Heartbeat error for {introducerUrl}: {ex.Message}");
             }
         }
+        
+        // ========== RELAY CONNECTION SUPPORT ==========
+        
+        /// <summary>
+        /// Checks if relay is available for connecting to a lobby.
+        /// </summary>
+        /// <param name="introducerUrl">The introducer URL to check.</param>
+        /// <returns>Relay info if available, null otherwise.</returns>
+        public async UniTask<RelayInfo?> CheckRelayAvailableAsync(string introducerUrl, CancellationToken ct = default)
+        {
+            try
+            {
+                var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                var uri = new Uri(new Uri(introducerUrl), "/api/relay/info");
+                
+                var response = await httpClient.GetAsync(uri, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    httpClient.Dispose();
+                    return null;
+                }
+                
+                var json = await response.Content.ReadAsStringAsync();
+                httpClient.Dispose();
+                
+                var info = System.Text.Json.JsonSerializer.Deserialize<RelayInfo>(json, 
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+                return info?.Available == true ? info : null;
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogWarning($"[SessionManager] Relay check failed: {ex.Message}");
+                return null;
+            }
+        }
+        
+        /// <summary>
+        /// Allocates a relay session for a lobby (host-side).
+        /// </summary>
+        public async UniTask<RelayAllocation?> AllocateRelaySessionAsync(Guid lobbyId, string introducerUrl, CancellationToken ct = default)
+        {
+            try
+            {
+                var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                
+                var request = new { lobbyId };
+                var content = new System.Net.Http.StringContent(
+                    System.Text.Json.JsonSerializer.Serialize(request),
+                    System.Text.Encoding.UTF8,
+                    "application/json");
+                
+                var uri = new Uri(new Uri(introducerUrl), "/api/relay/allocate");
+                var response = await httpClient.PostAsync(uri, content, ct);
+                
+                if (!response.IsSuccessStatusCode)
+                {
+                    httpClient.Dispose();
+                    YargLogger.LogWarning($"[SessionManager] Relay allocation failed: {response.StatusCode}");
+                    return null;
+                }
+                
+                var json = await response.Content.ReadAsStringAsync();
+                httpClient.Dispose();
+                
+                var allocation = System.Text.Json.JsonSerializer.Deserialize<RelayAllocation>(json,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+                if (allocation?.Success == true)
+                {
+                    YargLogger.LogInfo($"[SessionManager] Relay session allocated: {allocation.SessionId}");
+                }
+                
+                return allocation;
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogError($"[SessionManager] Relay allocation error: {ex.Message}");
+                return null;
+            }
+        }
+    }
+    
+    // ========== RELAY DTOs ==========
+    
+    /// <summary>
+    /// Relay server info from /api/relay/info
+    /// </summary>
+    [Serializable]
+    public class RelayInfo
+    {
+        public bool Available { get; set; }
+        public string? Address { get; set; }
+        public int Port { get; set; }
+        public string? Message { get; set; }
+    }
+    
+    /// <summary>
+    /// Relay session allocation result from /api/relay/allocate
+    /// </summary>
+    [Serializable]
+    public class RelayAllocation
+    {
+        public bool Success { get; set; }
+        public Guid SessionId { get; set; }
+        public string? RelayAddress { get; set; }
+        public int RelayPort { get; set; }
+        public string? Message { get; set; }
     }
 
     /// <summary>
