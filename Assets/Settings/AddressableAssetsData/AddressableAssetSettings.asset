@@ -104,8 +104,8 @@ MonoBehaviour:
     - Locale
     - Locale-en-US
     - Preload
-    - SettingTab/IntroducerEntry
-    - SettingTab/IntroducerHeader
+    - SettingTab/LobbyServerEntry
+    - SettingTab/LobbyServerHeader
   m_SchemaTemplates: []
   m_GroupTemplateObjects:
   - {fileID: 11400000, guid: 6539381e9f0415a439edb02a42aca1b4, type: 2}

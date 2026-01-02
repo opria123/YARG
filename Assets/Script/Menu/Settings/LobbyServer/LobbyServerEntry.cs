@@ -79,17 +79,29 @@ namespace YARG.Menu.Settings
             var servers = LobbyServers;
             if (servers == null || _index < 0 || _index >= servers.Count)
             {
+                Debug.LogWarning($"[LobbyServerEntry] RefreshFromData: Invalid state - servers={servers?.Count ?? -1}, index={_index}");
                 gameObject.SetActive(false);
                 return;
             }
 
             _endpoint = servers[_index];
+            Debug.Log($"[LobbyServerEntry] RefreshFromData: index={_index}, id={_endpoint.id}, displayName={_endpoint.displayName}, url={_endpoint.url}, isBuiltIn={_endpoint.isBuiltIn}");
 
-            // Update URL input
+            // Update URL input - show displayName for built-in, URL for custom
             if (_urlInput != null)
             {
-                _urlInput.text = _endpoint.url ?? string.Empty;
-                _urlInput.interactable = !_endpoint.isBuiltIn; // Can't edit built-in URLs
+                if (_endpoint.isBuiltIn)
+                {
+                    // For built-in servers, show the display name (not editable)
+                    _urlInput.text = _endpoint.displayName ?? _endpoint.url ?? string.Empty;
+                    _urlInput.interactable = false;
+                }
+                else
+                {
+                    // For custom servers, show the URL (editable)
+                    _urlInput.text = _endpoint.url ?? string.Empty;
+                    _urlInput.interactable = true;
+                }
             }
 
             // Update enabled toggle

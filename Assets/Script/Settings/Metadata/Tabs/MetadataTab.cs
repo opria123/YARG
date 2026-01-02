@@ -116,13 +116,19 @@ namespace YARG.Settings.Metadata
                         // Spawn the lobby server header with "Add New" button
                         if (_lobbyServerHeaderPrefab != null)
                         {
+                            Debug.Log("[MetadataTab] Spawning lobby server header prefab");
                             Object.Instantiate(_lobbyServerHeaderPrefab, container);
+                        }
+                        else
+                        {
+                            Debug.LogWarning("[MetadataTab] LobbyServerHeader prefab is null - addressable may not be loaded");
                         }
 
                         // Create entries for each lobby server
                         if (_lobbyServerEntryPrefab != null)
                         {
                             var lobbyServers = NetworkSettingsStore.Instance?.Settings?.lobbyServers;
+                            Debug.Log($"[MetadataTab] Creating {lobbyServers?.Count ?? 0} lobby server entries");
                             if (lobbyServers != null)
                             {
                                 for (int i = 0; i < lobbyServers.Count; i++)
@@ -131,6 +137,10 @@ namespace YARG.Settings.Metadata
                                     go.GetComponent<LobbyServerEntry>().SetIndex(i);
                                 }
                             }
+                        }
+                        else
+                        {
+                            Debug.LogWarning("[MetadataTab] LobbyServerEntry prefab is null - addressable may not be loaded");
                         }
 
                         break;

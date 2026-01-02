@@ -90,11 +90,11 @@ MonoBehaviour:
     m_ReadOnly: 0
     m_SerializedLabels: []
     FlaggedDuringContentUpdateRestriction: 0
-  - m_GUID: 4b86c075f79f0bb4db4f622e423ba20a
-    m_Address: Assets/Prefabs/Menu/Settings/IntroducerManager/IntroducerManagerHeader.prefab
+  - m_GUID: 1135cd7bbea4981439e9002a70834a9c
+    m_Address: Assets/Prefabs/Menu/Settings/LobbyServerManager/LobbyServerManagerHeader.prefab
     m_ReadOnly: 0
     m_SerializedLabels:
-    - SettingTab/IntroducerHeader
+    - SettingTab/LobbyServerHeader
     FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: 4fe54f44a04e7364db2baafd68cda60c
     m_Address: Assets/Art/Fonts/DifficultySprites.asset
@@ -187,10 +187,10 @@ MonoBehaviour:
     m_SerializedLabels: []
     FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: 9dcce9da4874e254aa500163952a7797
-    m_Address: Assets/Prefabs/Menu/Settings/IntroducerManager/IntroducerManagerDirectory.prefab
+    m_Address: Assets/Prefabs/Menu/Settings/LobbyServerManager/LobbyServerManagerDirectory.prefab
     m_ReadOnly: 0
     m_SerializedLabels:
-    - SettingTab/IntroducerEntry
+    - SettingTab/LobbyServerEntry
     FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: a525db7d8caeaf043bc242aafb1f8ce2
     m_Address: VocalNeedle/6

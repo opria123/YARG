@@ -107,7 +107,7 @@ GameObject:
   - component: {fileID: 5753369685943773596}
   - component: {fileID: 6230154535105350551}
   m_Layer: 5
-  m_Name: IntroducerManagerDirectory
+  m_Name: LobbyServerManagerDirectory
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -143,9 +143,9 @@ MonoBehaviour:
   m_GameObject: {fileID: 5753369685943773599}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: f3fbebddbcb85f140a71ab242c186e01, type: 3}
+  m_Script: {fileID: 11500000, guid: 31cababa1ba36704e907aa376bfb804b, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::YARG.Menu.Settings.IntroducerEntry
+  m_EditorClassIdentifier: Assembly-CSharp::YARG.Menu.Settings.LobbyServerEntry
   _urlInput: {fileID: 3371947728857911528}
   _enabledToggle: {fileID: 2338109990489095115}
   _removeButton: {fileID: 4489597733651813205}

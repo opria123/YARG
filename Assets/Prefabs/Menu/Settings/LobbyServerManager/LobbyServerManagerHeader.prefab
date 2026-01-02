@@ -126,7 +126,7 @@ PrefabInstance:
     - target: {fileID: 5753369685943773599, guid: eda8fcec479d4324eb4bd1d7624e1edc,
         type: 3}
       propertyPath: m_Name
-      value: IntroducerManagerHeader
+      value: LobbyServerManagerHeader
       objectReference: {fileID: 0}
     - target: {fileID: 7748925732419506741, guid: eda8fcec479d4324eb4bd1d7624e1edc,
         type: 3}
@@ -166,9 +166,9 @@ MonoBehaviour:
   m_GameObject: {fileID: 1958580528560083960}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 1603fef3ee6da134b87106982c11700b, type: 3}
+  m_Script: {fileID: 11500000, guid: 4214ef2cae66ab74da3eb45f3f4489f8, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::YARG.Menu.Settings.IntroducerHeader
+  m_EditorClassIdentifier: Assembly-CSharp::YARG.Menu.Settings.LobbyServerHeader
 --- !u!224 &1958580528560083963 stripped
 RectTransform:
   m_CorrespondingSourceObject: {fileID: 5753369685943773596, guid: eda8fcec479d4324eb4bd1d7624e1edc,
@@ -206,12 +206,12 @@ PrefabInstance:
     - target: {fileID: 1245898288579793007, guid: f6ac2a9c2f684f84792c7d7cd00ba18c,
         type: 3}
       propertyPath: m_OnClick.m_PersistentCalls.m_Calls.Array.data[0].m_MethodName
-      value: AddNewIntroducer
+      value: AddNewLobbyServer
       objectReference: {fileID: 0}
     - target: {fileID: 1245898288579793007, guid: f6ac2a9c2f684f84792c7d7cd00ba18c,
         type: 3}
       propertyPath: m_OnClick.m_PersistentCalls.m_Calls.Array.data[0].m_TargetAssemblyTypeName
-      value: YARG.Menu.Settings.IntroducerHeader, Assembly-CSharp
+      value: YARG.Menu.Settings.LobbyServerHeader, Assembly-CSharp
       objectReference: {fileID: 0}
     - target: {fileID: 1245898288579793007, guid: f6ac2a9c2f684f84792c7d7cd00ba18c,
         type: 3}
