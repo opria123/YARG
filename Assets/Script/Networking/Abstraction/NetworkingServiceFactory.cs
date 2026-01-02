@@ -1,4 +1,5 @@
 using UnityEngine;
+using YARG.Net.Relay;
 
 namespace YARG.Networking.Abstraction
 {
@@ -49,6 +50,9 @@ namespace YARG.Networking.Abstraction
             {
                 return;
             }
+            
+            // Set up relay client logging to go through Unity's Debug.Log
+            LiteNetRelayClient.Logger = msg => Debug.Log($"[Relay] {msg}");
 
             _instance = new LiteNetNetworkingAdapter();
             
