@@ -7696,8 +7696,9 @@ namespace YARG.Networking.Abstraction
 
         /// <summary>
         /// Connection timeout in seconds for joining a lobby.
+        /// Keep this short (8s) since we have NAT punch and relay fallbacks.
         /// </summary>
-        private const int CONNECTION_TIMEOUT_SECONDS = 15;
+        private const int CONNECTION_TIMEOUT_SECONDS = 8;
         
         private async Task ConnectToServerAsync(string address, int port)
         {
@@ -7828,8 +7829,8 @@ namespace YARG.Networking.Abstraction
                 _relayClient.OnDisconnected += OnRelayDisconnected;
                 _relayClient.OnError += OnRelayError;
                 
-                // Connect to relay
-                bool connected = await _relayClient.ConnectAsync(15000); // 15 second timeout
+                // Connect to relay (10s timeout since relay should be reliable)
+                bool connected = await _relayClient.ConnectAsync(10000);
                 
                 if (!connected)
                 {
@@ -7998,8 +7999,8 @@ namespace YARG.Networking.Abstraction
                 _relayClient.OnDisconnected += OnHostRelayDisconnected;
                 _relayClient.OnError += OnHostRelayError;
                 
-                // Connect to relay
-                bool connected = await _relayClient.ConnectAsync(15000);
+                // Connect to relay (10s timeout since relay should be reliable)
+                bool connected = await _relayClient.ConnectAsync(10000);
                 
                 if (!connected)
                 {

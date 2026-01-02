@@ -478,9 +478,9 @@ namespace YARG.Networking.Session
             // This allows clients to connect even without UPnP port forwarding
             await RegisterWithNatPunchServerAsync(successfulLobbyServer.url, lobbyId, port, ct);
             
-            // Step 6: Allocate relay session and connect host to relay
+            // Step 6: Allocate relay session (but don't connect yet - that happens after CreateLobby)
             // This enables relay fallback for clients when direct/NAT punch fails
-            await AllocateAndConnectHostRelayAsync(successfulLobbyServer.url, lobbyId, ct);
+            await AllocateRelaySessionOnlyAsync(successfulLobbyServer.url, lobbyId, ct);
             
             // Start heartbeat loop to keep lobby alive on lobby servers
             StartHeartbeatLoop();
@@ -917,10 +917,10 @@ namespace YARG.Networking.Session
         public Guid RelaySessionId => _relaySessionId;
         
         /// <summary>
-        /// Allocates a relay session and connects the host to the relay server.
-        /// This enables relay fallback for clients who can't connect directly.
+        /// Allocates a relay session but does NOT connect the host yet.
+        /// The connection must happen after CreateLobby() when _isHosting is true.
         /// </summary>
-        private async UniTask AllocateAndConnectHostRelayAsync(string lobbyServerUrl, Guid lobbyId, CancellationToken ct)
+        private async UniTask AllocateRelaySessionOnlyAsync(string lobbyServerUrl, Guid lobbyId, CancellationToken ct)
         {
             try
             {
@@ -949,14 +949,42 @@ namespace YARG.Networking.Session
                 _relayPort = allocation.RelayPort;
                 
                 YargLogger.LogInfo($"[SessionManager] Relay session allocated: {_relaySessionId}");
-                
-                // Connect the host to the relay
+                // Note: Host connection to relay happens in ConnectHostToRelay() after CreateLobby()
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogWarning($"[SessionManager] Relay allocation failed: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Connects the host to the relay server so clients can use relay fallback.
+        /// IMPORTANT: Call this AFTER the transport is running (after CreateLobby()).
+        /// </summary>
+        public async void ConnectHostToRelay()
+        {
+            if (!_isSessionActive)
+            {
+                YargLogger.LogWarning("[SessionManager] Cannot connect to relay - no active session");
+                return;
+            }
+            
+            if (_relaySessionId == Guid.Empty || string.IsNullOrEmpty(_relayAddress))
+            {
+                YargLogger.LogInfo("[SessionManager] No relay session allocated - skipping host relay connection");
+                return;
+            }
+            
+            try
+            {
                 var networkService = Abstraction.NetworkingServiceFactory.Instance;
                 if (networkService == null)
                 {
                     YargLogger.LogWarning("[SessionManager] NetworkService not available - cannot connect host to relay");
                     return;
                 }
+                
+                YargLogger.LogInfo($"[SessionManager] Connecting host to relay at {_relayAddress}:{_relayPort}...");
                 
                 bool connected = await networkService.ConnectHostToRelayAsync(
                     _relayAddress!, 
@@ -977,7 +1005,10 @@ namespace YARG.Networking.Session
             }
             catch (Exception ex)
             {
-                YargLogger.LogWarning($"[SessionManager] Relay allocation/connection failed: {ex.Message}");
+                YargLogger.LogWarning($"[SessionManager] Host relay connection failed: {ex.Message}");
+                _relaySessionId = Guid.Empty;
+                _relayAddress = null;
+                _relayPort = 0;
             }
         }
         
@@ -1102,7 +1133,7 @@ namespace YARG.Networking.Session
         /// <param name="lobbyServerUrl">The lobby server URL to use for coordination</param>
         /// <param name="timeoutMs">How long to wait for punch to complete</param>
         /// <returns>The punched endpoint if successful, null if punch failed</returns>
-        public async UniTask<IPEndPoint?> InitiateNatPunchAsync(Guid lobbyId, string lobbyServerUrl, int timeoutMs = 5000)
+        public async UniTask<IPEndPoint?> InitiateNatPunchAsync(Guid lobbyId, string lobbyServerUrl, int timeoutMs = 3000)
         {
             _punchedEndpoint = null;
             bool startedTransportForPunch = false;

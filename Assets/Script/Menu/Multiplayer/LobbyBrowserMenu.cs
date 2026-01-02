@@ -917,148 +917,146 @@ namespace YARG.Menu.Multiplayer
         }
         
         /// <summary>
-        /// Tries to connect to a lobby with fallback chain: NAT punch -> Direct -> Relay
+        /// Tries to connect to a lobby using relay-first pattern (like Steam/Epic).
+        /// Relay is fast and reliable, so try it first. Fall back to direct only if relay unavailable.
         /// </summary>
-        private async UniTask TryConnectWithFallbackAsync(LobbyDirectoryEntry lobby, string? LobbyServerUrl, string password)
+        private async UniTask TryConnectWithFallbackAsync(LobbyDirectoryEntry lobby, string? lobbyServerUrl, string password)
         {
             string endpoint = $"{lobby.Address}:{lobby.Port}";
-            string connectEndpoint = endpoint;
             
-            // Step 1: Try NAT punch-through first (if we have the lobby server URL)
-            if (!string.IsNullOrEmpty(LobbyServerUrl))
-            {
-                YargLogger.LogInfo($"[LobbyBrowserMenu] Step 1: Attempting NAT punch-through via {LobbyServerUrl}...");
-                ToastManager.ToastInformation("Establishing connection...");
-                
-                var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
-                    lobby.LobbyId, LobbyServerUrl, 5000);
-                
-                if (punchedEndpoint != null)
-                {
-                    connectEndpoint = $"{punchedEndpoint.Address}:{punchedEndpoint.Port}";
-                    YargLogger.LogInfo($"[LobbyBrowserMenu] NAT punch succeeded! Connecting to {connectEndpoint}");
-                    ToastManager.ToastInformation("NAT punch succeeded!");
-                }
-                else
-                {
-                    YargLogger.LogWarning("[LobbyBrowserMenu] NAT punch failed, trying direct connection...");
-                }
-            }
+            YargLogger.LogInfo($"[LobbyBrowserMenu] Connecting to {lobby.LobbyName} at {endpoint}...");
+            ToastManager.ToastInformation("Connecting...");
             
-            // Step 2: Try direct connection with short timeout to see if it works
-            if (NetworkService != null)
-            {
-                YargLogger.LogInfo($"[LobbyBrowserMenu] Step 2: Trying direct connection to {connectEndpoint}...");
-                
-                // Set up connection result tracking
-                var connectionTcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
-                bool connectionHandled = false;
-                
-                void OnJoined(LobbyInfo _)
-                {
-                    if (!connectionHandled)
-                    {
-                        connectionHandled = true;
-                        connectionTcs.TrySetResult(true);
-                    }
-                }
-                
-                void OnError(string error)
-                {
-                    if (!connectionHandled && (error.Contains("timed out") || error.Contains("failed")))
-                    {
-                        connectionHandled = true;
-                        connectionTcs.TrySetResult(false);
-                    }
-                }
-                
-                NetworkService.OnLobbyJoined += OnJoined;
-                NetworkService.OnNetworkError += OnError;
-                
-                try
-                {
-                    NetworkService.JoinLobby(connectEndpoint, password);
-                    _sidebar?.ClearLobbyCodeInput();
-                    
-                    // Wait for connection result (with 20 second timeout for direct connection)
-                    using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(20));
-                    var completedTask = await System.Threading.Tasks.Task.WhenAny(
-                        connectionTcs.Task,
-                        System.Threading.Tasks.Task.Delay(20000, cts.Token));
-                    
-                    if (completedTask == connectionTcs.Task && connectionTcs.Task.Result)
-                    {
-                        YargLogger.LogInfo("[LobbyBrowserMenu] Direct connection succeeded!");
-                        return; // Success!
-                    }
-                    
-                    // Connection failed or timed out - try relay
-                    YargLogger.LogWarning("[LobbyBrowserMenu] Direct connection failed, checking relay availability...");
-                }
-                finally
-                {
-                    NetworkService.OnLobbyJoined -= OnJoined;
-                    NetworkService.OnNetworkError -= OnError;
-                }
-                
-                // Step 3: Try relay as last resort
-                if (!string.IsNullOrEmpty(LobbyServerUrl))
-                {
-                    await TryRelayConnectionAsync(lobby, LobbyServerUrl, password);
-                }
-            }
-            else
+            if (NetworkService == null)
             {
                 YargLogger.LogError("[LobbyBrowserMenu] NetworkService is null!");
                 ToastManager.ToastError("Networking service not available");
+                return;
+            }
+            
+            // Set up connection result tracking
+            var connectionTcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
+            bool connectionHandled = false;
+            
+            void OnJoined(LobbyInfo _)
+            {
+                if (!connectionHandled)
+                {
+                    connectionHandled = true;
+                    connectionTcs.TrySetResult(true);
+                }
+            }
+            
+            void OnError(string error)
+            {
+                if (!connectionHandled)
+                {
+                    connectionHandled = true;
+                    connectionTcs.TrySetResult(false);
+                }
+            }
+            
+            NetworkService.OnLobbyJoined += OnJoined;
+            NetworkService.OnNetworkError += OnError;
+            
+            try
+            {
+                // === STEP 1: Try relay first (fastest, most reliable) ===
+                if (!string.IsNullOrEmpty(lobbyServerUrl) && SessionLifecycleManager.Instance != null)
+                {
+                    YargLogger.LogInfo("[LobbyBrowserMenu] Step 1: Checking relay availability...");
+                    
+                    var relayInfo = await SessionLifecycleManager.Instance.CheckRelayAvailableAsync(lobbyServerUrl);
+                    
+                    if (relayInfo != null && relayInfo.Available)
+                    {
+                        YargLogger.LogInfo($"[LobbyBrowserMenu] Relay available at {relayInfo.Address}:{relayInfo.Port}");
+                        
+                        var allocation = await SessionLifecycleManager.Instance.AllocateRelaySessionAsync(lobby.LobbyId, lobbyServerUrl);
+                        
+                        if (allocation != null && allocation.Success)
+                        {
+                            YargLogger.LogInfo($"[LobbyBrowserMenu] Connecting via relay (session: {allocation.SessionId})...");
+                            
+                            NetworkService.JoinLobbyViaRelay(
+                                allocation.RelayAddress, 
+                                allocation.RelayPort, 
+                                allocation.SessionId, 
+                                lobby.LobbyId, 
+                                password);
+                            
+                            // Wait for connection (5s timeout for relay - should be fast)
+                            var relayResult = await WaitForConnectionAsync(connectionTcs, 5000);
+                            if (relayResult)
+                            {
+                                YargLogger.LogInfo("[LobbyBrowserMenu] Connected via relay!");
+                                _sidebar?.ClearLobbyCodeInput();
+                                return;
+                            }
+                            
+                            YargLogger.LogWarning("[LobbyBrowserMenu] Relay connection failed, trying direct...");
+                            // Reset for next attempt
+                            connectionHandled = false;
+                            connectionTcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
+                        }
+                    }
+                    else
+                    {
+                        YargLogger.LogInfo("[LobbyBrowserMenu] Relay not available, trying direct connection...");
+                    }
+                }
+                
+                // === STEP 2: Try direct connection ===
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Step 2: Trying direct connection to {endpoint}...");
+                
+                NetworkService.JoinLobby(endpoint, password);
+                
+                // Wait for connection (8s timeout for direct)
+                var directResult = await WaitForConnectionAsync(connectionTcs, 8000);
+                if (directResult)
+                {
+                    YargLogger.LogInfo("[LobbyBrowserMenu] Connected directly!");
+                    _sidebar?.ClearLobbyCodeInput();
+                    return;
+                }
+                
+                // === All attempts failed ===
+                YargLogger.LogError("[LobbyBrowserMenu] All connection attempts failed");
+                ToastManager.ToastError("Connection failed. The host may be offline or behind a firewall.");
+            }
+            finally
+            {
+                NetworkService.OnLobbyJoined -= OnJoined;
+                NetworkService.OnNetworkError -= OnError;
             }
         }
         
         /// <summary>
-        /// Attempts to connect via relay server.
+        /// Waits for connection result with timeout.
         /// </summary>
-        private async UniTask TryRelayConnectionAsync(LobbyDirectoryEntry lobby, string LobbyServerUrl, string password)
+        private async UniTask<bool> WaitForConnectionAsync(
+            System.Threading.Tasks.TaskCompletionSource<bool> tcs, 
+            int timeoutMs)
         {
-            YargLogger.LogInfo($"[LobbyBrowserMenu] Step 3: Checking relay availability at {LobbyServerUrl}...");
-            ToastManager.ToastInformation("Trying relay connection...");
+            using var cts = new System.Threading.CancellationTokenSource(timeoutMs);
             
-            var relayInfo = await SessionLifecycleManager.Instance.CheckRelayAvailableAsync(LobbyServerUrl);
-            
-            if (relayInfo == null || !relayInfo.Available)
+            try
             {
-                YargLogger.LogError("[LobbyBrowserMenu] Relay not available");
-                ToastManager.ToastError("Connection failed. The host may be behind a firewall.");
-                return;
+                var completedTask = await System.Threading.Tasks.Task.WhenAny(
+                    tcs.Task,
+                    System.Threading.Tasks.Task.Delay(timeoutMs, cts.Token));
+                
+                if (completedTask == tcs.Task)
+                {
+                    return tcs.Task.Result;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Timeout
             }
             
-            YargLogger.LogInfo($"[LobbyBrowserMenu] Relay available at {relayInfo.Address}:{relayInfo.Port}");
-            
-            // Allocate relay session for this lobby
-            var allocation = await SessionLifecycleManager.Instance.AllocateRelaySessionAsync(lobby.LobbyId, LobbyServerUrl);
-            
-            if (allocation == null || !allocation.Success)
-            {
-                YargLogger.LogError("[LobbyBrowserMenu] Failed to allocate relay session");
-                ToastManager.ToastError("Relay connection failed. Please try again.");
-                return;
-            }
-            
-            YargLogger.LogInfo($"[LobbyBrowserMenu] Relay session allocated: {allocation.SessionId}");
-            YargLogger.LogInfo($"[LobbyBrowserMenu] Connecting via relay at {allocation.RelayAddress}:{allocation.RelayPort}...");
-            ToastManager.ToastInformation("Connecting via relay...");
-            
-            // Connect via the relay using the proper relay connection method
-            // This uses LiteNetRelayClient to handle the relay protocol properly
-            if (NetworkService != null)
-            {
-                NetworkService.JoinLobbyViaRelay(
-                    allocation.RelayAddress, 
-                    allocation.RelayPort, 
-                    allocation.SessionId, 
-                    lobby.LobbyId, 
-                    password);
-                _sidebar?.ClearLobbyCodeInput();
-            }
+            return false;
         }
         
         /// <summary>
@@ -1102,44 +1100,37 @@ namespace YARG.Menu.Multiplayer
         }
         
         /// <summary>
-        /// Joins a lobby with password, trying NAT punch first.
+        /// Joins a lobby with password using parallel connection attempts.
         /// </summary>
         private async UniTaskVoid JoinWithPasswordAndPunchAsync(string lobbyName, string endpoint, string password, Guid lobbyId, string? LobbyServerUrl)
         {
             try
             {
-                string connectEndpoint = endpoint;
-                
-                // Try NAT punch-through first if we have the lobby server URL
-                if (!string.IsNullOrEmpty(LobbyServerUrl) && SessionLifecycleManager.Instance != null)
+                // Parse endpoint into address and port
+                var parts = endpoint.Split(':');
+                if (parts.Length != 2 || !int.TryParse(parts[1], out int port))
                 {
-                    YargLogger.LogInfo($"[LobbyBrowserMenu] Attempting NAT punch-through via {LobbyServerUrl}...");
-                    ToastManager.ToastInformation("Establishing connection...");
-                    
-                    var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
-                        lobbyId, LobbyServerUrl, 5000);
-                    
-                    if (punchedEndpoint != null)
-                    {
-                        connectEndpoint = $"{punchedEndpoint.Address}:{punchedEndpoint.Port}";
-                        YargLogger.LogInfo($"[LobbyBrowserMenu] NAT punch succeeded! Connecting to {connectEndpoint}");
-                        ToastManager.ToastInformation("NAT punch succeeded!");
-                    }
-                    else
-                    {
-                        YargLogger.LogWarning("[LobbyBrowserMenu] NAT punch failed, trying direct connection...");
-                    }
+                    YargLogger.LogError($"[LobbyBrowserMenu] Invalid endpoint format: {endpoint}");
+                    ToastManager.ToastError("Invalid server address");
+                    return;
                 }
                 
-                if (NetworkService != null)
-                {
-                    NetworkService.JoinLobby(connectEndpoint, password);
-                    _sidebar?.ClearLobbyCodeInput();
-                }
-                else
-                {
-                    ToastManager.ToastError("Networking service not available");
-                }
+                // Create a temporary LobbyDirectoryEntry for the parallel connection method
+                var lobby = new LobbyDirectoryEntry(
+                    LobbyId: lobbyId,
+                    LobbyName: lobbyName,
+                    HostName: "Host",
+                    Address: parts[0],
+                    Port: port,
+                    CurrentPlayers: 0,
+                    MaxPlayers: 4,
+                    HasPassword: !string.IsNullOrEmpty(password),
+                    Version: "",
+                    LastHeartbeatUtc: DateTimeOffset.UtcNow
+                );
+                
+                // Use the parallel connection method
+                await TryConnectWithFallbackAsync(lobby, LobbyServerUrl, password);
             }
             catch (Exception ex)
             {
@@ -2128,6 +2119,10 @@ namespace YARG.Menu.Multiplayer
                     // IMPORTANT: Start NAT punch keepalive NOW that the transport is running.
                     // This sends UDP packets to the punch server to create NAT mapping so clients can connect.
                     SessionLifecycleManager.Instance?.StartPunchKeepalive();
+                    
+                    // Connect host to relay NOW that the transport is running (_isHosting = true).
+                    // This enables relay fallback for clients who can't connect via direct or NAT punch.
+                    SessionLifecycleManager.Instance?.ConnectHostToRelay();
                 }
                 
                 // CRITICAL: Close the dialog AFTER creating the lobby but BEFORE navigating!
