@@ -10,14 +10,22 @@ namespace YARG.Networking.Abstraction
     {
         private static INetworkingService _instance;
         private static bool _isInitialized;
+        private static bool _isShuttingDown;
 
         /// <summary>
         /// Get the current networking service instance.
+        /// Returns null if already shut down (prevents re-initialization during shutdown).
         /// </summary>
         public static INetworkingService Instance
         {
             get
             {
+                // Don't re-initialize if we're shutting down
+                if (_isShuttingDown)
+                {
+                    return null;
+                }
+                
                 if (!_isInitialized)
                 {
                     Initialize();
@@ -25,6 +33,12 @@ namespace YARG.Networking.Abstraction
                 return _instance;
             }
         }
+        
+        /// <summary>
+        /// Get the current instance without triggering initialization.
+        /// Safe to call during cleanup/shutdown.
+        /// </summary>
+        public static INetworkingService InstanceOrNull => _instance;
 
         /// <summary>
         /// Initialize the networking service.
@@ -74,6 +88,8 @@ namespace YARG.Networking.Abstraction
         /// </summary>
         public static void Shutdown()
         {
+            _isShuttingDown = true;
+            
             if (_instance != null)
             {
                 _instance.Shutdown();
@@ -88,6 +104,7 @@ namespace YARG.Networking.Abstraction
         public static void Reset()
         {
             Shutdown();
+            _isShuttingDown = false; // Allow re-initialization after explicit reset
         }
     }
 }

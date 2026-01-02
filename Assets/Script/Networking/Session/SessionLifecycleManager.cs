@@ -290,6 +290,34 @@ namespace YARG.Networking.Session
                     // Get the external address for code dissemination
                     externalAddress = await _upnpForwarder.GetExternalIPAsync(ct);
                     YargLogger.LogInfo($"[SessionManager] UPnP success! External address: {externalAddress ?? "null"}, port: {port}");
+                    
+                    // Verify the mapping by listing existing mappings
+                    var mappings = await _upnpForwarder.ListMappingsAsync(ct);
+                    if (mappings != null && mappings.Count > 0)
+                    {
+                        bool foundOurMapping = false;
+                        foreach (var mapping in mappings)
+                        {
+                            YargLogger.LogInfo($"[SessionManager] Found UPnP mapping: {mapping.Protocol} {mapping.PublicPort} -> {mapping.PrivateIP}:{mapping.PrivatePort} ({mapping.Description})");
+                            if (mapping.PublicPort == port)
+                            {
+                                foundOurMapping = true;
+                            }
+                        }
+                        
+                        if (foundOurMapping)
+                        {
+                            YargLogger.LogInfo($"[SessionManager] Verified: Port {port} mapping is active");
+                        }
+                        else
+                        {
+                            YargLogger.LogWarning($"[SessionManager] WARNING: Port {port} mapping not found in listing despite UPnP success");
+                        }
+                    }
+                    else
+                    {
+                        YargLogger.LogWarning("[SessionManager] Could not verify UPnP mapping - listing returned empty");
+                    }
                 }
             }
 
@@ -1256,7 +1284,8 @@ namespace YARG.Networking.Session
             _punchServerPort = 0;
             
             // Unsubscribe from networking service's NAT punch events
-            var networkService = Abstraction.NetworkingServiceFactory.Instance;
+            // Use InstanceOrNull to avoid re-initialization during shutdown
+            var networkService = Abstraction.NetworkingServiceFactory.InstanceOrNull;
             if (networkService != null)
             {
                 networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;

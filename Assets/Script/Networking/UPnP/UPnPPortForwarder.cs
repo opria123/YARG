@@ -200,6 +200,43 @@ namespace YARG.Networking.UPnP
             var existing = await _client.GetPortMappingAsync(port, PortMappingProtocol.UDP, cancellationToken).AsUniTask();
             return existing != null;
         }
+        
+        /// <summary>
+        /// Lists all port mappings on the gateway device.
+        /// </summary>
+        /// <returns>List of all mappings, or null if unavailable.</returns>
+        public async UniTask<System.Collections.Generic.List<PortMappingInfo>?> ListMappingsAsync(CancellationToken cancellationToken = default)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(UPnPPortForwarder));
+
+            if (!_client.IsAvailable)
+                return null;
+
+            try
+            {
+                var rawMappings = await _client.GetAllMappingsAsync(cancellationToken).AsUniTask();
+                var result = new System.Collections.Generic.List<PortMappingInfo>();
+                
+                foreach (var mapping in rawMappings)
+                {
+                    result.Add(new PortMappingInfo(
+                        publicPort: mapping.ExternalPort,
+                        privatePort: mapping.InternalPort,
+                        privateIP: mapping.InternalClient,
+                        protocol: mapping.Protocol.ToString(),
+                        description: mapping.Description
+                    ));
+                }
+                
+                return result;
+            }
+            catch (System.Exception ex)
+            {
+                YargLogger.LogWarning($"[UPnP] Failed to list mappings: {ex.Message}");
+                return null;
+            }
+        }
 
         public void Dispose()
         {
@@ -223,6 +260,27 @@ namespace YARG.Networking.UPnP
             }
 
             _client.Dispose();
+        }
+    }
+    
+    /// <summary>
+    /// Information about a UPnP port mapping.
+    /// </summary>
+    public sealed class PortMappingInfo
+    {
+        public int PublicPort { get; }
+        public int PrivatePort { get; }
+        public string PrivateIP { get; }
+        public string Protocol { get; }
+        public string Description { get; }
+        
+        public PortMappingInfo(int publicPort, int privatePort, string privateIP, string protocol, string description)
+        {
+            PublicPort = publicPort;
+            PrivatePort = privatePort;
+            PrivateIP = privateIP;
+            Protocol = protocol;
+            Description = description;
         }
     }
 }
