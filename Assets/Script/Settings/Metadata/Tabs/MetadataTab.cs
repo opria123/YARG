@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
@@ -24,34 +24,34 @@ namespace YARG.Settings.Metadata
             .LoadAssetAsync<GameObject>("SettingTab/Text")
             .WaitForCompletion();
         
-        // Introducer prefabs - loaded lazily since they may not exist yet
-        private static GameObject _introducerHeaderPrefab;
-        private static GameObject _introducerEntryPrefab;
-        private static bool _introducerPrefabsLoaded;
+        // lobby server prefabs - loaded lazily since they may not exist yet
+        private static GameObject _lobbyServerHeaderPrefab;
+        private static GameObject _lobbyServerEntryPrefab;
+        private static bool _lobbyServerPrefabsLoaded;
 
-        private static void EnsureIntroducerPrefabsLoaded()
+        private static void EnsureLobbyServerPrefabsLoaded()
         {
-            if (_introducerPrefabsLoaded) return;
-            _introducerPrefabsLoaded = true;
+            if (_lobbyServerPrefabsLoaded) return;
+            _lobbyServerPrefabsLoaded = true;
             
             try
             {
-                var headerOp = Addressables.LoadAssetAsync<GameObject>("SettingTab/IntroducerHeader");
-                _introducerHeaderPrefab = headerOp.WaitForCompletion();
+                var headerOp = Addressables.LoadAssetAsync<GameObject>("SettingTab/LobbyServerHeader");
+                _lobbyServerHeaderPrefab = headerOp.WaitForCompletion();
             }
             catch (System.Exception e)
             {
-                Debug.LogWarning($"[MetadataTab] IntroducerHeader prefab not found: {e.Message}");
+                Debug.LogWarning($"[MetadataTab] LobbyServerHeader prefab not found: {e.Message}");
             }
             
             try
             {
-                var entryOp = Addressables.LoadAssetAsync<GameObject>("SettingTab/IntroducerEntry");
-                _introducerEntryPrefab = entryOp.WaitForCompletion();
+                var entryOp = Addressables.LoadAssetAsync<GameObject>("SettingTab/LobbyServerEntry");
+                _lobbyServerEntryPrefab = entryOp.WaitForCompletion();
             }
             catch (System.Exception e)
             {
-                Debug.LogWarning($"[MetadataTab] IntroducerEntry prefab not found: {e.Message}");
+                Debug.LogWarning($"[MetadataTab] LobbyServerEntry prefab not found: {e.Message}");
             }
         }
 
@@ -109,26 +109,26 @@ namespace YARG.Settings.Metadata
 
                         break;
                     }
-                    case IntroducerListMetadata:
+                    case LobbyServerListMetadata:
                     {
-                        EnsureIntroducerPrefabsLoaded();
+                        EnsureLobbyServerPrefabsLoaded();
                         
-                        // Spawn the introducer header with "Add New" button
-                        if (_introducerHeaderPrefab != null)
+                        // Spawn the lobby server header with "Add New" button
+                        if (_lobbyServerHeaderPrefab != null)
                         {
-                            Object.Instantiate(_introducerHeaderPrefab, container);
+                            Object.Instantiate(_lobbyServerHeaderPrefab, container);
                         }
 
-                        // Create entries for each introducer
-                        if (_introducerEntryPrefab != null)
+                        // Create entries for each lobby server
+                        if (_lobbyServerEntryPrefab != null)
                         {
-                            var introducers = NetworkSettingsStore.Instance?.Settings?.introducers;
-                            if (introducers != null)
+                            var lobbyServers = NetworkSettingsStore.Instance?.Settings?.lobbyServers;
+                            if (lobbyServers != null)
                             {
-                                for (int i = 0; i < introducers.Count; i++)
+                                for (int i = 0; i < lobbyServers.Count; i++)
                                 {
-                                    var go = Object.Instantiate(_introducerEntryPrefab, container);
-                                    go.GetComponent<IntroducerEntry>().SetIndex(i);
+                                    var go = Object.Instantiate(_lobbyServerEntryPrefab, container);
+                                    go.GetComponent<LobbyServerEntry>().SetIndex(i);
                                 }
                             }
                         }

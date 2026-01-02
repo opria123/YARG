@@ -11,6 +11,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Data;
 using YARG.Menu.Dialogs;
 using YARG.Menu.Persistent;
+using YARG.Net.Directory;
 using YARG.Networking;
 using YARG.Networking.Abstraction;
 using YARG.Networking.Bookmarks;
@@ -783,7 +784,7 @@ namespace YARG.Menu.Multiplayer
                 sharedSongsOnly = preset.sharedSongsOnly,
                 allowModifiers = preset.allowModifiers,
                 visibleOnLan = preset.VisibleOnLan,
-                registerWithIntroducers = preset.RegisterWithIntroducers,
+                registerWithLobbyServers = preset.RegisterWithLobbyServers,
                 enablePresetSync = preset.enablePresetSync,
                 allowLateJoin = preset.allowLateJoin,
                 localPlayersFirstValue = preset.localPlayersFirst,
@@ -796,7 +797,7 @@ namespace YARG.Menu.Multiplayer
                 return;
 
             // Create a SessionPreset from the HostedLobbyPreset to apply gameplay settings
-            // Note: VisibleOnLan and RegisterWithIntroducers are derived from PrivacyMode
+            // Note: VisibleOnLan and RegisterWithLobbyServers are derived from PrivacyMode
             // IMPORTANT: Preserve the preset ID so settings can be saved back later
             var sessionPreset = new SessionPreset
             {
@@ -812,7 +813,7 @@ namespace YARG.Menu.Multiplayer
                 sharedSongsOnly = preset.sharedSongsOnly,
                 allowModifiers = preset.allowModifiers,
                 visibleOnLan = preset.VisibleOnLan,
-                registerWithIntroducers = preset.RegisterWithIntroducers,
+                registerWithLobbyServers = preset.RegisterWithLobbyServers,
                 enablePresetSync = preset.enablePresetSync,
                 allowLateJoin = preset.allowLateJoin,
                 localPlayersFirstValue = preset.localPlayersFirst,
@@ -822,7 +823,7 @@ namespace YARG.Menu.Multiplayer
             if (MultiplayerGameplaySettings.Instance != null)
             {
                 MultiplayerGameplaySettings.Instance.ApplyPreset(sessionPreset);
-                Debug.Log($"[LobbyBrowserMenu] Applied gameplay settings: BandSize={preset.bandSize}, NoFail={preset.noFailMode}, SharedSongs={preset.sharedSongsOnly}, AllowMods={preset.allowModifiers}, VisibleOnLan={preset.VisibleOnLan}, Introducers={preset.RegisterWithIntroducers}, PresetSync={preset.enablePresetSync}, LateJoin={preset.allowLateJoin}, LocalPlayersFirst={preset.localPlayersFirst}");
+                Debug.Log($"[LobbyBrowserMenu] Applied gameplay settings: BandSize={preset.bandSize}, NoFail={preset.noFailMode}, SharedSongs={preset.sharedSongsOnly}, AllowMods={preset.allowModifiers}, VisibleOnLan={preset.VisibleOnLan}, LobbyServers={preset.RegisterWithLobbyServers}, PresetSync={preset.enablePresetSync}, LateJoin={preset.allowLateJoin}, LocalPlayersFirst={preset.localPlayersFirst}");
             }
         }
 
@@ -899,46 +900,14 @@ namespace YARG.Menu.Multiplayer
                 if (lobby.HasPassword)
                 {
                     YargLogger.LogInfo("[LobbyBrowserMenu] Lobby requires password, showing dialog");
-                    ShowPasswordDialogForCodeJoin(lobby.LobbyName, endpoint, lobby.LobbyId, result.IntroducerUrl);
+                    ShowPasswordDialogForCodeJoin(lobby.LobbyName, endpoint, lobby.LobbyId, result.LobbyServerUrl);
                     return;
                 }
                 
                 ToastManager.ToastInformation($"Connecting to {lobby.LobbyName}...");
                 
-                // Try NAT punch-through first (if we have the introducer URL)
-                string connectEndpoint = endpoint;
-                if (!string.IsNullOrEmpty(result.IntroducerUrl))
-                {
-                    YargLogger.LogInfo($"[LobbyBrowserMenu] Attempting NAT punch-through via {result.IntroducerUrl}...");
-                    ToastManager.ToastInformation("Establishing connection...");
-                    
-                    var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
-                        lobby.LobbyId, result.IntroducerUrl, 5000);
-                    
-                    if (punchedEndpoint != null)
-                    {
-                        connectEndpoint = $"{punchedEndpoint.Address}:{punchedEndpoint.Port}";
-                        YargLogger.LogInfo($"[LobbyBrowserMenu] NAT punch succeeded! Connecting to {connectEndpoint}");
-                        ToastManager.ToastInformation("NAT punch succeeded!");
-                    }
-                    else
-                    {
-                        YargLogger.LogWarning("[LobbyBrowserMenu] NAT punch failed, trying direct connection...");
-                    }
-                }
-                
-                // Join via the networking service
-                if (NetworkService != null)
-                {
-                    YargLogger.LogInfo($"[LobbyBrowserMenu] Joining lobby at {connectEndpoint}");
-                    NetworkService.JoinLobby(connectEndpoint, string.Empty);
-                    _sidebar?.ClearLobbyCodeInput();
-                }
-                else
-                {
-                    YargLogger.LogError("[LobbyBrowserMenu] NetworkService is null!");
-                    ToastManager.ToastError("Networking service not available");
-                }
+                // Try connection with fallback chain: NAT punch -> Direct -> Relay
+                await TryConnectWithFallbackAsync(lobby, result.LobbyServerUrl, string.Empty);
             }
             catch (Exception ex)
             {
@@ -948,9 +917,154 @@ namespace YARG.Menu.Multiplayer
         }
         
         /// <summary>
+        /// Tries to connect to a lobby with fallback chain: NAT punch -> Direct -> Relay
+        /// </summary>
+        private async UniTask TryConnectWithFallbackAsync(LobbyDirectoryEntry lobby, string? LobbyServerUrl, string password)
+        {
+            string endpoint = $"{lobby.Address}:{lobby.Port}";
+            string connectEndpoint = endpoint;
+            
+            // Step 1: Try NAT punch-through first (if we have the lobby server URL)
+            if (!string.IsNullOrEmpty(LobbyServerUrl))
+            {
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Step 1: Attempting NAT punch-through via {LobbyServerUrl}...");
+                ToastManager.ToastInformation("Establishing connection...");
+                
+                var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
+                    lobby.LobbyId, LobbyServerUrl, 5000);
+                
+                if (punchedEndpoint != null)
+                {
+                    connectEndpoint = $"{punchedEndpoint.Address}:{punchedEndpoint.Port}";
+                    YargLogger.LogInfo($"[LobbyBrowserMenu] NAT punch succeeded! Connecting to {connectEndpoint}");
+                    ToastManager.ToastInformation("NAT punch succeeded!");
+                }
+                else
+                {
+                    YargLogger.LogWarning("[LobbyBrowserMenu] NAT punch failed, trying direct connection...");
+                }
+            }
+            
+            // Step 2: Try direct connection with short timeout to see if it works
+            if (NetworkService != null)
+            {
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Step 2: Trying direct connection to {connectEndpoint}...");
+                
+                // Set up connection result tracking
+                var connectionTcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
+                bool connectionHandled = false;
+                
+                void OnJoined(LobbyInfo _)
+                {
+                    if (!connectionHandled)
+                    {
+                        connectionHandled = true;
+                        connectionTcs.TrySetResult(true);
+                    }
+                }
+                
+                void OnError(string error)
+                {
+                    if (!connectionHandled && (error.Contains("timed out") || error.Contains("failed")))
+                    {
+                        connectionHandled = true;
+                        connectionTcs.TrySetResult(false);
+                    }
+                }
+                
+                NetworkService.OnLobbyJoined += OnJoined;
+                NetworkService.OnNetworkError += OnError;
+                
+                try
+                {
+                    NetworkService.JoinLobby(connectEndpoint, password);
+                    _sidebar?.ClearLobbyCodeInput();
+                    
+                    // Wait for connection result (with 20 second timeout for direct connection)
+                    using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(20));
+                    var completedTask = await System.Threading.Tasks.Task.WhenAny(
+                        connectionTcs.Task,
+                        System.Threading.Tasks.Task.Delay(20000, cts.Token));
+                    
+                    if (completedTask == connectionTcs.Task && connectionTcs.Task.Result)
+                    {
+                        YargLogger.LogInfo("[LobbyBrowserMenu] Direct connection succeeded!");
+                        return; // Success!
+                    }
+                    
+                    // Connection failed or timed out - try relay
+                    YargLogger.LogWarning("[LobbyBrowserMenu] Direct connection failed, checking relay availability...");
+                }
+                finally
+                {
+                    NetworkService.OnLobbyJoined -= OnJoined;
+                    NetworkService.OnNetworkError -= OnError;
+                }
+                
+                // Step 3: Try relay as last resort
+                if (!string.IsNullOrEmpty(LobbyServerUrl))
+                {
+                    await TryRelayConnectionAsync(lobby, LobbyServerUrl, password);
+                }
+            }
+            else
+            {
+                YargLogger.LogError("[LobbyBrowserMenu] NetworkService is null!");
+                ToastManager.ToastError("Networking service not available");
+            }
+        }
+        
+        /// <summary>
+        /// Attempts to connect via relay server.
+        /// </summary>
+        private async UniTask TryRelayConnectionAsync(LobbyDirectoryEntry lobby, string LobbyServerUrl, string password)
+        {
+            YargLogger.LogInfo($"[LobbyBrowserMenu] Step 3: Checking relay availability at {LobbyServerUrl}...");
+            ToastManager.ToastInformation("Trying relay connection...");
+            
+            var relayInfo = await SessionLifecycleManager.Instance.CheckRelayAvailableAsync(LobbyServerUrl);
+            
+            if (relayInfo == null || !relayInfo.Available)
+            {
+                YargLogger.LogError("[LobbyBrowserMenu] Relay not available");
+                ToastManager.ToastError("Connection failed. The host may be behind a firewall.");
+                return;
+            }
+            
+            YargLogger.LogInfo($"[LobbyBrowserMenu] Relay available at {relayInfo.Address}:{relayInfo.Port}");
+            
+            // Allocate relay session for this lobby
+            var allocation = await SessionLifecycleManager.Instance.AllocateRelaySessionAsync(lobby.LobbyId, LobbyServerUrl);
+            
+            if (allocation == null || !allocation.Success)
+            {
+                YargLogger.LogError("[LobbyBrowserMenu] Failed to allocate relay session");
+                ToastManager.ToastError("Relay connection failed. Please try again.");
+                return;
+            }
+            
+            YargLogger.LogInfo($"[LobbyBrowserMenu] Relay session allocated: {allocation.SessionId}");
+            YargLogger.LogInfo($"[LobbyBrowserMenu] Connecting via relay at {allocation.RelayAddress}:{allocation.RelayPort}...");
+            ToastManager.ToastInformation("Connecting via relay...");
+            
+            // Connect via the relay using the proper relay connection method
+            // This uses LiteNetRelayClient to handle the relay protocol properly
+            if (NetworkService != null)
+            {
+                NetworkService.JoinLobbyViaRelay(
+                    allocation.RelayAddress, 
+                    allocation.RelayPort, 
+                    allocation.SessionId, 
+                    lobby.LobbyId, 
+                    password);
+                _sidebar?.ClearLobbyCodeInput();
+            }
+        }
+        
+        /// <summary>
         /// Shows a password dialog for joining a lobby via code.
         /// </summary>
-        private void ShowPasswordDialogForCodeJoin(string lobbyName, string endpoint, Guid lobbyId, string? introducerUrl)
+        private void ShowPasswordDialogForCodeJoin(string lobbyName, string endpoint, Guid lobbyId, string? LobbyServerUrl)
         {
             if (DialogManager.Instance == null)
             {
@@ -968,7 +1082,7 @@ namespace YARG.Menu.Multiplayer
                 ToastManager.ToastInformation($"Connecting to {lobbyName}...");
                 
                 // Try NAT punch then connect with password
-                JoinWithPasswordAndPunchAsync(lobbyName, endpoint, submitted, lobbyId, introducerUrl).Forget();
+                JoinWithPasswordAndPunchAsync(lobbyName, endpoint, submitted, lobbyId, LobbyServerUrl).Forget();
             });
 
             dialog.AllowEmpty = false;
@@ -990,20 +1104,20 @@ namespace YARG.Menu.Multiplayer
         /// <summary>
         /// Joins a lobby with password, trying NAT punch first.
         /// </summary>
-        private async UniTaskVoid JoinWithPasswordAndPunchAsync(string lobbyName, string endpoint, string password, Guid lobbyId, string? introducerUrl)
+        private async UniTaskVoid JoinWithPasswordAndPunchAsync(string lobbyName, string endpoint, string password, Guid lobbyId, string? LobbyServerUrl)
         {
             try
             {
                 string connectEndpoint = endpoint;
                 
-                // Try NAT punch-through first if we have the introducer URL
-                if (!string.IsNullOrEmpty(introducerUrl) && SessionLifecycleManager.Instance != null)
+                // Try NAT punch-through first if we have the lobby server URL
+                if (!string.IsNullOrEmpty(LobbyServerUrl) && SessionLifecycleManager.Instance != null)
                 {
-                    YargLogger.LogInfo($"[LobbyBrowserMenu] Attempting NAT punch-through via {introducerUrl}...");
+                    YargLogger.LogInfo($"[LobbyBrowserMenu] Attempting NAT punch-through via {LobbyServerUrl}...");
                     ToastManager.ToastInformation("Establishing connection...");
                     
                     var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
-                        lobbyId, introducerUrl, 5000);
+                        lobbyId, LobbyServerUrl, 5000);
                     
                     if (punchedEndpoint != null)
                     {

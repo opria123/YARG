@@ -470,7 +470,7 @@ namespace YARG.Networking.DedicatedServer
                     maxPlayers = _config.Server.MaxPlayers,
                     privacyMode = _config.Server.PrivacyMode,
                     visibleOnLan = _config.Server.VisibleOnLan,
-                    registerWithIntroducers = _config.Server.RegisterWithIntroducers
+                    registerWithLobbyServers = _config.Server.RegisterWithLobbyServers
                 },
                 gameplay = new
                 {

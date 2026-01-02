@@ -7,12 +7,12 @@ namespace YARG.Networking.Settings
     {
         /// <summary>
         /// A server requires manual port forwarding but works without any external services.
-        /// Players connect via direct IP:Port, LAN discovery, or introducer browser.
+        /// Players connect via direct IP:Port, LAN discovery, or lobby server browser.
         /// </summary>
         Server = 0,
 
         /// <summary>
-        /// A lobby uses UPnP for automatic port mapping and registers with introducer services
+        /// A lobby uses UPnP for automatic port mapping and registers with lobby servers
         /// to get a shareable lobby code. Hard fails if UPnP is unavailable.
         /// </summary>
         Lobby = 1
@@ -24,12 +24,12 @@ namespace YARG.Networking.Settings
     public enum SessionPrivacyMode
     {
         /// <summary>
-        /// Visible in LAN discovery and introducer browsers. No password required.
+        /// Visible in LAN discovery and lobby server browsers. No password required.
         /// </summary>
         Public = 0,
 
         /// <summary>
-        /// Visible in LAN discovery and introducer browsers, but password required to join.
+        /// Visible in LAN discovery and lobby server browsers, but password required to join.
         /// </summary>
         Private = 1,
 

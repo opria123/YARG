@@ -182,6 +182,26 @@ namespace YARG.Networking.Abstraction
         void JoinDiscoveredLobby(LobbyInfo lobby, string password = "");
 
         /// <summary>
+        /// Join a lobby via relay server when direct connection is not possible.
+        /// </summary>
+        /// <param name="relayAddress">Relay server address</param>
+        /// <param name="relayPort">Relay server port</param>
+        /// <param name="sessionId">Relay session ID from allocation</param>
+        /// <param name="lobbyId">Original lobby ID</param>
+        /// <param name="password">Password if required</param>
+        void JoinLobbyViaRelay(string relayAddress, int relayPort, Guid sessionId, Guid lobbyId, string password = "");
+
+        /// <summary>
+        /// Connects the host to a relay server so remote clients can connect via relay fallback.
+        /// Call this after CreateLobby when you want to enable relay connectivity for clients.
+        /// </summary>
+        /// <param name="relayAddress">Relay server address</param>
+        /// <param name="relayPort">Relay server port</param>
+        /// <param name="sessionId">Relay session ID from allocation</param>
+        /// <returns>True if connected successfully</returns>
+        Task<bool> ConnectHostToRelayAsync(string relayAddress, int relayPort, Guid sessionId);
+
+        /// <summary>
         /// Leave the current lobby.
         /// </summary>
         void LeaveLobby();

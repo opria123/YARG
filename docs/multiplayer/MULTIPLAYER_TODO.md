@@ -13,7 +13,7 @@ Last updated: December 31, 2025
 | **Settings sync to clients** | ✅ Dec 16, 2025 |
 | **Lobby browser sidebar** (settings preview before joining) | ✅ Dec 16, 2025 |
 | **Discovery protocol fixes** (ping display, refresh, deduplication) | ✅ Dec 16, 2025 |
-| **Introducers management** settings menu | ✅ Dec 16, 2025 |
+| **Lobby Servers management** settings menu | ✅ Dec 16, 2025 |
 | **Bookmark editing UI** | ✅ Dec 16, 2025 |
 | **Track reordering controls** in lobby | ✅ Dec 16, 2025 |
 | **Band display** in lobby UI | ✅ Dec 30, 2025 |
@@ -157,7 +157,7 @@ Last updated: December 31, 2025
     "password": "",
     "privacyMode": "public",
     "visibleOnLan": true,
-    "registerWithIntroducers": true
+    "registerWithLobbyServers": true
   },
   "gameplay": {
     "bandSize": 0,

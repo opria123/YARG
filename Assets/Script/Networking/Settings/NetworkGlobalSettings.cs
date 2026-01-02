@@ -12,9 +12,9 @@ namespace YARG.Networking.Settings
     public sealed class NetworkGlobalSettings
     {
         /// <summary>
-        /// List of introducer endpoints for lobby discovery and registration.
+        /// List of lobby server endpoints for lobby discovery and registration.
         /// </summary>
-        public List<IntroducerEndpoint> introducers = new();
+        public List<LobbyServerEndpoint> lobbyServers = new();
 
         /// <summary>
         /// Default port for hosting sessions.
@@ -34,45 +34,45 @@ namespace YARG.Networking.Settings
         public LastUsedSessionSettings lastUsedSettings = new();
 
         /// <summary>
-        /// Returns enabled introducers only.
+        /// Returns enabled lobbyServers only.
         /// </summary>
-        public IReadOnlyList<IntroducerEndpoint> EnabledIntroducers =>
-            introducers?.Where(i => i.enabled).ToList() ?? new List<IntroducerEndpoint>();
+        public IReadOnlyList<LobbyServerEndpoint> EnabledLobbyServers =>
+            lobbyServers?.Where(i => i.enabled).ToList() ?? new List<LobbyServerEndpoint>();
 
         /// <summary>
-        /// Gets the first enabled introducer, or null if none are enabled.
+        /// Gets the first enabled lobby server, or null if none are enabled.
         /// </summary>
-        public IntroducerEndpoint GetFirstEnabledIntroducer() =>
-            introducers?.FirstOrDefault(i => i.enabled);
+        public LobbyServerEndpoint GetFirstEnabledLobbyServer() =>
+            lobbyServers?.FirstOrDefault(i => i.enabled);
 
         /// <summary>
-        /// Gets the YARG Official introducer, or null if removed.
+        /// Gets the YARG Official lobby server, or null if removed.
         /// </summary>
-        public IntroducerEndpoint YargOfficialIntroducer =>
-            introducers?.FirstOrDefault(i => i.isBuiltIn && i.id == "yarg-official");
+        public LobbyServerEndpoint YargOfficialLobbyServer =>
+            lobbyServers?.FirstOrDefault(i => i.isBuiltIn && i.id == "yarg-official");
 
         /// <summary>
         /// Ensures the settings have valid default values.
         /// </summary>
         public void EnsureDefaults()
         {
-            introducers ??= new List<IntroducerEndpoint>();
+            lobbyServers ??= new List<LobbyServerEndpoint>();
             lastUsedSettings ??= new LastUsedSessionSettings();
 
-            // Ensure YARG Official introducer exists
-            if (!introducers.Any(i => i.isBuiltIn && i.id == "yarg-official"))
+            // Ensure YARG Official lobby server exists
+            if (!lobbyServers.Any(i => i.isBuiltIn && i.id == "yarg-official"))
             {
-                introducers.Insert(0, IntroducerEndpoint.CreateYargOfficial());
+                lobbyServers.Insert(0, LobbyServerEndpoint.CreateYargOfficial());
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            // In development, add local introducer for testing if not present
-            // Insert at position 0 so it's the primary (first enabled) introducer
-            if (!introducers.Any(i => i.id == "local-dev"))
+            // In development, add local lobby server for testing if not present
+            // Insert at position 0 so it's the primary (first enabled) lobby server
+            if (!lobbyServers.Any(i => i.id == "local-dev"))
             {
-                var localDev = IntroducerEndpoint.CreateLocalDev();
-                introducers.Insert(0, localDev);
-                UnityEngine.Debug.Log($"[NetworkGlobalSettings] Added local-dev introducer at position 0: {localDev.url}");
+                var localDev = LobbyServerEndpoint.CreateLocalDev();
+                lobbyServers.Insert(0, localDev);
+                UnityEngine.Debug.Log($"[NetworkGlobalSettings] Added local-dev lobby server at position 0: {localDev.url}");
             }
 #endif
 
@@ -84,50 +84,50 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Adds a new custom introducer endpoint.
+        /// Adds a new Custom Lobby Server endpoint.
         /// </summary>
-        public IntroducerEndpoint AddIntroducer(string displayName, string url)
+        public LobbyServerEndpoint AddLobbyServer(string displayName, string url)
         {
-            var endpoint = new IntroducerEndpoint
+            var endpoint = new LobbyServerEndpoint
             {
-                displayName = displayName?.Trim() ?? "Custom Introducer",
+                displayName = displayName?.Trim() ?? "Custom Lobby Server",
                 url = url?.Trim() ?? string.Empty,
                 enabled = true,
                 isBuiltIn = false
             };
             endpoint.EnsureIdentifiers();
 
-            introducers ??= new List<IntroducerEndpoint>();
-            introducers.Add(endpoint);
+            lobbyServers ??= new List<LobbyServerEndpoint>();
+            lobbyServers.Add(endpoint);
 
             return endpoint;
         }
 
         /// <summary>
-        /// Removes a custom introducer endpoint by ID.
-        /// Built-in introducers cannot be removed, only disabled.
+        /// Removes a Custom Lobby Server endpoint by ID.
+        /// Built-in lobbyServers cannot be removed, only disabled.
         /// </summary>
-        public bool RemoveIntroducer(string id)
+        public bool RemoveLobbyServer(string id)
         {
             if (string.IsNullOrWhiteSpace(id))
                 return false;
 
-            var endpoint = introducers?.FirstOrDefault(i => i.id == id);
+            var endpoint = lobbyServers?.FirstOrDefault(i => i.id == id);
             if (endpoint == null)
                 return false;
 
             if (endpoint.isBuiltIn)
                 return false; // Cannot remove built-in
 
-            return introducers.Remove(endpoint);
+            return lobbyServers.Remove(endpoint);
         }
 
         /// <summary>
-        /// Enables or disables an introducer by ID.
+        /// Enables or disables an lobby server by ID.
         /// </summary>
-        public bool SetIntroducerEnabled(string id, bool enabled)
+        public bool SetLobbyServerEnabled(string id, bool enabled)
         {
-            var endpoint = introducers?.FirstOrDefault(i => i.id == id);
+            var endpoint = lobbyServers?.FirstOrDefault(i => i.id == id);
             if (endpoint == null)
                 return false;
 
@@ -174,7 +174,7 @@ namespace YARG.Networking.Settings
         public bool enablePresetSync = true;
         public bool allowLateJoin = true;
         public bool visibleOnLan = true;
-        public bool registerWithIntroducers = true;
+        public bool registerWithLobbyServers = true;
 
         /// <summary>
         /// Updates this snapshot from a session preset.
@@ -193,7 +193,7 @@ namespace YARG.Networking.Settings
             enablePresetSync = preset.enablePresetSync;
             allowLateJoin = preset.allowLateJoin;
             visibleOnLan = preset.visibleOnLan;
-            registerWithIntroducers = preset.registerWithIntroducers;
+            registerWithLobbyServers = preset.registerWithLobbyServers;
         }
 
         /// <summary>
@@ -213,7 +213,7 @@ namespace YARG.Networking.Settings
             preset.enablePresetSync = enablePresetSync;
             preset.allowLateJoin = allowLateJoin;
             preset.visibleOnLan = visibleOnLan;
-            preset.registerWithIntroducers = registerWithIntroducers;
+            preset.registerWithLobbyServers = registerWithLobbyServers;
         }
     }
 }

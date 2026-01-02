@@ -12,7 +12,7 @@
 2. [Architecture](#architecture)
 3. [Session Types](#session-types)
 4. [Settings Schema](#settings-schema)
-5. [Introducer Service](#introducer-service)
+5. [Lobby Server](#lobby-server)
 6. [Band System](#band-system)
 7. [Track Ordering](#track-ordering)
 8. [UPnP Integration](#upnp-integration)
@@ -28,7 +28,7 @@ YARG multiplayer allows players to play together in online sessions. The system 
 
 1. **Always Works Offline**: Servers work without any external services
 2. **Convenience Layer**: Lobbies add UPnP + codes for ease of use
-3. **Community Friendly**: Users can run their own introducers
+3. **Community Friendly**: Users can run their own lobby servers
 4. **Scalable**: Support for large sessions via Band system
 
 ---
@@ -56,7 +56,7 @@ YARG multiplayer allows players to play together in online sessions. The system 
 │                         DISCOVERY METHODS                                │
 │                                                                          │
 │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐        │
-│   │  LAN Discovery  │  │   Introducer    │  │ Direct Connect  │        │
+│   │  LAN Discovery  │  │  Lobby Server   │  │ Direct Connect  │        │
 │   │   (UDP Broadcast)│  │   (HTTP API)    │  │   (IP:Port)     │        │
 │   └─────────────────┘  └─────────────────┘  └─────────────────┘        │
 │                                                                          │
@@ -70,15 +70,15 @@ YARG multiplayer allows players to play together in online sessions. The system 
 ### Server (Manual Port Forward)
 
 - **Requires**: Manual port forwarding on router
-- **Discovery**: LAN broadcast, Introducer registration (opt-in), Direct connect
+- **Discovery**: LAN broadcast, Lobby Server registration (opt-in), Direct connect
 - **No lobby code**: Players connect via IP:Port or find in browser
 - **Works offline**: No external services required
 - **Use case**: Technical users, persistent community servers
 
-### Lobby (UPnP + Introducer Code)
+### Lobby (UPnP + Lobby code)
 
-- **Requires**: UPnP-capable router + Introducer service
-- **Discovery**: Lobby code, LAN broadcast, Introducer browser
+- **Requires**: UPnP-capable router + Lobby Server
+- **Discovery**: Lobby code, LAN broadcast, Lobby Server browser
 - **Gets lobby code**: 6-character hex code (e.g., `A3F2B1`)
 - **If UPnP fails**: Hard fail with message suggesting Server mode
 - **Use case**: Casual users wanting easy friend invites
@@ -86,7 +86,7 @@ YARG multiplayer allows players to play together in online sessions. The system 
 ### Dedicated Server (Headless)
 
 - **Same as Server** but runs headless
-- **Can register with introducers** for public discovery
+- **Can register with lobby servers** for public discovery
 - **No lobby code**: Not a lobby
 - **Extra settings**: Idle timeout, ready-up timeout, vote-to-kick
 - **Use case**: Community-run persistent servers
@@ -99,7 +99,7 @@ YARG multiplayer allows players to play together in online sessions. The system 
 
 ```
 persistentDataPath/
-├── network_settings.json      # Global: Introducers + defaults
+├── network_settings.json      # Global: Lobby Servers + defaults
 ├── lobby_bookmarks.json       # Existing: Bookmarks + SessionPresets
 └── dedicated_server.json      # Dedicated server only
 ```
@@ -108,7 +108,7 @@ persistentDataPath/
 
 ```json
 {
-  "introducers": [
+  "lobbyServers": [
     {
       "id": "yarg-official",
       "displayName": "YARG Official",
@@ -154,7 +154,7 @@ persistentDataPath/
       "bandSize": 4,
       
       "visibleOnLan": true,
-      "registerWithIntroducers": true,
+      "registerWithLobbyServers": true,
       
       "noFailMode": false,
       "sharedSongsOnly": true,
@@ -174,12 +174,12 @@ persistentDataPath/
 public enum SessionType
 {
     Server = 0,  // Manual port forward, no code
-    Lobby = 1    // UPnP + Introducer code required
+    Lobby = 1    // UPnP + Lobby code required
 }
 
 public enum SessionPrivacyMode
 {
-    Public = 0,    // Visible in LAN + Introducer browsers
+    Public = 0,    // Visible in LAN + Lobby Server browsers
     Private = 1,   // Password required, still visible
     Unlisted = 2   // Code/Direct only, hidden from browsers
 }
@@ -196,7 +196,7 @@ public enum SessionPrivacyMode
 | `maxPlayers` | int | 8 | Maximum players (2-64) |
 | `bandSize` | int | 0 | Players per band (0 = disabled, 2-8) |
 | `visibleOnLan` | bool | true | Show in LAN discovery |
-| `registerWithIntroducers` | bool | true | Register with enabled introducers |
+| `registerWithLobbyServers` | bool | true | Register with enabled lobby servers |
 | `noFailMode` | bool | false | Disable failing for all players |
 | `sharedSongsOnly` | bool | true | Only show songs everyone can play |
 | `enablePresetSync` | bool | true | Sync camera/color presets |
@@ -228,11 +228,11 @@ public enum SessionPrivacyMode
 
 ---
 
-## Introducer Service
+## Lobby Server
 
 ### Purpose
 
-The introducer service provides:
+The Lobby Server provides:
 1. **Lobby listing** - Browse public servers/lobbies
 2. **Lobby codes** - Short codes for easy lobby sharing (Lobby mode only)
 3. **NAT traversal info** - Public IP discovery
@@ -257,26 +257,26 @@ DELETE /api/lobbies/code/{code} # Release code
 - **Lifecycle**: Created when lobby starts, released when lobby ends
 - **Reuse**: Codes can be reused after release
 
-### Multiple Introducers
+### Multiple Lobby Servers
 
-Users can configure multiple introducers:
+Users can configure Multiple Lobby Servers:
 - YARG Official (built-in, can disable but not delete)
-- Community introducers (user-added)
+- Community lobby servers (user-added)
 
 When hosting:
-- Session is registered with ALL enabled introducers
+- Session is registered with ALL enabled lobby servers
 - Lobby code comes from first successful registration
 
 When browsing:
-- Results aggregated from all enabled introducers
+- Results aggregated from all enabled lobby servers
 - Deduplicated by session ID
 
 ### Self-Hosting
 
-Community members can run their own introducer:
-1. Deploy introducer service
-2. Users add URL in Settings → Network → Introducers
-3. Sessions registered there are visible to users with that introducer
+Community members can run their own lobby server:
+1. Deploy Lobby Server
+2. Users add URL in Settings → Network → Lobby Servers
+3. Sessions registered there are visible to users with that lobby server
 
 ---
 
@@ -422,16 +422,16 @@ lobby     Try hosting a Server instead."
 
 ### Phase 1: Settings Infrastructure ✅ COMPLETE
 
-- [x] Create `IntroducerEndpoint` class
+- [x] Create `LobbyServerEndpoint` class
 - [x] Create `SessionPreset` class  
 - [x] Create `NetworkGlobalSettings` class
 - [x] Create `NetworkSettingsStore` (persistence)
 - [x] Create `DedicatedServerConfig` class
 - [x] Add enums (`SessionType`, `SessionPrivacyMode`)
 - [x] Migrate existing `HostedLobbyPreset` data (in LobbyBookmarkStore)
-- [ ] Add Introducers UI to Settings menu
+- [ ] Add Lobby Servers UI to Settings menu
 
-### Phase 2: Introducer Enhancements ✅ COMPLETE
+### Phase 2: Lobby Server Enhancements ✅ COMPLETE
 
 - [x] Choose language: **C# (ASP.NET Core)** - matches YARG ecosystem
 - [x] Add lobby code generation endpoint (`POST /api/lobbies/code`)
@@ -503,7 +503,7 @@ lobby     Try hosting a Server instead."
 
 ### UI Integration ⬜ NOT STARTED
 
-- [ ] Settings menu for Introducers management
+- [ ] Settings menu for Lobby Servers management
 - [ ] Lobby creation wizard (Server vs Lobby choice)
 - [ ] Join by Code dialog
 - [ ] Band display in lobby
@@ -525,17 +525,17 @@ lobby     Try hosting a Server instead."
 ### New Files Created
 
 **YARG.Net (Core Networking):**
-- `Introducer/LobbyCodeClient.cs` - Client for lobby code operations
+- `LobbyServer/LobbyCodeClient.cs` - Client for lobby code operations
 - `Utilities/UPnP/UPnPClient.cs` - Main UPnP client
 - `Utilities/UPnP/UPnPDiscovery.cs` - SSDP device discovery
 - `Utilities/UPnP/UPnPSoap.cs` - SOAP requests for port mapping
 
-**YARG.Introducer Service:**
+**YARG.Lobby Server:**
 - Updated `Program.cs` with lobby code endpoints
 
 **Unity (Assets/Script/Networking):**
 - `Settings/SessionEnums.cs` - SessionType, SessionPrivacyMode
-- `Settings/IntroducerEndpoint.cs` - Introducer configuration
+- `Settings/LobbyServerEndpoint.cs` - Lobby server configuration
 - `Settings/SessionPreset.cs` - Session configuration
 - `Settings/NetworkGlobalSettings.cs` - Global settings
 - `Settings/NetworkSettingsStore.cs` - Persistence
@@ -557,7 +557,7 @@ lobby     Try hosting a Server instead."
 
 ## Decisions Made
 
-1. **Introducer language**: C# (ASP.NET Core) - consistent with YARG ecosystem (YARG, YARG.Core, YARG.Net)
+1. **Server language**: C# (ASP.NET Core) - consistent with YARG ecosystem (YARG, YARG.Core, YARG.Net)
 
 ---
 

@@ -72,7 +72,7 @@ namespace YARG.Settings
 
                 new HeaderMetadata("Networking"),
                 nameof(Settings.NetworkPort),
-                new IntroducerListMetadata(),
+                new LobbyServerListMetadata(),
             },
             new SongManagerTab("SongManager", icon: "Songs")
             {

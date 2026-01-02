@@ -663,7 +663,7 @@ namespace YARG.Networking.Bookmarks
                 bandSize = legacy.bandSize,
 
                 visibleOnLan = true,
-                registerWithIntroducers = true,
+                registerWithLobbyServers = true,
 
                 noFailMode = legacy.noFailMode,
                 sharedSongsOnly = legacy.sharedSongsOnly,

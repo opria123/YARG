@@ -19,6 +19,7 @@ using YARG.Menu.MusicLibrary;
 using YARG.Multiplayer;
 using YARG.Net;
 using YARG.Net.Packets;
+using YARG.Net.Relay;
 using YARG.Net.Runtime;
 using YARG.Net.Transport;
 using YARG.Net.Sessions;
@@ -58,6 +59,11 @@ namespace YARG.Networking.Abstraction
         private IPacketDispatcher _packetDispatcher;
         private INetSerializer _serializer;
         private ServerPacketSender _packetSender;
+        
+        // Relay client for connecting through relay server when direct connection fails
+        private LiteNetRelayClient _relayClient;
+        private RelayConnection _relayConnection;
+        private bool _isConnectedViaRelay;
         
         // YARG.Net managers (shared logic for client/server/dedicated server)
         private SetlistManager _setlistManager;
@@ -7742,6 +7748,448 @@ namespace YARG.Networking.Abstraction
             JoinLobby(endpoint, password);
         }
         
+        /// <summary>
+        /// Joins a lobby through the relay server when direct connection is not possible.
+        /// </summary>
+        public void JoinLobbyViaRelay(string relayAddress, int relayPort, Guid sessionId, Guid lobbyId, string password = "")
+        {
+            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Joining lobby via relay: {relayAddress}:{relayPort}, sessionId={sessionId}, lobbyId={lobbyId}");
+            
+            // Require at least one connected profile to join
+            if (!HasConnectedProfiles())
+            {
+                string errorMessage = "Cannot join lobby: No profiles are connected. Please connect a controller and select a profile first.";
+                NetworkLogger.Error($"[LiteNetNetworkingAdapter] {errorMessage}");
+                YARG.Menu.Persistent.ToastManager.ToastWarning(errorMessage);
+                OnNetworkError?.Invoke(errorMessage);
+                return;
+            }
+            
+            // Check if already connected or connecting
+            if (_isConnected)
+            {
+                NetworkLogger.Warn("[LiteNetNetworkingAdapter] Already connected to a lobby, ignoring relay join request");
+                return;
+            }
+            
+            if (_isJoinInProgress)
+            {
+                NetworkLogger.Warn("[LiteNetNetworkingAdapter] Join already in progress, ignoring duplicate relay request");
+                return;
+            }
+            
+            _isJoinInProgress = true;
+            
+            // Store password for authentication
+            SetJoinPassword(password);
+            
+            // Create temporary lobby info for the relay connection
+            _currentLobby = new LobbyInfo
+            {
+                LobbyId = lobbyId.ToString(),
+                LobbyName = "Relay Connection",
+                HostName = "Unknown",
+                CurrentPlayers = 0,
+                MaxPlayers = _maxPlayers,
+                PrivacyMode = LobbyPrivacyMode.Public,
+                HasPassword = !string.IsNullOrEmpty(password),
+                Password = password,
+                IsActive = true,
+                IpAddress = relayAddress,
+                Port = relayPort,
+                PublicPort = relayPort,
+                PublicAddress = relayAddress,
+                TransportId = "LiteNetLib-Relay"
+            };
+            
+            // Connect via relay
+            _ = ConnectViaRelayAsync(relayAddress, relayPort, sessionId, lobbyId);
+        }
+        
+        /// <summary>
+        /// Asynchronously connects to a lobby through the relay server.
+        /// </summary>
+        private async Task ConnectViaRelayAsync(string relayAddress, int relayPort, Guid sessionId, Guid lobbyId)
+        {
+            try
+            {
+                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Creating relay client for session {sessionId}...");
+                
+                // Clean up any existing relay client
+                CleanupRelayClient();
+                
+                // Create and connect the relay client (as client, not host)
+                _relayClient = new LiteNetRelayClient(relayAddress, relayPort, sessionId, isHost: false);
+                
+                // Subscribe to relay events
+                _relayClient.OnDataReceived += OnRelayDataReceived;
+                _relayClient.OnRelayPeerConnected += OnRelayPeerConnected;
+                _relayClient.OnRelayPeerDisconnected += OnRelayPeerDisconnected;
+                _relayClient.OnDisconnected += OnRelayDisconnected;
+                _relayClient.OnError += OnRelayError;
+                
+                // Connect to relay
+                bool connected = await _relayClient.ConnectAsync(15000); // 15 second timeout
+                
+                if (!connected)
+                {
+                    NetworkLogger.Error("[LiteNetNetworkingAdapter] Failed to connect to relay server");
+                    _isJoinInProgress = false;
+                    CleanupRelayClient();
+                    OnNetworkError?.Invoke("Failed to connect to relay server");
+                    return;
+                }
+                
+                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Connected to relay, waiting for host...");
+                _isConnectedViaRelay = true;
+                
+                // Create the relay connection wrapper for the game layer
+                _relayConnection = new RelayConnection(_relayClient);
+                
+                // Mark as connected - the game layer will use _relayConnection
+                _isConnected = true;
+                _isJoinInProgress = false;
+                
+                // Notify that we've joined (via relay)
+                _currentLobby.TransportId = "LiteNetLib-Relay";
+                OnLobbyJoined?.Invoke(_currentLobby);
+                
+                NetworkLogger.Info("[LiteNetNetworkingAdapter] Relay connection established, waiting for host peer...");
+            }
+            catch (Exception ex)
+            {
+                NetworkLogger.Error($"[LiteNetNetworkingAdapter] Relay connection failed: {ex.Message}");
+                _isJoinInProgress = false;
+                CleanupRelayClient();
+                OnNetworkError?.Invoke($"Relay connection failed: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Called when data is received from the host via relay.
+        /// </summary>
+        private void OnRelayDataReceived(byte[] data, DeliveryMethod deliveryMethod)
+        {
+            if (_relayConnection == null)
+            {
+                return;
+            }
+            
+            // Convert delivery method to channel type
+            var channel = deliveryMethod switch
+            {
+                DeliveryMethod.ReliableOrdered => ChannelType.ReliableOrdered,
+                DeliveryMethod.ReliableSequenced => ChannelType.ReliableSequenced,
+                DeliveryMethod.Unreliable => ChannelType.Unreliable,
+                _ => ChannelType.ReliableOrdered,
+            };
+            
+            // Process the packet as if it came from a regular connection
+            // This reuses the existing packet processing logic
+            OnTransportPayloadReceived(_relayConnection, new ReadOnlyMemory<byte>(data), channel);
+        }
+        
+        /// <summary>
+        /// Called when the host peer connects via relay.
+        /// </summary>
+        private void OnRelayPeerConnected()
+        {
+            NetworkLogger.Info("[LiteNetNetworkingAdapter] Host connected via relay - ready to play!");
+            
+            // Now that the host is connected, we can start the handshake
+            if (_relayConnection != null)
+            {
+                // Send the initial handshake request
+                SendHandshakeToRelayHost();
+            }
+        }
+        
+        /// <summary>
+        /// Called when the host peer disconnects via relay.
+        /// </summary>
+        private void OnRelayPeerDisconnected()
+        {
+            NetworkLogger.Info("[LiteNetNetworkingAdapter] Host disconnected from relay");
+            
+            if (_isConnectedViaRelay)
+            {
+                HandleHostDisconnectMessage();
+            }
+        }
+        
+        /// <summary>
+        /// Called when disconnected from the relay server.
+        /// </summary>
+        private void OnRelayDisconnected(string reason)
+        {
+            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Disconnected from relay: {reason}");
+            
+            if (_isConnectedViaRelay)
+            {
+                _isConnectedViaRelay = false;
+                HandleHostDisconnectMessage();
+            }
+        }
+        
+        /// <summary>
+        /// Called on relay errors.
+        /// </summary>
+        private void OnRelayError(string error)
+        {
+            NetworkLogger.Error($"[LiteNetNetworkingAdapter] Relay error: {error}");
+            OnNetworkError?.Invoke($"Relay error: {error}");
+        }
+        
+        /// <summary>
+        /// Sends the handshake request to the host via relay.
+        /// </summary>
+        private void SendHandshakeToRelayHost()
+        {
+            if (_relayConnection == null || _relayClient == null || !_relayClient.IsPeerConnected)
+            {
+                NetworkLogger.Warn("[LiteNetNetworkingAdapter] Cannot send handshake - relay not ready");
+                return;
+            }
+            
+            NetworkLogger.Info("[LiteNetNetworkingAdapter] Sending handshake to host via relay...");
+            
+            // Build the handshake request packet using binary format (same as direct connections)
+            var identities = GetAllLocalPlayerIdentities();
+            byte[] packetData = HandshakeBinaryPackets.BuildMultiPlayerRequestPacket(identities);
+            
+            // Send via relay
+            _relayConnection.Send(packetData, ChannelType.ReliableOrdered);
+            
+            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Handshake sent via relay with {identities.Count} player(s)");
+        }
+        
+        /// <summary>
+        /// Connects the host to the relay server so remote clients can connect via relay.
+        /// Call this after CreateLobby when you want to enable relay fallback for clients.
+        /// </summary>
+        /// <param name="relayAddress">Relay server address</param>
+        /// <param name="relayPort">Relay server port</param>
+        /// <param name="sessionId">Relay session ID from allocation</param>
+        public async Task<bool> ConnectHostToRelayAsync(string relayAddress, int relayPort, Guid sessionId)
+        {
+            if (!_isHosting)
+            {
+                NetworkLogger.Error("[LiteNetNetworkingAdapter] Cannot connect to relay - not hosting");
+                return false;
+            }
+            
+            if (_relayClient != null)
+            {
+                NetworkLogger.Warn("[LiteNetNetworkingAdapter] Host already connected to relay");
+                return true;
+            }
+            
+            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Host connecting to relay at {relayAddress}:{relayPort} for session {sessionId}...");
+            
+            try
+            {
+                // Create and connect the relay client (as HOST)
+                _relayClient = new LiteNetRelayClient(relayAddress, relayPort, sessionId, isHost: true);
+                
+                // Subscribe to relay events (host-side handlers)
+                _relayClient.OnDataReceived += OnHostRelayDataReceived;
+                _relayClient.OnRelayPeerConnected += OnHostRelayPeerConnected;
+                _relayClient.OnRelayPeerDisconnected += OnHostRelayPeerDisconnected;
+                _relayClient.OnDisconnected += OnHostRelayDisconnected;
+                _relayClient.OnError += OnHostRelayError;
+                
+                // Connect to relay
+                bool connected = await _relayClient.ConnectAsync(15000);
+                
+                if (!connected)
+                {
+                    NetworkLogger.Error("[LiteNetNetworkingAdapter] Host failed to connect to relay");
+                    CleanupHostRelayClient();
+                    return false;
+                }
+                
+                NetworkLogger.Info("[LiteNetNetworkingAdapter] Host connected to relay, waiting for clients...");
+                _isConnectedViaRelay = true;
+                
+                return true;
+            }
+            catch (Exception ex)
+            {
+                NetworkLogger.Error($"[LiteNetNetworkingAdapter] Host relay connection failed: {ex.Message}");
+                CleanupHostRelayClient();
+                return false;
+            }
+        }
+        
+        /// <summary>
+        /// Called when host receives data from a client via relay.
+        /// </summary>
+        private void OnHostRelayDataReceived(byte[] data, DeliveryMethod deliveryMethod)
+        {
+            if (!_isHosting || _relayClient == null)
+            {
+                return;
+            }
+            
+            // Convert delivery method to channel type
+            var channel = deliveryMethod switch
+            {
+                DeliveryMethod.ReliableOrdered => ChannelType.ReliableOrdered,
+                DeliveryMethod.ReliableSequenced => ChannelType.ReliableSequenced,
+                DeliveryMethod.Unreliable => ChannelType.Unreliable,
+                _ => ChannelType.ReliableOrdered,
+            };
+            
+            // Get or create a relay connection wrapper for this relay client
+            if (_relayConnection == null)
+            {
+                _relayConnection = new RelayConnection(_relayClient);
+            }
+            
+            // Process the packet as if it came from a regular client connection
+            OnTransportPayloadReceived(_relayConnection, new ReadOnlyMemory<byte>(data), channel);
+        }
+        
+        /// <summary>
+        /// Called when a client peer connects to host via relay.
+        /// </summary>
+        private void OnHostRelayPeerConnected()
+        {
+            NetworkLogger.Info("[LiteNetNetworkingAdapter] Client connected to host via relay!");
+            
+            // Create the relay connection wrapper if not exists
+            if (_relayConnection == null && _relayClient != null)
+            {
+                _relayConnection = new RelayConnection(_relayClient);
+            }
+            
+            // Trigger peer connected event so the game layer knows about this client
+            // Note: The actual handshake will happen via the normal packet flow
+            if (_relayConnection != null)
+            {
+                // Add to connection map for tracking
+                _connectionMap[_relayConnection.Id] = _relayConnection;
+                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Relay client connection registered: {_relayConnection.Id}");
+            }
+        }
+        
+        /// <summary>
+        /// Called when a client peer disconnects from host via relay.
+        /// </summary>
+        private void OnHostRelayPeerDisconnected()
+        {
+            NetworkLogger.Info("[LiteNetNetworkingAdapter] Client disconnected from host via relay");
+            
+            if (_relayConnection != null)
+            {
+                // Handle the disconnect like a normal peer disconnect
+                HandleRelayClientDisconnect(_relayConnection);
+            }
+        }
+        
+        /// <summary>
+        /// Called when host is disconnected from relay server.
+        /// </summary>
+        private void OnHostRelayDisconnected(string reason)
+        {
+            NetworkLogger.Warn($"[LiteNetNetworkingAdapter] Host disconnected from relay: {reason}");
+            
+            // Clean up relay state but keep hosting (LAN clients can still connect)
+            if (_relayConnection != null)
+            {
+                HandleRelayClientDisconnect(_relayConnection);
+            }
+            CleanupHostRelayClient();
+        }
+        
+        /// <summary>
+        /// Called on relay errors (host-side).
+        /// </summary>
+        private void OnHostRelayError(string error)
+        {
+            NetworkLogger.Error($"[LiteNetNetworkingAdapter] Host relay error: {error}");
+        }
+        
+        /// <summary>
+        /// Handles disconnect of a relay-connected client.
+        /// </summary>
+        private void HandleRelayClientDisconnect(RelayConnection relayConn)
+        {
+            if (relayConn == null) return;
+            
+            var connId = relayConn.Id;
+            
+            // Remove from connection map
+            _connectionMap.Remove(connId);
+            
+            // Remove players associated with this connection
+            if (_connectedPlayersByConnection.TryGetValue(connId, out var players))
+            {
+                _connectedPlayersByConnection.Remove(connId);
+                foreach (var player in players)
+                {
+                    if (player != null)
+                    {
+                        NetworkLogger.Info($"[LiteNetNetworkingAdapter] Relay client player disconnected: {player.PlayerName}");
+                        OnPlayerLeft?.Invoke(player);
+                        
+                        if (player.gameObject != null)
+                        {
+                            GameObject.Destroy(player.gameObject);
+                        }
+                    }
+                }
+            }
+            
+            // Update lobby info
+            if (_currentLobby != null)
+            {
+                _currentLobby.CurrentPlayers = GetAllPlayers().Count;
+            }
+        }
+        
+        /// <summary>
+        /// Cleans up the host's relay client.
+        /// </summary>
+        private void CleanupHostRelayClient()
+        {
+            if (_relayClient != null)
+            {
+                _relayClient.OnDataReceived -= OnHostRelayDataReceived;
+                _relayClient.OnRelayPeerConnected -= OnHostRelayPeerConnected;
+                _relayClient.OnRelayPeerDisconnected -= OnHostRelayPeerDisconnected;
+                _relayClient.OnDisconnected -= OnHostRelayDisconnected;
+                _relayClient.OnError -= OnHostRelayError;
+                _relayClient.Disconnect();
+                _relayClient.Dispose();
+                _relayClient = null;
+            }
+            
+            _relayConnection = null;
+            _isConnectedViaRelay = false;
+        }
+        
+        /// <summary>
+        /// Cleans up the relay client (for client-side connections).
+        /// </summary>
+        private void CleanupRelayClient()
+        {
+            if (_relayClient != null)
+            {
+                _relayClient.OnDataReceived -= OnRelayDataReceived;
+                _relayClient.OnRelayPeerConnected -= OnRelayPeerConnected;
+                _relayClient.OnRelayPeerDisconnected -= OnRelayPeerDisconnected;
+                _relayClient.OnDisconnected -= OnRelayDisconnected;
+                _relayClient.OnError -= OnRelayError;
+                _relayClient.Disconnect();
+                _relayClient.Dispose();
+                _relayClient = null;
+            }
+            
+            _relayConnection = null;
+            _isConnectedViaRelay = false;
+        }
+        
         private void NotifyClientsOfHostDisconnect()
         {
             if (_liteNetTransport?.NetManager == null)
@@ -7812,13 +8260,20 @@ namespace YARG.Networking.Abstraction
                     NetworkLogger.Info(" Server stopped");
                 }
                 
+                // Clean up relay connection if used
+                if (_isConnectedViaRelay)
+                {
+                    NetworkLogger.Info(" Disconnecting relay client...");
+                    CleanupRelayClient();
+                }
+                
                 if (_isConnected)
                 {
                     // Disconnect from server
                     NetworkLogger.Info(" Disconnecting client...");
                     try
                     {
-                        _clientRuntime.DisconnectAsync().Wait(TimeSpan.FromSeconds(2));
+                        _clientRuntime?.DisconnectAsync().Wait(TimeSpan.FromSeconds(2));
                     }
                     catch (Exception discEx)
                     {

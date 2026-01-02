@@ -3,11 +3,11 @@ using System;
 namespace YARG.Networking.Settings
 {
     /// <summary>
-    /// Represents a single introducer service endpoint that can be used
+    /// Represents a single lobby server endpoint that can be used
     /// to advertise sessions and lookup lobby codes.
     /// </summary>
     [Serializable]
-    public sealed class IntroducerEndpoint
+    public sealed class LobbyServerEndpoint
     {
         /// <summary>
         /// Unique identifier for this endpoint configuration.
@@ -20,7 +20,7 @@ namespace YARG.Networking.Settings
         public string displayName = string.Empty;
 
         /// <summary>
-        /// Base URL of the introducer service (e.g., "https://lobby.yarg.in").
+        /// Base URL of the lobby server (e.g., "https://lobby.yarg.in").
         /// </summary>
         public string url = string.Empty;
 
@@ -106,9 +106,9 @@ namespace YARG.Networking.Settings
             return new Uri(baseUri, "/api/lobbies/code");
         }
 
-        public IntroducerEndpoint Clone()
+        public LobbyServerEndpoint Clone()
         {
-            return new IntroducerEndpoint
+            return new LobbyServerEndpoint
             {
                 id = id,
                 displayName = displayName,
@@ -152,11 +152,11 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Creates the default YARG official introducer endpoint.
+        /// Creates the default YARG official lobby server endpoint.
         /// </summary>
-        public static IntroducerEndpoint CreateYargOfficial()
+        public static LobbyServerEndpoint CreateYargOfficial()
         {
-            return new IntroducerEndpoint
+            return new LobbyServerEndpoint
             {
                 id = "yarg-official",
                 displayName = "YARG Official",
@@ -168,12 +168,12 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Creates a local development introducer endpoint for testing.
-        /// Run: dotnet run in YARG.Networking/src/YARG.Introducer folder.
+        /// Creates a local development lobby server endpoint for testing.
+        /// Run: dotnet run in YARG.Networking/src/YARG.LobbyServer folder.
         /// </summary>
-        public static IntroducerEndpoint CreateLocalDev()
+        public static LobbyServerEndpoint CreateLocalDev()
         {
-            return new IntroducerEndpoint
+            return new LobbyServerEndpoint
             {
                 id = "local-dev",
                 displayName = "Local Dev (localhost:5000)",

@@ -5,25 +5,25 @@ using YARG.Settings;
 namespace YARG.Menu.Settings
 {
     /// <summary>
-    /// Header component for the Introducer settings tab.
+    /// Header component for the Lobby Server settings tab.
     /// Provides "Add New" functionality.
     /// </summary>
-    public class IntroducerHeader : MonoBehaviour
+    public class LobbyServerHeader : MonoBehaviour
     {
         /// <summary>
-        /// Called when the "Add New Introducer" button is clicked.
+        /// Called when the "Add New Lobby Server" button is clicked.
         /// </summary>
-        public void AddNewIntroducer()
+        public void AddNewLobbyServer()
         {
             var store = NetworkSettingsStore.Instance;
             if (store == null)
             {
-                Debug.LogError("[IntroducerHeader] NetworkSettingsStore not available");
+                Debug.LogError("[LobbyServerHeader] NetworkSettingsStore not available");
                 return;
             }
 
-            // Add a new empty introducer entry
-            store.AddIntroducer("New Introducer", string.Empty);
+            // Add a new empty lobby server entry
+            store.AddLobbyServer("New Lobby Server", string.Empty);
 
             // Refresh the settings menu to show the new entry
             SettingsMenu.Instance.RefreshAndKeepPosition();
@@ -37,7 +37,7 @@ namespace YARG.Menu.Settings
             var store = NetworkSettingsStore.Instance;
             if (store == null)
             {
-                Debug.LogError("[IntroducerHeader] NetworkSettingsStore not available");
+                Debug.LogError("[LobbyServerHeader] NetworkSettingsStore not available");
                 return;
             }
 

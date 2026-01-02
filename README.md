@@ -182,7 +182,7 @@ All server settings are configured via a JSON file: `dedicated_server.json`. On 
     "password": "",
     "privacyMode": "public",
     "visibleOnLan": true,
-    "registerWithIntroducers": true
+    "registerWithLobbyServers": true
   },
   "gameplay": {
     "bandSize": 0,

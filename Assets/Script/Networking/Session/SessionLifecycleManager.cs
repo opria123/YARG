@@ -10,14 +10,14 @@ using YARG.Core.Logging;
 using YARG.Networking.Settings;
 using YARG.Networking.UPnP;
 using YARG.Net.Directory;
-using YARG.Net.Introducer;
+using YARG.Net.LobbyServer;
 using YARG.Net.Utilities;
 
 namespace YARG.Networking.Session
 {
     /// <summary>
     /// Manages session lifecycle based on session type (Server vs Lobby).
-    /// Handles UPnP, lobby codes, and introducer registration automatically.
+    /// Handles UPnP, lobby codes, and Lobby server registration automatically.
     /// </summary>
     public sealed class SessionLifecycleManager : MonoBehaviour
     {
@@ -37,7 +37,7 @@ namespace YARG.Networking.Session
         private IPEndPoint? _punchedEndpoint;
         
         // NAT punch server info (for hosts) - needs refreshing in heartbeat
-        private string? _natPunchIntroducerUrl;
+        private string? _natPunchLobbyServerUrl;
         private int _natPunchGamePort;
         
         /// <summary>
@@ -46,7 +46,7 @@ namespace YARG.Networking.Session
         /// </summary>
         public IPEndPoint? PunchedEndpoint => _punchedEndpoint;
         
-        // Heartbeat configuration - must be less than introducer TTL (30s)
+        // Heartbeat configuration - must be less than lobby server TTL (30s)
         private const float HeartbeatIntervalSeconds = 15f;
         
         // Cached lobby info for heartbeats
@@ -58,10 +58,10 @@ namespace YARG.Networking.Session
         private bool _cachedHasPassword;
         
         /// <summary>
-        /// List of introducer URLs that have the current lobby code registered.
-        /// Used for cleanup to release the code from all introducers.
+        /// List of lobby server URLs that have the current lobby code registered.
+        /// Used for cleanup to release the code from All lobby servers.
         /// </summary>
-        private readonly List<string> _registeredIntroducerUrls = new();
+        private readonly List<string> _registeredLobbyServerUrls = new();
 
         /// <summary>
         /// Gets the current session type.
@@ -179,12 +179,12 @@ namespace YARG.Networking.Session
 
                 if (preset.SessionType == SessionType.Lobby)
                 {
-                    // Lobby flow: UPnP → Register with Introducer → Get code
+                    // Lobby flow: UPnP → Register with Lobby Server → Get code
                     return await StartLobbySessionAsync(preset, port, lobbyId, hostName, ct);
                 }
                 else
                 {
-                    // Server flow: No UPnP, no lobby code, optional introducer registration for discovery
+                    // Server flow: No UPnP, no lobby code, optional Lobby server registration for discovery
                     return await StartServerSessionAsync(preset, port, lobbyId, hostName, ct);
                 }
             }
@@ -218,7 +218,7 @@ namespace YARG.Networking.Session
 
         /// <summary>
         /// Joins a lobby using a lobby code.
-        /// Tries all enabled introducers until one finds the code.
+        /// Tries all enabled lobby servers until one finds the code.
         /// </summary>
         /// <param name="code">The 6-character lobby code.</param>
         /// <returns>Connection info if successful.</returns>
@@ -231,39 +231,39 @@ namespace YARG.Networking.Session
                 return null;
             }
 
-            var enabledIntroducers = settings.EnabledIntroducers;
-            if (enabledIntroducers == null || enabledIntroducers.Count == 0)
+            var EnabledLobbyServers = settings.EnabledLobbyServers;
+            if (EnabledLobbyServers == null || EnabledLobbyServers.Count == 0)
             {
-                YargLogger.LogError("[SessionManager] No enabled introducers configured");
+                YargLogger.LogError("[SessionManager] No enabled lobby servers configured");
                 return null;
             }
 
             _lobbyCodeClient ??= new LobbyCodeClient();
 
-            // Try each introducer until we find the lobby
-            foreach (var introducer in enabledIntroducers)
+            // Try each lobby server until we find the lobby
+            foreach (var lobbyServer in EnabledLobbyServers)
             {
                 try
                 {
-                    YargLogger.LogInfo($"[SessionManager] Looking up code {code} on {introducer.displayName}...");
-                    var result = await _lobbyCodeClient.LookupCodeAsync(introducer.url, code).AsUniTask();
+                    YargLogger.LogInfo($"[SessionManager] Looking up code {code} on {lobbyServer.displayName}...");
+                    var result = await _lobbyCodeClient.LookupCodeAsync(lobbyServer.url, code).AsUniTask();
                     if (result.IsSuccess)
                     {
-                        YargLogger.LogInfo($"[SessionManager] Found lobby code {code} via {introducer.displayName}");
+                        YargLogger.LogInfo($"[SessionManager] Found lobby code {code} via {lobbyServer.displayName}");
                         return result;
                     }
                     else
                     {
-                        YargLogger.LogInfo($"[SessionManager] Code {code} not found on {introducer.displayName}: {result.Error}");
+                        YargLogger.LogInfo($"[SessionManager] Code {code} not found on {lobbyServer.displayName}: {result.Error}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    YargLogger.LogWarning($"[SessionManager] Error looking up code on {introducer.displayName}: {ex.Message}");
+                    YargLogger.LogWarning($"[SessionManager] Error looking up code on {lobbyServer.displayName}: {ex.Message}");
                 }
             }
             
-            YargLogger.LogWarning($"[SessionManager] Lobby code {code} not found on any introducer");
+            YargLogger.LogWarning($"[SessionManager] Lobby code {code} not found on any lobby server");
             return LobbyLookupResult.Failure("Invalid or expired code");
         }
 
@@ -327,7 +327,7 @@ namespace YARG.Networking.Session
                 
                 // Try STUN as a fallback to at least get the public IP
                 // Note: Without UPnP port forwarding, connections from outside the LAN won't work,
-                // but this allows the introducer to have the correct public IP for reference.
+                // but this allows the lobby server to have the correct public IP for reference.
                 try
                 {
                     externalAddress = await StunResolver.ResolvePublicAddressAsync(ct, 3000);
@@ -346,27 +346,27 @@ namespace YARG.Networking.Session
                 }
             }
 
-            // Step 2: Register with introducer(s)
-            OnSessionStateChanged?.Invoke(SessionState.RegisteringWithIntroducer);
+            // Step 2: Register with Lobby Server(s)
+            OnSessionStateChanged?.Invoke(SessionState.RegisteringWithLobbyServer);
 
             var settings = NetworkSettingsStore.Instance?.Settings;
-            var enabledIntroducers = settings?.EnabledIntroducers;
+            var EnabledLobbyServers = settings?.EnabledLobbyServers;
 
-            if (enabledIntroducers == null || enabledIntroducers.Count == 0)
+            if (EnabledLobbyServers == null || EnabledLobbyServers.Count == 0)
             {
-                return SessionStartResult.Failure("No enabled introducers configured. Cannot create lobby code.");
+                return SessionStartResult.Failure("No enabled lobby servers configured. Cannot create lobby code.");
             }
 
-            // Step 3: Try to register lobby and generate code from each introducer until one succeeds
+            // Step 3: Try to register lobby and generate code from each lobby server until one succeeds
             _lobbyCodeClient ??= new LobbyCodeClient();
-            _registeredIntroducerUrls.Clear();
+            _registeredLobbyServerUrls.Clear();
             
             string lobbyCode = null;
-            IntroducerEndpoint successfulIntroducer = null;
-            var failedIntroducers = new List<(IntroducerEndpoint introducer, string error)>();
+            LobbyServerEndpoint successfulLobbyServer = null;
+            var failedLobbyServers = new List<(LobbyServerEndpoint lobbyServer, string error)>();
             
             // Get address to register - prefer external (UPnP/STUN) address, fall back to LAN address
-            // Never use 0.0.0.0 because the introducer would use its own view of our IP (e.g., Docker gateway)
+            // Never use 0.0.0.0 because the lobby server would use its own view of our IP (e.g., Docker gateway)
             string lanAddress = NetworkAddressUtility.GetLocalLanAddress();
             string registerAddress = externalAddress ?? lanAddress ?? "0.0.0.0";
             
@@ -381,16 +381,16 @@ namespace YARG.Networking.Session
             
             YargLogger.LogInfo($"[SessionManager] Registering with address: {registerAddress} (external: {externalAddress ?? "null"}, lan: {lanAddress ?? "null"}, port: {port})");
             
-            foreach (var introducer in enabledIntroducers)
+            foreach (var lobbyServer in EnabledLobbyServers)
             {
-                YargLogger.LogInfo($"[SessionManager] Trying introducer: {introducer.displayName} ({introducer.url})");
+                YargLogger.LogInfo($"[SessionManager] Trying lobbyServer: {lobbyServer.displayName} ({lobbyServer.url})");
                 
                 try
                 {
-                    // First, register the lobby with this introducer
-                    YargLogger.LogInfo($"[SessionManager] Registering lobby with {introducer.displayName}...");
+                    // First, register the lobby with this lobby server
+                    YargLogger.LogInfo($"[SessionManager] Registering lobby with {lobbyServer.displayName}...");
                     bool registered = await _lobbyCodeClient.RegisterLobbyAsync(
-                        introducer.url,
+                        lobbyServer.url,
                         lobbyId,
                         preset.sessionName ?? "YARG Lobby",
                         hostName ?? "Host",
@@ -402,68 +402,68 @@ namespace YARG.Networking.Session
                     
                     if (!registered)
                     {
-                        YargLogger.LogWarning($"[SessionManager] Failed to register lobby with {introducer.displayName}");
-                        failedIntroducers.Add((introducer, "Failed to register lobby"));
+                        YargLogger.LogWarning($"[SessionManager] Failed to register lobby with {lobbyServer.displayName}");
+                        failedLobbyServers.Add((lobbyServer, "Failed to register lobby"));
                         continue;
                     }
                     
-                    YargLogger.LogInfo($"[SessionManager] Lobby registered with {introducer.displayName}, generating code...");
+                    YargLogger.LogInfo($"[SessionManager] Lobby registered with {lobbyServer.displayName}, generating code...");
                     
                     // Now generate the code
-                    var codeResult = await _lobbyCodeClient.GenerateCodeAsync(introducer.url, lobbyId, ct).AsUniTask();
+                    var codeResult = await _lobbyCodeClient.GenerateCodeAsync(lobbyServer.url, lobbyId, ct).AsUniTask();
                     
                     if (codeResult.IsSuccess && !string.IsNullOrEmpty(codeResult.Code))
                     {
                         lobbyCode = codeResult.Code;
-                        successfulIntroducer = introducer;
-                        _registeredIntroducerUrls.Add(introducer.url);
-                        YargLogger.LogInfo($"[SessionManager] Successfully generated lobby code '{lobbyCode}' from {introducer.displayName}");
+                        successfulLobbyServer = lobbyServer;
+                        _registeredLobbyServerUrls.Add(lobbyServer.url);
+                        YargLogger.LogInfo($"[SessionManager] Successfully generated lobby code '{lobbyCode}' from {lobbyServer.displayName}");
                         break;
                     }
                     else
                     {
                         var error = codeResult.Error ?? "Unknown error";
-                        YargLogger.LogWarning($"[SessionManager] Introducer {introducer.displayName} failed: {error}");
-                        failedIntroducers.Add((introducer, error));
+                        YargLogger.LogWarning($"[SessionManager] LobbyServer {lobbyServer.displayName} failed: {error}");
+                        failedLobbyServers.Add((lobbyServer, error));
                     }
                 }
                 catch (Exception ex)
                 {
-                    YargLogger.LogWarning($"[SessionManager] Introducer {introducer.displayName} threw exception: {ex.Message}");
-                    failedIntroducers.Add((introducer, ex.Message));
+                    YargLogger.LogWarning($"[SessionManager] LobbyServer {lobbyServer.displayName} threw exception: {ex.Message}");
+                    failedLobbyServers.Add((lobbyServer, ex.Message));
                 }
             }
             
-            // If all introducers failed, return error
+            // If All lobby servers failed, return error
             if (string.IsNullOrEmpty(lobbyCode))
             {
-                var errorSummary = string.Join("; ", failedIntroducers.Select(f => $"{f.introducer.displayName}: {f.error}"));
-                YargLogger.LogError($"[SessionManager] All {enabledIntroducers.Count} introducers failed to generate lobby code: {errorSummary}");
-                return SessionStartResult.Failure($"All introducers failed. {errorSummary}");
+                var errorSummary = string.Join("; ", failedLobbyServers.Select(f => $"{f.lobbyServer.displayName}: {f.error}"));
+                YargLogger.LogError($"[SessionManager] All {EnabledLobbyServers.Count} lobby servers failed to generate lobby code: {errorSummary}");
+                return SessionStartResult.Failure($"All lobby servers failed. {errorSummary}");
             }
 
             _currentLobbyCode = lobbyCode;
             _currentLobbyId = lobbyId;
             
             OnLobbyCodeGenerated?.Invoke(_currentLobbyCode);
-            YargLogger.LogInfo($"[SessionManager] Lobby code generated: {_currentLobbyCode} (from {successfulIntroducer.displayName})");
+            YargLogger.LogInfo($"[SessionManager] Lobby code generated: {_currentLobbyCode} (from {successfulLobbyServer.displayName})");
 
-            // Step 4: Disseminate the code to all OTHER enabled introducers (ones we haven't registered with yet)
-            var otherIntroducers = enabledIntroducers.Where(i => i.url != successfulIntroducer.url).ToList();
-            if (otherIntroducers.Count > 0 && !string.IsNullOrEmpty(externalAddress))
+            // Step 4: Disseminate the code to all OTHER enabled lobby servers (ones we haven't registered with yet)
+            var otherLobbyServers = EnabledLobbyServers.Where(i => i.url != successfulLobbyServer.url).ToList();
+            if (otherLobbyServers.Count > 0 && !string.IsNullOrEmpty(externalAddress))
             {
-                await DisseminateCodeToIntroducersAsync(
-                    otherIntroducers,
+                await DisseminateCodeToLobbyServersAsync(
+                    otherLobbyServers,
                     _currentLobbyCode,
                     lobbyId,
                     externalAddress,
                     port,
                     ct);
             }
-            else if (otherIntroducers.Count > 0)
+            else if (otherLobbyServers.Count > 0)
             {
                 YargLogger.LogWarning("[SessionManager] Could not get public address for code dissemination. " +
-                    "Code will only be registered with the successful introducer.");
+                    "Code will only be registered with the successful lobby server.");
             }
 
             // Cache lobby info for heartbeats
@@ -476,19 +476,23 @@ namespace YARG.Networking.Session
             
             // Step 5: Register with NAT punch server for hole punching coordination
             // This allows clients to connect even without UPnP port forwarding
-            await RegisterWithNatPunchServerAsync(successfulIntroducer.url, lobbyId, port, ct);
+            await RegisterWithNatPunchServerAsync(successfulLobbyServer.url, lobbyId, port, ct);
             
-            // Start heartbeat loop to keep lobby alive on introducers
+            // Step 6: Allocate relay session and connect host to relay
+            // This enables relay fallback for clients when direct/NAT punch fails
+            await AllocateAndConnectHostRelayAsync(successfulLobbyServer.url, lobbyId, ct);
+            
+            // Start heartbeat loop to keep lobby alive on lobby servers
             StartHeartbeatLoop();
 
             _isSessionActive = true;
             OnSessionStateChanged?.Invoke(SessionState.Active);
 
-            int registeredCount = _registeredIntroducerUrls.Count;
-            int totalCount = enabledIntroducers.Count;
+            int registeredCount = _registeredLobbyServerUrls.Count;
+            int totalCount = EnabledLobbyServers.Count;
             string registrationMessage = registeredCount == totalCount
-                ? $"Lobby code registered with all {totalCount} introducers"
-                : $"Lobby code registered with {registeredCount} of {totalCount} introducers";
+                ? $"Lobby code registered with all {totalCount} lobby servers"
+                : $"Lobby code registered with {registeredCount} of {totalCount} lobby servers";
 
             // Build the result message based on the actual state
             string resultMessage;
@@ -518,42 +522,42 @@ namespace YARG.Networking.Session
         }
         
         /// <summary>
-        /// Disseminates a lobby code to additional introducers so players using
-        /// any of the same introducers can find each other.
+        /// Disseminates a lobby code to additional lobby servers so players using
+        /// any of the same lobby servers can find each other.
         /// </summary>
-        private async UniTask DisseminateCodeToIntroducersAsync(
-            IReadOnlyList<IntroducerEndpoint> introducers,
+        private async UniTask DisseminateCodeToLobbyServersAsync(
+            IReadOnlyList<LobbyServerEndpoint> lobbyServers,
             string code,
             Guid lobbyId,
             string hostAddress,
             int hostPort,
             CancellationToken ct)
         {
-            var tasks = new List<UniTask<(IntroducerEndpoint introducer, bool success)>>();
+            var tasks = new List<UniTask<(LobbyServerEndpoint lobbyServer, bool success)>>();
             
-            foreach (var introducer in introducers)
+            foreach (var lobbyServer in lobbyServers)
             {
-                tasks.Add(RegisterCodeWithIntroducerAsync(introducer, code, lobbyId, hostAddress, hostPort, ct));
+                tasks.Add(RegisterCodeWithLobbyServerAsync(lobbyServer, code, lobbyId, hostAddress, hostPort, ct));
             }
             
             var results = await UniTask.WhenAll(tasks);
             
-            foreach (var (introducer, success) in results)
+            foreach (var (lobbyServer, success) in results)
             {
                 if (success)
                 {
-                    _registeredIntroducerUrls.Add(introducer.url);
-                    YargLogger.LogInfo($"[SessionManager] Lobby code registered with {introducer.displayName}");
+                    _registeredLobbyServerUrls.Add(lobbyServer.url);
+                    YargLogger.LogInfo($"[SessionManager] Lobby code registered with {lobbyServer.displayName}");
                 }
                 else
                 {
-                    YargLogger.LogWarning($"[SessionManager] Failed to register lobby code with {introducer.displayName}");
+                    YargLogger.LogWarning($"[SessionManager] Failed to register lobby code with {lobbyServer.displayName}");
                 }
             }
         }
         
-        private async UniTask<(IntroducerEndpoint introducer, bool success)> RegisterCodeWithIntroducerAsync(
-            IntroducerEndpoint introducer,
+        private async UniTask<(LobbyServerEndpoint lobbyServer, bool success)> RegisterCodeWithLobbyServerAsync(
+            LobbyServerEndpoint lobbyServer,
             string code,
             Guid lobbyId,
             string hostAddress,
@@ -563,18 +567,18 @@ namespace YARG.Networking.Session
             try
             {
                 bool success = await _lobbyCodeClient!.RegisterCodeAsync(
-                    introducer.url, 
+                    lobbyServer.url, 
                     code, 
                     lobbyId, 
                     hostAddress, 
                     hostPort, 
                     ct).AsUniTask();
-                return (introducer, success);
+                return (lobbyServer, success);
             }
             catch (Exception ex)
             {
-                YargLogger.LogWarning($"[SessionManager] Error registering code with {introducer.displayName}: {ex.Message}");
-                return (introducer, false);
+                YargLogger.LogWarning($"[SessionManager] Error registering code with {lobbyServer.displayName}: {ex.Message}");
+                return (lobbyServer, false);
             }
         }
 
@@ -587,29 +591,29 @@ namespace YARG.Networking.Session
         {
             // Server mode - no UPnP, no lobby code
             // User is expected to handle port forwarding manually
-            YargLogger.LogInfo($"[SessionManager] Starting server session (privacy: {preset.PrivacyMode}, registerWithIntroducers: {preset.registerWithIntroducers})");
+            YargLogger.LogInfo($"[SessionManager] Starting server session (privacy: {preset.PrivacyMode}, registerWithLobbyServers: {preset.registerWithLobbyServers})");
 
-            // For non-Unlisted servers that want to be discoverable, register with introducers
+            // For non-Unlisted servers that want to be discoverable, Register with Lobby Servers
             // This allows the server to appear in the server browser without a lobby code
-            bool shouldRegisterWithIntroducers = preset.registerWithIntroducers && 
+            bool shouldRegisterWithLobbyServers = preset.registerWithLobbyServers && 
                                                   preset.PrivacyMode != SessionPrivacyMode.Unlisted;
             
-            if (shouldRegisterWithIntroducers)
+            if (shouldRegisterWithLobbyServers)
             {
-                OnSessionStateChanged?.Invoke(SessionState.RegisteringWithIntroducer);
+                OnSessionStateChanged?.Invoke(SessionState.RegisteringWithLobbyServer);
                 
                 var settings = NetworkSettingsStore.Instance?.Settings;
-                var enabledIntroducers = settings?.EnabledIntroducers;
+                var EnabledLobbyServers = settings?.EnabledLobbyServers;
                 
-                if (enabledIntroducers != null && enabledIntroducers.Count > 0)
+                if (EnabledLobbyServers != null && EnabledLobbyServers.Count > 0)
                 {
                     _lobbyCodeClient ??= new LobbyCodeClient();
-                    _registeredIntroducerUrls.Clear();
+                    _registeredLobbyServerUrls.Clear();
                     _currentLobbyId = lobbyId;
                     
                     // Get LAN address for registration (no UPnP external address for servers)
                     string lanAddress = NetworkAddressUtility.GetLocalLanAddress() ?? "0.0.0.0";
-                    YargLogger.LogInfo($"[SessionManager] Registering server with introducers at {lanAddress}:{port}");
+                    YargLogger.LogInfo($"[SessionManager] Registering server with lobby servers at {lanAddress}:{port}");
                     
                     // Cache for heartbeats
                     _cachedLobbyName = preset.sessionName ?? "YARG Server";
@@ -619,13 +623,13 @@ namespace YARG.Networking.Session
                     _cachedMaxPlayers = preset.maxPlayers;
                     _cachedHasPassword = preset.HasPassword;
                     
-                    // Register with each introducer for discovery (no code generation)
-                    foreach (var introducer in enabledIntroducers)
+                    // Register with each lobby server for discovery (no code generation)
+                    foreach (var lobbyServer in EnabledLobbyServers)
                     {
                         try
                         {
                             bool registered = await _lobbyCodeClient.RegisterLobbyAsync(
-                                introducer.url,
+                                lobbyServer.url,
                                 lobbyId,
                                 preset.sessionName ?? "YARG Server",
                                 hostName ?? "Host",
@@ -637,41 +641,41 @@ namespace YARG.Networking.Session
                             
                             if (registered)
                             {
-                                _registeredIntroducerUrls.Add(introducer.url);
-                                YargLogger.LogInfo($"[SessionManager] Server registered with {introducer.displayName} for discovery");
+                                _registeredLobbyServerUrls.Add(lobbyServer.url);
+                                YargLogger.LogInfo($"[SessionManager] Server registered with {lobbyServer.displayName} for discovery");
                             }
                             else
                             {
-                                YargLogger.LogWarning($"[SessionManager] Failed to register server with {introducer.displayName}");
+                                YargLogger.LogWarning($"[SessionManager] Failed to register server with {lobbyServer.displayName}");
                             }
                         }
                         catch (Exception ex)
                         {
-                            YargLogger.LogWarning($"[SessionManager] Error registering server with {introducer.displayName}: {ex.Message}");
+                            YargLogger.LogWarning($"[SessionManager] Error registering server with {lobbyServer.displayName}: {ex.Message}");
                         }
                     }
                     
-                    // Start heartbeat if we registered with any introducers
-                    if (_registeredIntroducerUrls.Count > 0)
+                    // Start heartbeat if we registered with any lobby servers
+                    if (_registeredLobbyServerUrls.Count > 0)
                     {
                         StartHeartbeatLoop();
                     }
                 }
                 else
                 {
-                    YargLogger.LogInfo("[SessionManager] No introducers configured, server will only be discoverable on LAN");
+                    YargLogger.LogInfo("[SessionManager] No lobby servers configured, server will only be discoverable on LAN");
                 }
             }
             else
             {
-                YargLogger.LogInfo("[SessionManager] Server is Unlisted or doesn't want introducer registration - skipping");
+                YargLogger.LogInfo("[SessionManager] Server is Unlisted or doesn't want Lobby server registration - skipping");
             }
 
             _isSessionActive = true;
             OnSessionStateChanged?.Invoke(SessionState.Active);
 
-            string message = shouldRegisterWithIntroducers && _registeredIntroducerUrls.Count > 0
-                ? $"Server started and registered with {_registeredIntroducerUrls.Count} introducer(s). Ensure port forwarding is configured."
+            string message = shouldRegisterWithLobbyServers && _registeredLobbyServerUrls.Count > 0
+                ? $"Server started and registered with {_registeredLobbyServerUrls.Count} lobby server(s). Ensure port forwarding is configured."
                 : "Server started. Ensure port forwarding is configured for players to connect.";
 
             return SessionStartResult.Success(
@@ -688,23 +692,23 @@ namespace YARG.Networking.Session
             // Cleanup NAT punch resources
             CleanupNatPunch();
             
-            // Release lobby code from all registered introducers
+            // Release lobby code from all registered lobby servers
             if (!string.IsNullOrEmpty(_currentLobbyCode) && _lobbyCodeClient != null)
             {
                 var releaseTasks = new List<UniTask>();
                 
-                foreach (var introducerUrl in _registeredIntroducerUrls)
+                foreach (var lobbyServerUrl in _registeredLobbyServerUrls)
                 {
-                    releaseTasks.Add(ReleaseCodeFromIntroducerAsync(introducerUrl, _currentLobbyCode));
+                    releaseTasks.Add(ReleaseCodeFromLobbyServerAsync(lobbyServerUrl, _currentLobbyCode));
                 }
                 
                 if (releaseTasks.Count > 0)
                 {
                     await UniTask.WhenAll(releaseTasks);
-                    YargLogger.LogInfo($"[SessionManager] Released lobby code {_currentLobbyCode} from {releaseTasks.Count} introducer(s)");
+                    YargLogger.LogInfo($"[SessionManager] Released lobby code {_currentLobbyCode} from {releaseTasks.Count} lobby server(s)");
                 }
                 
-                _registeredIntroducerUrls.Clear();
+                _registeredLobbyServerUrls.Clear();
             }
 
             // Close UPnP port
@@ -738,20 +742,20 @@ namespace YARG.Networking.Session
             _cachedHasPassword = false;
         }
         
-        private async UniTask ReleaseCodeFromIntroducerAsync(string introducerUrl, string code)
+        private async UniTask ReleaseCodeFromLobbyServerAsync(string lobbyServerUrl, string code)
         {
             try
             {
-                await _lobbyCodeClient!.ReleaseCodeAsync(introducerUrl, code).AsUniTask();
+                await _lobbyCodeClient!.ReleaseCodeAsync(lobbyServerUrl, code).AsUniTask();
             }
             catch (Exception ex)
             {
-                YargLogger.LogWarning($"[SessionManager] Failed to release lobby code from {introducerUrl}: {ex.Message}");
+                YargLogger.LogWarning($"[SessionManager] Failed to release lobby code from {lobbyServerUrl}: {ex.Message}");
             }
         }
         
         /// <summary>
-        /// Starts the heartbeat loop to keep the lobby alive on all registered introducers.
+        /// Starts the heartbeat loop to keep the lobby alive on all registered lobby servers.
         /// </summary>
         private void StartHeartbeatLoop()
         {
@@ -778,7 +782,7 @@ namespace YARG.Networking.Session
         }
         
         /// <summary>
-        /// The heartbeat loop that periodically sends updates to all registered introducers.
+        /// The heartbeat loop that periodically sends updates to all registered lobby servers.
         /// </summary>
         private async UniTaskVoid HeartbeatLoopAsync(CancellationToken ct)
         {
@@ -790,7 +794,7 @@ namespace YARG.Networking.Session
             {
                 try
                 {
-                    await SendHeartbeatToAllIntroducersAsync(ct);
+                    await SendHeartbeatToAllLobbyServersAsync(ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -825,7 +829,7 @@ namespace YARG.Networking.Session
         /// IMPORTANT: The game server transport must be running before calling this.
         /// NAT punch messages are received by the game server's socket (not a separate client).
         /// </summary>
-        private async UniTask RegisterWithNatPunchServerAsync(string introducerUrl, Guid lobbyId, int gamePort, CancellationToken ct)
+        private async UniTask RegisterWithNatPunchServerAsync(string lobbyServerUrl, Guid lobbyId, int gamePort, CancellationToken ct)
         {
             try
             {
@@ -839,7 +843,7 @@ namespace YARG.Networking.Session
                 var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
                 
                 // First, get the punch server's UDP address
-                var punchInfoUri = new Uri(new Uri(introducerUrl), "/api/punch/info");
+                var punchInfoUri = new Uri(new Uri(lobbyServerUrl), "/api/punch/info");
                 var punchInfoResponse = await httpClient.GetAsync(punchInfoUri, ct);
                 
                 if (!punchInfoResponse.IsSuccessStatusCode)
@@ -874,13 +878,13 @@ namespace YARG.Networking.Session
                 var json = System.Text.Json.JsonSerializer.Serialize(request);
                 var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 
-                var uri = new Uri(new Uri(introducerUrl), "/api/punch/register");
+                var uri = new Uri(new Uri(lobbyServerUrl), "/api/punch/register");
                 var response = await httpClient.PostAsync(uri, content, ct);
                 
                 if (response.IsSuccessStatusCode)
                 {
                     // Save for heartbeat refreshes
-                    _natPunchIntroducerUrl = introducerUrl;
+                    _natPunchLobbyServerUrl = lobbyServerUrl;
                     _natPunchGamePort = gamePort;
                     YargLogger.LogInfo($"[SessionManager] Registered with NAT punch server (game port: {gamePort})");
                     
@@ -899,6 +903,81 @@ namespace YARG.Networking.Session
             catch (Exception ex)
             {
                 YargLogger.LogWarning($"[SessionManager] NAT punch registration failed: {ex.Message}");
+            }
+        }
+        
+        // Cached relay allocation info
+        private Guid _relaySessionId = Guid.Empty;
+        private string? _relayAddress;
+        private int _relayPort;
+        
+        /// <summary>
+        /// Gets the current relay session ID (if allocated).
+        /// </summary>
+        public Guid RelaySessionId => _relaySessionId;
+        
+        /// <summary>
+        /// Allocates a relay session and connects the host to the relay server.
+        /// This enables relay fallback for clients who can't connect directly.
+        /// </summary>
+        private async UniTask AllocateAndConnectHostRelayAsync(string lobbyServerUrl, Guid lobbyId, CancellationToken ct)
+        {
+            try
+            {
+                // First check if relay is available
+                var relayInfo = await CheckRelayAvailableAsync(lobbyServerUrl, ct);
+                
+                if (relayInfo == null || !relayInfo.Available)
+                {
+                    YargLogger.LogInfo("[SessionManager] Relay not available - clients will use direct/NAT punch only");
+                    return;
+                }
+                
+                YargLogger.LogInfo($"[SessionManager] Relay available at {relayInfo.Address}:{relayInfo.Port}");
+                
+                // Allocate a relay session for this lobby
+                var allocation = await AllocateRelaySessionAsync(lobbyId, lobbyServerUrl, ct);
+                
+                if (allocation == null || !allocation.Success)
+                {
+                    YargLogger.LogWarning("[SessionManager] Failed to allocate relay session - relay fallback disabled");
+                    return;
+                }
+                
+                _relaySessionId = allocation.SessionId;
+                _relayAddress = allocation.RelayAddress;
+                _relayPort = allocation.RelayPort;
+                
+                YargLogger.LogInfo($"[SessionManager] Relay session allocated: {_relaySessionId}");
+                
+                // Connect the host to the relay
+                var networkService = Abstraction.NetworkingServiceFactory.Instance;
+                if (networkService == null)
+                {
+                    YargLogger.LogWarning("[SessionManager] NetworkService not available - cannot connect host to relay");
+                    return;
+                }
+                
+                bool connected = await networkService.ConnectHostToRelayAsync(
+                    _relayAddress!, 
+                    _relayPort, 
+                    _relaySessionId);
+                
+                if (connected)
+                {
+                    YargLogger.LogInfo($"[SessionManager] Host connected to relay - clients can now use relay fallback");
+                }
+                else
+                {
+                    YargLogger.LogWarning("[SessionManager] Host failed to connect to relay - relay fallback disabled");
+                    _relaySessionId = Guid.Empty;
+                    _relayAddress = null;
+                    _relayPort = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogWarning($"[SessionManager] Relay allocation/connection failed: {ex.Message}");
             }
         }
         
@@ -1020,10 +1099,10 @@ namespace YARG.Networking.Session
         /// The networking service's transport will receive the punch messages.
         /// </summary>
         /// <param name="lobbyId">The lobby ID to connect to</param>
-        /// <param name="introducerUrl">The introducer URL to use for coordination</param>
+        /// <param name="lobbyServerUrl">The lobby server URL to use for coordination</param>
         /// <param name="timeoutMs">How long to wait for punch to complete</param>
         /// <returns>The punched endpoint if successful, null if punch failed</returns>
-        public async UniTask<IPEndPoint?> InitiateNatPunchAsync(Guid lobbyId, string introducerUrl, int timeoutMs = 5000)
+        public async UniTask<IPEndPoint?> InitiateNatPunchAsync(Guid lobbyId, string lobbyServerUrl, int timeoutMs = 5000)
         {
             _punchedEndpoint = null;
             bool startedTransportForPunch = false;
@@ -1059,7 +1138,7 @@ namespace YARG.Networking.Session
                 var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
                 
                 // First, get punch server info to know where to send UDP
-                var punchInfoUri = new Uri(new Uri(introducerUrl), "/api/punch/info");
+                var punchInfoUri = new Uri(new Uri(lobbyServerUrl), "/api/punch/info");
                 var punchInfoResponse = await httpClient.GetAsync(punchInfoUri);
                 
                 if (!punchInfoResponse.IsSuccessStatusCode)
@@ -1118,7 +1197,7 @@ namespace YARG.Networking.Session
                 var json = System.Text.Json.JsonSerializer.Serialize(request);
                 var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 
-                var uri = new Uri(new Uri(introducerUrl), "/api/punch/request");
+                var uri = new Uri(new Uri(lobbyServerUrl), "/api/punch/request");
                 YargLogger.LogInfo($"[SessionManager] Requesting NAT punch via HTTP...");
                 var response = await httpClient.PostAsync(uri, content);
                 
@@ -1310,22 +1389,22 @@ namespace YARG.Networking.Session
         }
 
         /// <summary>
-        /// Sends heartbeat (re-register) to all registered introducers.
+        /// Sends heartbeat (re-register) to all registered lobby servers.
         /// </summary>
-        private async UniTask SendHeartbeatToAllIntroducersAsync(CancellationToken ct)
+        private async UniTask SendHeartbeatToAllLobbyServersAsync(CancellationToken ct)
         {
-            if (_registeredIntroducerUrls.Count == 0 || _lobbyCodeClient == null)
+            if (_registeredLobbyServerUrls.Count == 0 || _lobbyCodeClient == null)
                 return;
                 
             var tasks = new List<UniTask>();
             
-            foreach (var introducerUrl in _registeredIntroducerUrls)
+            foreach (var lobbyServerUrl in _registeredLobbyServerUrls)
             {
-                tasks.Add(SendHeartbeatToIntroducerAsync(introducerUrl, ct));
+                tasks.Add(SendHeartbeatToLobbyServerAsync(lobbyServerUrl, ct));
             }
             
             // Also refresh NAT punch registration (has 60s TTL on server)
-            if (!string.IsNullOrEmpty(_natPunchIntroducerUrl))
+            if (!string.IsNullOrEmpty(_natPunchLobbyServerUrl))
             {
                 tasks.Add(RefreshNatPunchRegistrationAsync(ct));
             }
@@ -1338,7 +1417,7 @@ namespace YARG.Networking.Session
         /// </summary>
         private async UniTask RefreshNatPunchRegistrationAsync(CancellationToken ct)
         {
-            if (string.IsNullOrEmpty(_natPunchIntroducerUrl) || _currentLobbyId == Guid.Empty)
+            if (string.IsNullOrEmpty(_natPunchLobbyServerUrl) || _currentLobbyId == Guid.Empty)
                 return;
                 
             try
@@ -1351,7 +1430,7 @@ namespace YARG.Networking.Session
                 var json = System.Text.Json.JsonSerializer.Serialize(request);
                 var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 
-                var uri = new Uri(new Uri(_natPunchIntroducerUrl), "/api/punch/register");
+                var uri = new Uri(new Uri(_natPunchLobbyServerUrl), "/api/punch/register");
                 var response = await httpClient.PostAsync(uri, content, ct);
                 
                 if (!response.IsSuccessStatusCode)
@@ -1369,14 +1448,14 @@ namespace YARG.Networking.Session
         }
         
         /// <summary>
-        /// Sends a heartbeat to a single introducer by re-registering the lobby.
+        /// Sends a heartbeat to a single lobby server by re-registering the lobby.
         /// </summary>
-        private async UniTask SendHeartbeatToIntroducerAsync(string introducerUrl, CancellationToken ct)
+        private async UniTask SendHeartbeatToLobbyServerAsync(string lobbyServerUrl, CancellationToken ct)
         {
             try
             {
                 bool success = await _lobbyCodeClient!.RegisterLobbyAsync(
-                    introducerUrl,
+                    lobbyServerUrl,
                     _currentLobbyId,
                     _cachedLobbyName ?? "YARG Lobby",
                     _cachedHostName ?? "Host",
@@ -1388,12 +1467,12 @@ namespace YARG.Networking.Session
                     
                 if (!success)
                 {
-                    YargLogger.LogWarning($"[SessionManager] Heartbeat failed for {introducerUrl}");
+                    YargLogger.LogWarning($"[SessionManager] Heartbeat failed for {lobbyServerUrl}");
                 }
             }
             catch (Exception ex)
             {
-                YargLogger.LogWarning($"[SessionManager] Heartbeat error for {introducerUrl}: {ex.Message}");
+                YargLogger.LogWarning($"[SessionManager] Heartbeat error for {lobbyServerUrl}: {ex.Message}");
             }
         }
         
@@ -1402,14 +1481,14 @@ namespace YARG.Networking.Session
         /// <summary>
         /// Checks if relay is available for connecting to a lobby.
         /// </summary>
-        /// <param name="introducerUrl">The introducer URL to check.</param>
+        /// <param name="lobbyServerUrl">The lobby server URL to check.</param>
         /// <returns>Relay info if available, null otherwise.</returns>
-        public async UniTask<RelayInfo?> CheckRelayAvailableAsync(string introducerUrl, CancellationToken ct = default)
+        public async UniTask<RelayInfo?> CheckRelayAvailableAsync(string lobbyServerUrl, CancellationToken ct = default)
         {
             try
             {
                 var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-                var uri = new Uri(new Uri(introducerUrl), "/api/relay/info");
+                var uri = new Uri(new Uri(lobbyServerUrl), "/api/relay/info");
                 
                 var response = await httpClient.GetAsync(uri, ct);
                 if (!response.IsSuccessStatusCode)
@@ -1436,7 +1515,7 @@ namespace YARG.Networking.Session
         /// <summary>
         /// Allocates a relay session for a lobby (host-side).
         /// </summary>
-        public async UniTask<RelayAllocation?> AllocateRelaySessionAsync(Guid lobbyId, string introducerUrl, CancellationToken ct = default)
+        public async UniTask<RelayAllocation?> AllocateRelaySessionAsync(Guid lobbyId, string lobbyServerUrl, CancellationToken ct = default)
         {
             try
             {
@@ -1448,7 +1527,7 @@ namespace YARG.Networking.Session
                     System.Text.Encoding.UTF8,
                     "application/json");
                 
-                var uri = new Uri(new Uri(introducerUrl), "/api/relay/allocate");
+                var uri = new Uri(new Uri(lobbyServerUrl), "/api/relay/allocate");
                 var response = await httpClient.PostAsync(uri, content, ct);
                 
                 if (!response.IsSuccessStatusCode)
@@ -1527,9 +1606,9 @@ namespace YARG.Networking.Session
         ConfiguringUPnP,
 
         /// <summary>
-        /// Registering with introducer service.
+        /// Registering with lobby server.
         /// </summary>
-        RegisteringWithIntroducer,
+        RegisteringWithLobbyServer,
 
         /// <summary>
         /// Session is active and accepting connections.

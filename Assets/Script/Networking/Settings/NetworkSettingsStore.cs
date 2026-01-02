@@ -68,10 +68,10 @@ namespace YARG.Networking.Settings
                     _settings = JsonUtility.FromJson<NetworkGlobalSettings>(json);
                     
                     // Log what was loaded BEFORE EnsureDefaults
-                    if (_settings?.introducers != null)
+                    if (_settings?.lobbyServers != null)
                     {
-                        Debug.Log($"[NetworkSettingsStore] Loaded {_settings.introducers.Count} introducers from file (before EnsureDefaults):");
-                        foreach (var intro in _settings.introducers)
+                        Debug.Log($"[NetworkSettingsStore] Loaded {_settings.lobbyServers.Count} lobbyServers from file (before EnsureDefaults):");
+                        foreach (var intro in _settings.lobbyServers)
                         {
                             Debug.Log($"  - {intro.displayName} ({intro.url}) [enabled={intro.enabled}, id={intro.id}]");
                         }
@@ -94,12 +94,12 @@ namespace YARG.Networking.Settings
 
             _settings.EnsureDefaults();
             
-            // Log loaded introducers for debugging
-            var enabledIntroducers = _settings.EnabledIntroducers;
-            Debug.Log($"[NetworkSettingsStore] After EnsureDefaults - {_settings.introducers?.Count ?? 0} introducers, {enabledIntroducers?.Count ?? 0} enabled:");
-            if (_settings.introducers != null)
+            // Log loaded lobbyServers for debugging
+            var enabledLobbyServers = _settings.EnabledLobbyServers;
+            Debug.Log($"[NetworkSettingsStore] After EnsureDefaults - {_settings.lobbyServers?.Count ?? 0} lobbyServers, {enabledLobbyServers?.Count ?? 0} enabled:");
+            if (_settings.lobbyServers != null)
             {
-                foreach (var intro in _settings.introducers)
+                foreach (var intro in _settings.lobbyServers)
                 {
                     Debug.Log($"  - {intro.displayName} ({intro.url}) [enabled={intro.enabled}, builtIn={intro.isBuiltIn}]");
                 }
@@ -127,21 +127,21 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Adds a new introducer and saves.
+        /// Adds a new lobby server and saves.
         /// </summary>
-        public IntroducerEndpoint AddIntroducer(string displayName, string url)
+        public LobbyServerEndpoint AddLobbyServer(string displayName, string url)
         {
-            var endpoint = _settings.AddIntroducer(displayName, url);
+            var endpoint = _settings.AddLobbyServer(displayName, url);
             Save();
             return endpoint;
         }
 
         /// <summary>
-        /// Removes an introducer and saves.
+        /// Removes a lobby server and saves.
         /// </summary>
-        public bool RemoveIntroducer(string id)
+        public bool RemoveLobbyServer(string id)
         {
-            if (_settings.RemoveIntroducer(id))
+            if (_settings.RemoveLobbyServer(id))
             {
                 Save();
                 return true;
@@ -150,27 +150,27 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Enables or disables an introducer and saves.
+        /// Enables or disables a lobby server and saves.
         /// </summary>
-        public bool SetIntroducerEnabled(string id, bool enabled)
+        public bool SetLobbyServerEnabled(string id, bool enabled)
         {
-            Debug.Log($"[NetworkSettingsStore] SetIntroducerEnabled called: id={id}, enabled={enabled}");
-            if (_settings.SetIntroducerEnabled(id, enabled))
+            Debug.Log($"[NetworkSettingsStore] SetLobbyServerEnabled called: id={id}, enabled={enabled}");
+            if (_settings.SetLobbyServerEnabled(id, enabled))
             {
-                Debug.Log($"[NetworkSettingsStore] Introducer {id} enabled state changed to {enabled}, saving...");
+                Debug.Log($"[NetworkSettingsStore] LobbyServer {id} enabled state changed to {enabled}, saving...");
                 Save();
                 return true;
             }
-            Debug.LogWarning($"[NetworkSettingsStore] SetIntroducerEnabled failed for id={id}");
+            Debug.LogWarning($"[NetworkSettingsStore] SetLobbyServerEnabled failed for id={id}");
             return false;
         }
 
         /// <summary>
-        /// Updates an introducer's display name and/or URL and saves.
+        /// Updates a lobby server's display name and/or URL and saves.
         /// </summary>
-        public bool UpdateIntroducer(string id, string displayName = null, string url = null)
+        public bool UpdateLobbyServer(string id, string displayName = null, string url = null)
         {
-            var endpoint = _settings.introducers?.Find(i => i.id == id);
+            var endpoint = _settings.lobbyServers?.Find(i => i.id == id);
             if (endpoint == null)
                 return false;
 
@@ -197,11 +197,11 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Records a successful contact with an introducer.
+        /// Records a successful contact with a lobby server.
         /// </summary>
-        public void RecordIntroducerSuccess(string id)
+        public void RecordlobbyServersuccess(string id)
         {
-            var endpoint = _settings.introducers?.Find(i => i.id == id);
+            var endpoint = _settings.lobbyServers?.Find(i => i.id == id);
             if (endpoint != null)
             {
                 endpoint.RecordSuccess();
@@ -210,11 +210,11 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Records a failed contact with an introducer.
+        /// Records a failed contact with a lobby server.
         /// </summary>
-        public void RecordIntroducerFailure(string id)
+        public void RecordLobbyServerFailure(string id)
         {
-            var endpoint = _settings.introducers?.Find(i => i.id == id);
+            var endpoint = _settings.lobbyServers?.Find(i => i.id == id);
             if (endpoint != null)
             {
                 endpoint.RecordFailure();

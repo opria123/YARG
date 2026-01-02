@@ -100,10 +100,10 @@ namespace YARG.Networking.Bookmarks
         public bool VisibleOnLan => PrivacyMode != LobbyPrivacyMode.Unlisted;
 
         /// <summary>
-        /// Gets whether this lobby should register with introducers.
+        /// Gets whether this lobby should register with lobby servers.
         /// Derived from privacy mode - false for Unlisted, true otherwise.
         /// </summary>
-        public bool RegisterWithIntroducers => PrivacyMode != LobbyPrivacyMode.Unlisted;
+        public bool RegisterWithLobbyServers => PrivacyMode != LobbyPrivacyMode.Unlisted;
 
         /// <summary>
         /// Gets whether preset sync (camera/colors) is enabled.

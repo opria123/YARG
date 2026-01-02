@@ -47,9 +47,9 @@ namespace YARG.Menu.Multiplayer.Settings
         public bool VisibleOnLan => PrivacyMode != LobbyPrivacyMode.Unlisted;
 
         /// <summary>
-        /// Whether the lobby registers with introducers (derived from PrivacyMode).
+        /// Whether the lobby registers with lobby servers (derived from PrivacyMode).
         /// </summary>
-        public bool RegisterWithIntroducers => PrivacyMode != LobbyPrivacyMode.Unlisted;
+        public bool RegisterWithLobbyServers => PrivacyMode != LobbyPrivacyMode.Unlisted;
         
         /// <summary>
         /// Legacy property for compatibility - converts GameModes to Instruments.

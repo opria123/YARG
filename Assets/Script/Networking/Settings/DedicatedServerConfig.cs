@@ -51,10 +51,10 @@ namespace YARG.Networking.Settings
         public AdminSection Admin { get; set; } = new();
 
         /// <summary>
-        /// Introducer services for lobby discovery and registration.
+        /// Lobby servers for lobby discovery and registration.
         /// </summary>
-        [JsonProperty("introducers")]
-        public IntroducersSection Introducers { get; set; } = new();
+        [JsonProperty("lobbyServers")]
+        public LobbyServersSection LobbyServers { get; set; } = new();
 
         #endregion
 
@@ -100,10 +100,10 @@ namespace YARG.Networking.Settings
             public bool VisibleOnLan { get; set; } = true;
 
             /// <summary>
-            /// Whether to register with introducers for public discovery.
+            /// Whether to register with lobby servers for public discovery.
             /// </summary>
-            [JsonProperty("registerWithIntroducers")]
-            public bool RegisterWithIntroducers { get; set; } = true;
+            [JsonProperty("registerWithLobbyServers")]
+            public bool RegisterWithLobbyServers { get; set; } = true;
         }
 
         [Serializable]
@@ -224,17 +224,17 @@ namespace YARG.Networking.Settings
         }
 
         [Serializable]
-        public sealed class IntroducersSection
+        public sealed class LobbyServersSection
         {
             /// <summary>
-            /// Whether to use the official YARG introducer (https://lobby.yarg.in).
+            /// Whether to use the official YARG lobby server (https://lobby.yarg.in).
             /// </summary>
             [JsonProperty("useOfficial")]
             public bool UseOfficial { get; set; } = true;
 
             /// <summary>
-            /// Additional custom introducer URLs to register with.
-            /// Each entry should be a full URL like "https://my-introducer.example.com".
+            /// Additional custom lobby server URLs to register with.
+            /// Each entry should be a full URL like "https://my-lobby-server.example.com".
             /// </summary>
             [JsonProperty("customUrls")]
             public List<string> CustomUrls { get; set; } = new();
@@ -281,32 +281,32 @@ namespace YARG.Networking.Settings
         }
 
         /// <summary>
-        /// Returns a list of IntroducerEndpoint objects based on the config.
+        /// Returns a list of LobbyServerEndpoint objects based on the config.
         /// Used by SessionLifecycleManager for registration.
         /// </summary>
         [JsonIgnore]
-        public List<IntroducerEndpoint> EnabledIntroducers
+        public List<LobbyServerEndpoint> EnabledLobbyServers
         {
             get
             {
-                var endpoints = new List<IntroducerEndpoint>();
+                var endpoints = new List<LobbyServerEndpoint>();
 
-                // Add official YARG introducer if enabled
-                if (Introducers.UseOfficial)
+                // Add official YARG lobby server if enabled
+                if (LobbyServers.UseOfficial)
                 {
-                    endpoints.Add(IntroducerEndpoint.CreateYargOfficial());
+                    endpoints.Add(LobbyServerEndpoint.CreateYargOfficial());
                 }
 
-                // Add custom introducers
-                if (Introducers.CustomUrls != null)
+                // Add custom lobby servers
+                if (LobbyServers.CustomUrls != null)
                 {
                     int index = 0;
-                    foreach (var url in Introducers.CustomUrls)
+                    foreach (var url in LobbyServers.CustomUrls)
                     {
                         if (string.IsNullOrWhiteSpace(url))
                             continue;
 
-                        endpoints.Add(new IntroducerEndpoint
+                        endpoints.Add(new LobbyServerEndpoint
                         {
                             id = $"custom-{index++}",
                             displayName = $"Custom ({url})",
@@ -580,7 +580,7 @@ namespace YARG.Networking.Settings
                 bandSize = Gameplay.BandSize,
 
                 visibleOnLan = Server.VisibleOnLan,
-                registerWithIntroducers = Server.RegisterWithIntroducers,
+                registerWithLobbyServers = Server.RegisterWithLobbyServers,
 
                 noFailMode = Gameplay.NoFailMode,
                 sharedSongsOnly = Gameplay.SharedSongsOnly,

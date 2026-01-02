@@ -8,10 +8,10 @@ using YARG.Settings;
 namespace YARG.Menu.Settings
 {
     /// <summary>
-    /// Component for a single introducer entry in the settings list.
-    /// Allows editing the URL, toggling enabled state, and removing custom introducers.
+    /// Component for a single lobby server entry in the settings list.
+    /// Allows editing the URL, toggling enabled state, and removing custom lobbyServers.
     /// </summary>
-    public class IntroducerEntry : MonoBehaviour
+    public class LobbyServerEntry : MonoBehaviour
     {
         [SerializeField]
         private TMP_InputField _urlInput;
@@ -26,10 +26,10 @@ namespace YARG.Menu.Settings
         private GameObject _builtInIndicator;
 
         private int _index;
-        private IntroducerEndpoint _endpoint;
+        private LobbyServerEndpoint _endpoint;
 
-        private static List<IntroducerEndpoint> Introducers => 
-            NetworkSettingsStore.Instance?.Settings?.introducers;
+        private static List<LobbyServerEndpoint> LobbyServers => 
+            NetworkSettingsStore.Instance?.Settings?.lobbyServers;
 
         public void SetIndex(int index)
         {
@@ -76,14 +76,14 @@ namespace YARG.Menu.Settings
 
         private void RefreshFromData()
         {
-            var introducers = Introducers;
-            if (introducers == null || _index < 0 || _index >= introducers.Count)
+            var servers = LobbyServers;
+            if (servers == null || _index < 0 || _index >= servers.Count)
             {
                 gameObject.SetActive(false);
                 return;
             }
 
-            _endpoint = introducers[_index];
+            _endpoint = servers[_index];
 
             // Update URL input
             if (_urlInput != null)
@@ -119,7 +119,7 @@ namespace YARG.Menu.Settings
             var store = NetworkSettingsStore.Instance;
             if (store != null)
             {
-                store.UpdateIntroducer(_endpoint.id, url: newUrl);
+                store.UpdateLobbyServer(_endpoint.id, url: newUrl);
             }
         }
 
@@ -127,25 +127,25 @@ namespace YARG.Menu.Settings
         {
             if (_endpoint == null)
             {
-                Debug.LogWarning("[IntroducerEntry] OnEnabledChanged called but _endpoint is null");
+                Debug.LogWarning("[LobbyServerEntry] OnEnabledChanged called but _endpoint is null");
                 return;
             }
 
-            Debug.Log($"[IntroducerEntry] OnEnabledChanged: {_endpoint.url} ({_endpoint.id}) -> enabled={enabled}");
+            Debug.Log($"[LobbyServerEntry] OnEnabledChanged: {_endpoint.url} ({_endpoint.id}) -> enabled={enabled}");
             
             var store = NetworkSettingsStore.Instance;
             if (store != null)
             {
-                store.SetIntroducerEnabled(_endpoint.id, enabled);
+                store.SetLobbyServerEnabled(_endpoint.id, enabled);
             }
             else
             {
-                Debug.LogError("[IntroducerEntry] NetworkSettingsStore.Instance is null!");
+                Debug.LogError("[LobbyServerEntry] NetworkSettingsStore.Instance is null!");
             }
         }
 
         /// <summary>
-        /// Removes this introducer entry.
+        /// Removes this lobby server entry.
         /// </summary>
         public void Remove()
         {
@@ -153,7 +153,7 @@ namespace YARG.Menu.Settings
                 return;
 
             var store = NetworkSettingsStore.Instance;
-            if (store != null && store.RemoveIntroducer(_endpoint.id))
+            if (store != null && store.RemoveLobbyServer(_endpoint.id))
             {
                 // Refresh the settings menu but keep scroll position
                 SettingsMenu.Instance.RefreshAndKeepPosition();

@@ -89,11 +89,11 @@ namespace YARG.Networking.Settings
         public bool visibleOnLan = true;
 
         /// <summary>
-        /// Whether this session should be registered with enabled introducers.
+        /// Whether this session should be registered with enabled lobby servers.
         /// For Lobbies: Required for lobby code generation.
-        /// For Servers: Optional, allows appearing in introducer browser.
+        /// For Servers: Optional, allows appearing in lobby server browser.
         /// </summary>
-        public bool registerWithIntroducers = true;
+        public bool registerWithLobbyServers = true;
 
         #endregion
 
@@ -260,7 +260,7 @@ namespace YARG.Networking.Settings
                 bandSize = bandSize,
 
                 visibleOnLan = visibleOnLan,
-                registerWithIntroducers = registerWithIntroducers,
+                registerWithLobbyServers = registerWithLobbyServers,
 
                 noFailMode = noFailMode,
                 sharedSongsOnly = sharedSongsOnly,
@@ -361,7 +361,7 @@ namespace YARG.Networking.Settings
                 bandSize = 0,
 
                 visibleOnLan = true,
-                registerWithIntroducers = true,
+                registerWithLobbyServers = true,
 
                 noFailMode = false,
                 sharedSongsOnly = true,
@@ -396,7 +396,7 @@ namespace YARG.Networking.Settings
                 bandSize = 0,
 
                 visibleOnLan = true,
-                registerWithIntroducers = false, // Off by default for servers
+                registerWithLobbyServers = false, // Off by default for servers
 
                 noFailMode = false,
                 sharedSongsOnly = true,
