@@ -126,12 +126,21 @@ namespace YARG.Menu.Settings
         private void OnEnabledChanged(bool enabled)
         {
             if (_endpoint == null)
+            {
+                Debug.LogWarning("[IntroducerEntry] OnEnabledChanged called but _endpoint is null");
                 return;
+            }
 
+            Debug.Log($"[IntroducerEntry] OnEnabledChanged: {_endpoint.url} ({_endpoint.id}) -> enabled={enabled}");
+            
             var store = NetworkSettingsStore.Instance;
             if (store != null)
             {
                 store.SetIntroducerEnabled(_endpoint.id, enabled);
+            }
+            else
+            {
+                Debug.LogError("[IntroducerEntry] NetworkSettingsStore.Instance is null!");
             }
         }
 

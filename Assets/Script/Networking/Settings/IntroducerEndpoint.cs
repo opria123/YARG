@@ -169,15 +169,15 @@ namespace YARG.Networking.Settings
 
         /// <summary>
         /// Creates a local development introducer endpoint for testing.
-        /// Run: docker compose up -d in YARG.Networking folder.
+        /// Run: dotnet run in YARG.Networking/src/YARG.Introducer folder.
         /// </summary>
         public static IntroducerEndpoint CreateLocalDev()
         {
             return new IntroducerEndpoint
             {
                 id = "local-dev",
-                displayName = "Local Dev (localhost:5180)",
-                url = "http://localhost:5180",
+                displayName = "Local Dev (localhost:5000)",
+                url = "http://localhost:5000",
                 enabled = true,
                 isBuiltIn = false,
                 createdAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()

@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using UnityEngine;
+using YARG.Core.Logging;
 using Debug = UnityEngine.Debug;
 
 namespace YARG.Networking.Abstraction.Handlers
@@ -88,7 +89,7 @@ namespace YARG.Networking.Abstraction.Handlers
         {
             if (MinimumLevel <= LogLevel.Warning)
             {
-                Debug.LogWarning(FormatMessage(message));
+                YargLogger.LogWarning(FormatMessage(message));
             }
         }
         
@@ -99,7 +100,7 @@ namespace YARG.Networking.Abstraction.Handlers
         {
             if (MinimumLevel <= LogLevel.Warning)
             {
-                Debug.LogWarning(FormatMessage(string.Format(format, args)));
+                YargLogger.LogWarning(FormatMessage(string.Format(format, args)));
             }
         }
         
@@ -108,7 +109,7 @@ namespace YARG.Networking.Abstraction.Handlers
         /// </summary>
         public static void Error(string message)
         {
-            Debug.LogError(FormatMessage(message));
+            YargLogger.LogError(FormatMessage(message));
         }
         
         /// <summary>
@@ -116,7 +117,7 @@ namespace YARG.Networking.Abstraction.Handlers
         /// </summary>
         public static void Error(string format, params object[] args)
         {
-            Debug.LogError(FormatMessage(string.Format(format, args)));
+            YargLogger.LogError(FormatMessage(string.Format(format, args)));
         }
         
         /// <summary>
@@ -126,18 +127,18 @@ namespace YARG.Networking.Abstraction.Handlers
         {
             if (string.IsNullOrEmpty(context))
             {
-                Debug.LogError($"{LOG_PREFIX} Exception: {ex.Message}");
+                YargLogger.LogError($"{LOG_PREFIX} Exception: {ex.Message}");
             }
             else
             {
-                Debug.LogError($"{LOG_PREFIX} {context}: {ex.Message}");
+                YargLogger.LogError($"{LOG_PREFIX} {context}: {ex.Message}");
             }
-            Debug.LogException(ex);
+            YargLogger.LogException(ex, context ?? "NetworkLogger");
         }
         
         private static void LogInternal(string message, LogLevel level)
         {
-            Debug.Log(FormatMessage(message));
+            YargLogger.LogInfo(FormatMessage(message));
         }
         
         private static string FormatMessage(string message)

@@ -7,6 +7,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
 using YARG.Core;
+using YARG.Core.Logging;
 using YARG.Helpers;
 using YARG.Helpers.Extensions;
 using YARG.Menu;
@@ -231,6 +232,15 @@ namespace YARG.Menu.Multiplayer
             }
 
             ClearLobby();
+            
+            // ClearLobby already calls ShowMode which schedules a layout rebuild,
+            // but we do an extra one here just to be safe on first load
+        }
+        
+        private System.Collections.IEnumerator RebuildLayoutEndOfFrame()
+        {
+            yield return new WaitForEndOfFrame();
+            ForceLayoutRebuild();
         }
 
         private void RegisterButtonListeners()
@@ -1250,7 +1260,7 @@ namespace YARG.Menu.Multiplayer
 
             var preset = _activePreset;
             string presetName = string.IsNullOrWhiteSpace(preset.lobbyName) ? "My Lobby" : preset.lobbyName;
-            const string confirmText = "DELETE";
+            string confirmText = presetName;
 
             void PerformDelete()
             {
@@ -1697,6 +1707,48 @@ namespace YARG.Menu.Multiplayer
 
             UpdatePasswordContainersVisibility();
             UpdateHostedLobbyPasswordVisibility();
+            
+            // Force layout rebuild to fix Content Size Fitter positioning on first frame
+            // Schedule it for next frame since layout needs to process after SetActive calls
+            StartCoroutine(ForceLayoutRebuildDelayed());
+        }
+        
+        /// <summary>
+        /// Forces a layout rebuild on all layout groups in this sidebar.
+        /// Call this after changing content that affects Content Size Fitter elements.
+        /// </summary>
+        private void ForceLayoutRebuild()
+        {
+            // Force canvas to update first, then rebuild layouts from innermost to outermost
+            Canvas.ForceUpdateCanvases();
+            
+            // Rebuild all child ContentSizeFitters first (bottom-up)
+            var contentSizeFitters = GetComponentsInChildren<ContentSizeFitter>(true);
+            foreach (var csf in contentSizeFitters)
+            {
+                if (csf.transform is RectTransform rt)
+                {
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(rt);
+                }
+            }
+            
+            // Then rebuild from the root
+            var rectTransform = transform as RectTransform;
+            if (rectTransform != null)
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
+            }
+        }
+        
+        private System.Collections.IEnumerator ForceLayoutRebuildDelayed()
+        {
+            // Wait for Unity to process the SetActive calls
+            yield return null;
+            ForceLayoutRebuild();
+            
+            // Do another rebuild at end of frame for stubborn layouts
+            yield return new WaitForEndOfFrame();
+            ForceLayoutRebuild();
         }
 
         private void EnsureContainerHierarchyActive(GameObject container)
@@ -1849,23 +1901,31 @@ namespace YARG.Menu.Multiplayer
         /// </summary>
         private void SubmitConnectForm()
         {
+            YargLogger.LogInfo("[LobbyBrowserSidebar] SubmitConnectForm called");
+            YargLogger.LogInfo($"[LobbyBrowserSidebar] _lobbyCodeInput is null: {_lobbyCodeInput == null}");
+            
             string lobbyCode = _lobbyCodeInput != null ? _lobbyCodeInput.text?.Trim().ToUpperInvariant() : string.Empty;
             string endpointInput = _directConnectAddressInput != null ? _directConnectAddressInput.text?.Trim() : string.Empty;
+            
+            YargLogger.LogInfo($"[LobbyBrowserSidebar] lobbyCode='{lobbyCode}', endpointInput='{endpointInput}'");
             
             // Priority: Lobby code first (if it has content), then direct IP
             if (!string.IsNullOrEmpty(lobbyCode))
             {
                 // User entered a lobby code - use that
+                YargLogger.LogInfo($"[LobbyBrowserSidebar] Submitting lobby code: {lobbyCode}");
                 SubmitLobbyCode();
             }
             else if (!string.IsNullOrEmpty(endpointInput))
             {
                 // User entered an IP/address - use direct connect
+                YargLogger.LogInfo($"[LobbyBrowserSidebar] Submitting direct connect: {endpointInput}");
                 SubmitDirectConnectForm();
             }
             else
             {
                 // Neither field has content - show error
+                YargLogger.LogWarning("[LobbyBrowserSidebar] No code or endpoint entered");
                 ToastManager.ToastError("Enter a lobby code or IP address to connect.");
                 FocusInput(_lobbyCodeInput ?? _directConnectAddressInput);
             }
@@ -1891,7 +1951,10 @@ namespace YARG.Menu.Multiplayer
         
         private void SubmitLobbyCode()
         {
+            YargLogger.LogInfo("[LobbyBrowserSidebar] SubmitLobbyCode called");
             string code = _lobbyCodeInput != null ? _lobbyCodeInput.text?.Trim().ToUpperInvariant() : string.Empty;
+            
+            YargLogger.LogInfo($"[LobbyBrowserSidebar] Code value: '{code}', length: {code?.Length ?? 0}");
             
             if (string.IsNullOrEmpty(code))
             {
@@ -1907,8 +1970,10 @@ namespace YARG.Menu.Multiplayer
                 return;
             }
             
+            YargLogger.LogInfo("[LobbyBrowserSidebar] Code validated, invoking JoinByCodeSubmitted event");
             ToastManager.ToastInformation(ZString.Format("Looking up lobby code {0}...", code));
             JoinByCodeSubmitted?.Invoke(code);
+            YargLogger.LogInfo("[LobbyBrowserSidebar] JoinByCodeSubmitted event invoked");
         }
         
         /// <summary>

@@ -64,12 +64,27 @@ namespace YARG.Networking.Settings
                 try
                 {
                     var json = File.ReadAllText(_settingsPath);
+                    Debug.Log($"[NetworkSettingsStore] Loading from {_settingsPath}:\n{json}");
                     _settings = JsonUtility.FromJson<NetworkGlobalSettings>(json);
+                    
+                    // Log what was loaded BEFORE EnsureDefaults
+                    if (_settings?.introducers != null)
+                    {
+                        Debug.Log($"[NetworkSettingsStore] Loaded {_settings.introducers.Count} introducers from file (before EnsureDefaults):");
+                        foreach (var intro in _settings.introducers)
+                        {
+                            Debug.Log($"  - {intro.displayName} ({intro.url}) [enabled={intro.enabled}, id={intro.id}]");
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
                     Debug.LogWarning($"[NetworkSettingsStore] Failed to load settings: {ex.Message}");
                 }
+            }
+            else
+            {
+                Debug.Log($"[NetworkSettingsStore] Settings file not found at {_settingsPath}, will create defaults");
             }
 
             if (_settings == null)
@@ -81,7 +96,7 @@ namespace YARG.Networking.Settings
             
             // Log loaded introducers for debugging
             var enabledIntroducers = _settings.EnabledIntroducers;
-            Debug.Log($"[NetworkSettingsStore] Loaded {_settings.introducers?.Count ?? 0} introducers, {enabledIntroducers?.Count ?? 0} enabled:");
+            Debug.Log($"[NetworkSettingsStore] After EnsureDefaults - {_settings.introducers?.Count ?? 0} introducers, {enabledIntroducers?.Count ?? 0} enabled:");
             if (_settings.introducers != null)
             {
                 foreach (var intro in _settings.introducers)
@@ -100,6 +115,7 @@ namespace YARG.Networking.Settings
             {
                 _settings.EnsureDefaults();
                 var json = JsonUtility.ToJson(_settings, true);
+                Debug.Log($"[NetworkSettingsStore] Saving to {_settingsPath}:\n{json}");
                 File.WriteAllText(_settingsPath, json);
             }
             catch (Exception ex)
@@ -138,11 +154,14 @@ namespace YARG.Networking.Settings
         /// </summary>
         public bool SetIntroducerEnabled(string id, bool enabled)
         {
+            Debug.Log($"[NetworkSettingsStore] SetIntroducerEnabled called: id={id}, enabled={enabled}");
             if (_settings.SetIntroducerEnabled(id, enabled))
             {
+                Debug.Log($"[NetworkSettingsStore] Introducer {id} enabled state changed to {enabled}, saving...");
                 Save();
                 return true;
             }
+            Debug.LogWarning($"[NetworkSettingsStore] SetIntroducerEnabled failed for id={id}");
             return false;
         }
 

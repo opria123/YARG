@@ -442,6 +442,44 @@ namespace YARG.Networking.Abstraction
         void BroadcastBandAssignments();
 
         #endregion
+        
+        #region NAT Punch
+        
+        /// <summary>
+        /// Gets the local port the transport is bound to (for NAT punch registration).
+        /// </summary>
+        int LocalTransportPort { get; }
+        
+        /// <summary>
+        /// Event fired when NAT punch succeeds on this transport.
+        /// Parameters: targetEndPoint, addressType, token
+        /// </summary>
+        event Action<System.Net.IPEndPoint, LiteNetLib.NatAddressType, string> OnNatPunchSuccess;
+        
+        /// <summary>
+        /// Sends a NAT introduction request to a punch server.
+        /// Use this to initiate NAT punch-through to a host.
+        /// </summary>
+        /// <param name="punchServerHost">The hostname or IP of the punch server</param>
+        /// <param name="punchServerPort">The UDP port of the punch server</param>
+        /// <param name="token">The punch token (identifying the session)</param>
+        void SendNatIntroduceRequest(string punchServerHost, int punchServerPort, string token);
+        
+        /// <summary>
+        /// Starts the transport layer without connecting to a server.
+        /// Used for NAT punch-through - the client needs an active socket to receive punch messages.
+        /// Call this before InitiateNatPunchAsync().
+        /// </summary>
+        /// <returns>True if transport started successfully, false otherwise.</returns>
+        bool StartTransportForNatPunch();
+        
+        /// <summary>
+        /// Stops the transport layer if it was started for NAT punch but punch failed.
+        /// This allows JoinLobby to start fresh.
+        /// </summary>
+        void StopTransport();
+        
+        #endregion
 
         #region Lifecycle
 

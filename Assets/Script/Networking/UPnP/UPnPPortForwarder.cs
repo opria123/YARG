@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
+using YARG.Core.Logging;
 using YARG.Net.Utilities.UPnP;
 
 namespace YARG.Networking.UPnP
@@ -19,6 +20,7 @@ namespace YARG.Networking.UPnP
         private PortMappingProtocol _mappedProtocol;
         private bool _hasMappedPort;
         private bool _disposed;
+        private static bool _loggerConfigured;
 
         /// <summary>
         /// Gets whether a UPnP-capable gateway was discovered.
@@ -42,7 +44,15 @@ namespace YARG.Networking.UPnP
 
         public UPnPPortForwarder()
         {
-            _client = new UPnPClient(TimeSpan.FromSeconds(3));
+            // Use a longer timeout (5 seconds) for better router compatibility
+            _client = new UPnPClient(TimeSpan.FromSeconds(5));
+            
+            // Configure the UPnP discovery logger to use YargLogger
+            if (!_loggerConfigured)
+            {
+                UPnPClient.SetLogger(msg => YargLogger.LogInfo($"[UPnP] {msg}"));
+                _loggerConfigured = true;
+            }
         }
 
         /// <summary>
@@ -60,18 +70,18 @@ namespace YARG.Networking.UPnP
                 
                 if (result)
                 {
-                    Debug.Log($"[UPnP] Discovered gateway: {_client.Device?.FriendlyName}");
+                    YargLogger.LogInfo($"[UPnP] Discovered gateway: {_client.Device?.FriendlyName}");
                 }
                 else
                 {
-                    Debug.Log("[UPnP] No compatible gateway found");
+                    YargLogger.LogInfo("[UPnP] No compatible gateway found");
                 }
 
                 return result;
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[UPnP] Discovery failed: {ex.Message}");
+                YargLogger.LogWarning($"[UPnP] Discovery failed: {ex.Message}");
                 return false;
             }
         }
@@ -89,7 +99,7 @@ namespace YARG.Networking.UPnP
 
             if (!_client.IsAvailable)
             {
-                Debug.LogWarning("[UPnP] No gateway available. Call DiscoverAsync first.");
+                YargLogger.LogWarning("[UPnP] No gateway available. Call DiscoverAsync first.");
                 return false;
             }
 
@@ -114,12 +124,12 @@ namespace YARG.Networking.UPnP
                 _mappedPort = port;
                 _mappedProtocol = PortMappingProtocol.UDP;
                 _hasMappedPort = true;
-                Debug.Log($"[UPnP] Successfully opened UDP port {port}");
+                YargLogger.LogInfo($"[UPnP] Successfully opened UDP port {port}");
                 return true;
             }
             else
             {
-                Debug.LogWarning($"[UPnP] Failed to open port {port}: {result.Error}");
+                YargLogger.LogWarning($"[UPnP] Failed to open port {port}: {result.Error}");
                 return false;
             }
         }

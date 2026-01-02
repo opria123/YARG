@@ -217,7 +217,7 @@ namespace YARG.Networking.Gameplay
                 restrictions.Add("No-Fail Mode (scores not submitted)");
 
             if (_activePreset.SharedSongsOnly)
-                restrictions.Add("Shared Songs Only");
+                restrictions.Add("Songs Support All Instruments");
 
             if (!_activePreset.AllowModifiers)
                 restrictions.Add("Modifiers Disabled");

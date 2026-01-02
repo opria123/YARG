@@ -5,6 +5,7 @@ using System.Threading;
 using UnityEngine;
 using TMPro;
 using YARG.Core.Input;
+using YARG.Core.Logging;
 using YARG.Menu.ListMenu;
 using YARG.Menu.Navigation;
 using YARG.Menu.Data;
@@ -171,6 +172,11 @@ namespace YARG.Menu.Multiplayer
                 _sidebar.CreateLobbySubmitted += OnCreateLobbySubmitted;
                 _sidebar.DirectConnectSubmitted += OnDirectConnectSubmitted;
                 _sidebar.JoinByCodeSubmitted += OnJoinByCodeSubmitted;
+                YargLogger.LogInfo("[LobbyBrowserMenu] Sidebar event subscriptions complete");
+            }
+            else
+            {
+                YargLogger.LogWarning("[LobbyBrowserMenu] _sidebar is null - cannot subscribe to events");
             }
 
             RefreshList(false);
@@ -616,9 +622,11 @@ namespace YARG.Menu.Multiplayer
                 // Create a SessionPreset for the SessionLifecycleManager
                 var sessionPreset = CreateSessionPresetFromHosted(preset);
                 
-                // Get the port and lobby ID
-                int port = NetworkService?.DefaultPort ?? 7777;
+                // Get the port from the preset (or fallback to default) and create lobby ID
+                int port = sessionPreset.port > 0 ? sessionPreset.port : (NetworkService?.DefaultPort ?? 7777);
                 Guid lobbyId = Guid.NewGuid();
+                
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Starting session with port {port} (preset.port={sessionPreset.port})");
                 
                 // Update dialog status
                 if (dialog != null)
@@ -628,6 +636,21 @@ namespace YARG.Menu.Multiplayer
                 
                 // Start the session lifecycle (UPnP for Lobby mode, nothing for Server mode)
                 string lobbyCode = null;
+                if (SessionLifecycleManager.Instance == null)
+                {
+                    Debug.LogError("[LobbyBrowserMenu] CRITICAL: SessionLifecycleManager.Instance is null! " +
+                        "This indicates networking was not initialized properly. " +
+                        $"NetworkManagersBootstrap.IsInitialized={NetworkManagersBootstrap.IsInitialized}");
+                    
+                    if (data.SessionType == SessionType.Lobby)
+                    {
+                        DialogManager.Instance?.ClearDialog();
+                        ToastManager.ToastError("Networking not initialized. Please restart the game.");
+                        _isCreatingLobby = false;
+                        return;
+                    }
+                }
+                
                 if (SessionLifecycleManager.Instance != null)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -656,9 +679,17 @@ namespace YARG.Menu.Multiplayer
                             Debug.Log($"[LobbyBrowserMenu] Lobby code generated: {lobbyCode}");
                         }
                         
+                        // Log network setup info (for debugging), but don't show toast for normal UPnP failure
+                        // since NAT punch-through should handle most cases
                         if (data.SessionType == SessionType.Lobby && !result.UPnPSuccess)
                         {
-                            Debug.LogWarning("[LobbyBrowserMenu] UPnP failed - players may not be able to connect unless port is manually forwarded");
+                            // Only log - NAT punch-through is the primary connection method now
+                            Debug.LogWarning($"[LobbyBrowserMenu] Network setup warning: {result.Message}");
+                            // Only show toast for truly problematic cases (no public IP at all)
+                            if (result.Message?.Contains("Could not determine public IP") == true)
+                            {
+                                ToastManager.ToastWarning("Could not determine public IP. Only local network players can connect.");
+                            }
                         }
                     }
                 }
@@ -670,6 +701,10 @@ namespace YARG.Menu.Multiplayer
                 }
                 ct.ThrowIfCancellationRequested();
 
+                // IMPORTANT: Set the server port BEFORE creating the lobby
+                // This ensures the NetworkService uses the correct port from the preset
+                NetworkService?.SetServerPort(port);
+
                 var password = preset.PrivacyMode == LobbyPrivacyMode.Private ? preset.password ?? string.Empty : string.Empty;
                 var lobby = NetworkService?.CreateLobby(preset.lobbyName, preset.maxPlayers, preset.PrivacyMode, preset.SessionType, password);
                 
@@ -679,11 +714,31 @@ namespace YARG.Menu.Multiplayer
                     lobby.LobbyCode = lobbyCode;
                 }
                 
-                // Show success toast with code if available
-                if (!string.IsNullOrEmpty(lobbyCode))
+                // IMPORTANT: Start NAT punch keepalive NOW that the transport is running.
+                // This sends UDP packets to the punch server to create NAT mapping so clients can connect.
+                if (lobby != null)
                 {
-                    ToastManager.ToastInformation($"Lobby created! Code: {lobbyCode}");
+                    SessionLifecycleManager.Instance?.StartPunchKeepalive();
                 }
+                
+                // CRITICAL: Close the dialog AFTER creating the lobby but BEFORE navigating!
+                // Dialog.OnDisable pops from the navigation stack, and we need to ensure
+                // the stack is in the correct state before pushing LobbyRoomMenu's scheme.
+                if (DialogManager.Instance != null && DialogManager.Instance.IsDialogShowing)
+                {
+                    DialogManager.Instance.ClearDialog();
+                    dialog = null;  // Mark as cleared so finally doesn't try again
+                }
+                
+                // Navigate to lobby room explicitly (don't rely solely on HandleLobbyCreated callback)
+                // This ensures navigation happens even if there's a timing issue with the event
+                if (lobby != null && MenuManager.Instance != null)
+                {
+                    Debug.Log($"[LobbyBrowserMenu] Lobby created, navigating to LobbyRoom (explicit)");
+                    MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+                }
+                
+                // Lobby code is displayed in the LobbyRoom UI - no need for toast
             }
             catch (OperationCanceledException)
             {
@@ -805,6 +860,7 @@ namespace YARG.Menu.Multiplayer
         
         private void OnJoinByCodeSubmitted(string code)
         {
+            YargLogger.LogInfo($"[LobbyBrowserMenu] OnJoinByCodeSubmitted received code: {code}");
             // Fire and forget async lookup
             JoinByCodeAsync(code).Forget();
         }
@@ -813,53 +869,80 @@ namespace YARG.Menu.Multiplayer
         {
             try
             {
-                Debug.Log($"[LobbyBrowserMenu] Looking up lobby code: {code}");
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Looking up lobby code: {code}");
                 
                 if (SessionLifecycleManager.Instance == null)
                 {
+                    YargLogger.LogError("[LobbyBrowserMenu] SessionLifecycleManager.Instance is null!");
                     ToastManager.ToastError("Networking not initialized");
                     return;
                 }
                 
+                YargLogger.LogInfo("[LobbyBrowserMenu] Calling LookupLobbyCodeAsync...");
                 var result = await SessionLifecycleManager.Instance.LookupLobbyCodeAsync(code);
+                YargLogger.LogInfo($"[LobbyBrowserMenu] LookupLobbyCodeAsync returned: IsSuccess={(result?.IsSuccess ?? false)}, Error={result?.Error ?? "null"}");
                 
                 if (result == null || !result.IsSuccess || result.Lobby == null)
                 {
                     string errorMsg = result?.Error ?? "Invalid or expired code";
-                    Debug.LogWarning($"[LobbyBrowserMenu] Code lookup failed: {errorMsg}");
+                    YargLogger.LogFormatWarning("[LobbyBrowserMenu] Code lookup failed: {0}", errorMsg);
                     ToastManager.ToastError(errorMsg);
                     return;
                 }
                 
                 var lobby = result.Lobby;
-                Debug.Log($"[LobbyBrowserMenu] Found lobby: {lobby.LobbyName} at {lobby.Address}:{lobby.Port} (hasPassword={lobby.HasPassword})");
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Found lobby: {lobby.LobbyName} at {lobby.Address}:{lobby.Port} (hasPassword={lobby.HasPassword})");
                 
                 string endpoint = $"{lobby.Address}:{lobby.Port}";
                 
                 // If lobby requires a password, prompt the user
                 if (lobby.HasPassword)
                 {
-                    Debug.Log($"[LobbyBrowserMenu] Lobby requires password, showing dialog");
-                    ShowPasswordDialogForCodeJoin(lobby.LobbyName, endpoint);
+                    YargLogger.LogInfo("[LobbyBrowserMenu] Lobby requires password, showing dialog");
+                    ShowPasswordDialogForCodeJoin(lobby.LobbyName, endpoint, lobby.LobbyId, result.IntroducerUrl);
                     return;
                 }
                 
                 ToastManager.ToastInformation($"Connecting to {lobby.LobbyName}...");
                 
+                // Try NAT punch-through first (if we have the introducer URL)
+                string connectEndpoint = endpoint;
+                if (!string.IsNullOrEmpty(result.IntroducerUrl))
+                {
+                    YargLogger.LogInfo($"[LobbyBrowserMenu] Attempting NAT punch-through via {result.IntroducerUrl}...");
+                    ToastManager.ToastInformation("Establishing connection...");
+                    
+                    var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
+                        lobby.LobbyId, result.IntroducerUrl, 5000);
+                    
+                    if (punchedEndpoint != null)
+                    {
+                        connectEndpoint = $"{punchedEndpoint.Address}:{punchedEndpoint.Port}";
+                        YargLogger.LogInfo($"[LobbyBrowserMenu] NAT punch succeeded! Connecting to {connectEndpoint}");
+                        ToastManager.ToastInformation("NAT punch succeeded!");
+                    }
+                    else
+                    {
+                        YargLogger.LogWarning("[LobbyBrowserMenu] NAT punch failed, trying direct connection...");
+                    }
+                }
+                
                 // Join via the networking service
                 if (NetworkService != null)
                 {
-                    NetworkService.JoinLobby(endpoint, string.Empty);
+                    YargLogger.LogInfo($"[LobbyBrowserMenu] Joining lobby at {connectEndpoint}");
+                    NetworkService.JoinLobby(connectEndpoint, string.Empty);
                     _sidebar?.ClearLobbyCodeInput();
                 }
                 else
                 {
+                    YargLogger.LogError("[LobbyBrowserMenu] NetworkService is null!");
                     ToastManager.ToastError("Networking service not available");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[LobbyBrowserMenu] Error joining by code: {ex.Message}");
+                YargLogger.LogException(ex, "[LobbyBrowserMenu] Error joining by code");
                 ToastManager.ToastError($"Error: {ex.Message}");
             }
         }
@@ -867,7 +950,7 @@ namespace YARG.Menu.Multiplayer
         /// <summary>
         /// Shows a password dialog for joining a lobby via code.
         /// </summary>
-        private void ShowPasswordDialogForCodeJoin(string lobbyName, string endpoint)
+        private void ShowPasswordDialogForCodeJoin(string lobbyName, string endpoint, Guid lobbyId, string? introducerUrl)
         {
             if (DialogManager.Instance == null)
             {
@@ -884,15 +967,8 @@ namespace YARG.Menu.Multiplayer
                 Debug.Log($"[LobbyBrowserMenu] Joining {lobbyName} at {endpoint} with password");
                 ToastManager.ToastInformation($"Connecting to {lobbyName}...");
                 
-                if (NetworkService != null)
-                {
-                    NetworkService.JoinLobby(endpoint, submitted);
-                    _sidebar?.ClearLobbyCodeInput();
-                }
-                else
-                {
-                    ToastManager.ToastError("Networking service not available");
-                }
+                // Try NAT punch then connect with password
+                JoinWithPasswordAndPunchAsync(lobbyName, endpoint, submitted, lobbyId, introducerUrl).Forget();
             });
 
             dialog.AllowEmpty = false;
@@ -908,6 +984,53 @@ namespace YARG.Menu.Multiplayer
                     placeholderText.text = "Enter lobby password";
                 inputField.Select();
                 inputField.ActivateInputField();
+            }
+        }
+        
+        /// <summary>
+        /// Joins a lobby with password, trying NAT punch first.
+        /// </summary>
+        private async UniTaskVoid JoinWithPasswordAndPunchAsync(string lobbyName, string endpoint, string password, Guid lobbyId, string? introducerUrl)
+        {
+            try
+            {
+                string connectEndpoint = endpoint;
+                
+                // Try NAT punch-through first if we have the introducer URL
+                if (!string.IsNullOrEmpty(introducerUrl) && SessionLifecycleManager.Instance != null)
+                {
+                    YargLogger.LogInfo($"[LobbyBrowserMenu] Attempting NAT punch-through via {introducerUrl}...");
+                    ToastManager.ToastInformation("Establishing connection...");
+                    
+                    var punchedEndpoint = await SessionLifecycleManager.Instance.InitiateNatPunchAsync(
+                        lobbyId, introducerUrl, 5000);
+                    
+                    if (punchedEndpoint != null)
+                    {
+                        connectEndpoint = $"{punchedEndpoint.Address}:{punchedEndpoint.Port}";
+                        YargLogger.LogInfo($"[LobbyBrowserMenu] NAT punch succeeded! Connecting to {connectEndpoint}");
+                        ToastManager.ToastInformation("NAT punch succeeded!");
+                    }
+                    else
+                    {
+                        YargLogger.LogWarning("[LobbyBrowserMenu] NAT punch failed, trying direct connection...");
+                    }
+                }
+                
+                if (NetworkService != null)
+                {
+                    NetworkService.JoinLobby(connectEndpoint, password);
+                    _sidebar?.ClearLobbyCodeInput();
+                }
+                else
+                {
+                    ToastManager.ToastError("Networking service not available");
+                }
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogException(ex, "[LobbyBrowserMenu] Error joining with password");
+                ToastManager.ToastError($"Error: {ex.Message}");
             }
         }
 
@@ -1095,13 +1218,19 @@ namespace YARG.Menu.Multiplayer
 
         private void HandleLobbyJoined(LobbyInfo lobby)
         {
-            Debug.Log($"[LobbyBrowserMenu] Lobby joined: {lobby?.LobbyName}, navigating to LobbyRoom");
+            bool isHosting = NetworkService?.IsHosting ?? false;
+            YargLogger.LogInfo($"[LobbyBrowserMenu] HandleLobbyJoined: lobby={lobby?.LobbyName}, IsHosting={isHosting}, MenuManager={MenuManager.Instance != null}");
             
             // Navigate to the lobby room when joining
-            if (MenuManager.Instance != null && !NetworkService.IsHosting)
+            if (MenuManager.Instance != null && !isHosting)
             {
-                // Only navigate for clients - hosts already navigate via HandleLobbyCreated
+                // Only navigate for clients - hosts already navigate via CreateLobbyAsync/StartHostedLobbyAsync
+                YargLogger.LogInfo("[LobbyBrowserMenu] Navigating to LobbyRoom for client");
                 MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
+            }
+            else
+            {
+                YargLogger.LogInfo($"[LobbyBrowserMenu] NOT navigating: MenuManager={MenuManager.Instance != null}, IsHosting={isHosting}");
             }
             
             // Handle password saving (original logic)
@@ -1794,9 +1923,11 @@ namespace YARG.Menu.Multiplayer
                 // Create a SessionPreset for the SessionLifecycleManager
                 var sessionPreset = CreateSessionPresetFromHosted(storedPreset);
                 
-                // Get the port and lobby ID
-                int port = NetworkService?.DefaultPort ?? 7777;
+                // Get the port from the preset (or fallback to default) and create lobby ID
+                int port = sessionPreset.port > 0 ? sessionPreset.port : (NetworkService?.DefaultPort ?? 7777);
                 Guid lobbyId = Guid.NewGuid();
+                
+                YargLogger.LogInfo($"[LobbyBrowserMenu] Starting hosted session with port {port} (preset.port={sessionPreset.port})");
                 
                 // Update dialog status
                 if (dialog != null)
@@ -1806,6 +1937,20 @@ namespace YARG.Menu.Multiplayer
                 
                 // Start the session lifecycle (UPnP for Lobby mode, nothing for Server mode)
                 string lobbyCode = null;
+                if (SessionLifecycleManager.Instance == null)
+                {
+                    Debug.LogError("[LobbyBrowserMenu] CRITICAL: SessionLifecycleManager.Instance is null! " +
+                        "This indicates networking was not initialized properly. " +
+                        $"NetworkManagersBootstrap.IsInitialized={NetworkManagersBootstrap.IsInitialized}");
+                    
+                    if (storedPreset.SessionType == SessionType.Lobby)
+                    {
+                        DialogManager.Instance?.ClearDialog();
+                        ToastManager.ToastError("Networking not initialized. Please restart the game.");
+                        return;
+                    }
+                }
+                
                 if (SessionLifecycleManager.Instance != null)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -1831,9 +1976,17 @@ namespace YARG.Menu.Multiplayer
                             Debug.Log($"[LobbyBrowserMenu] Lobby code generated: {lobbyCode}");
                         }
                         
+                        // Log network setup info (for debugging), but don't show toast for normal UPnP failure
+                        // since NAT punch-through should handle most cases
                         if (storedPreset.SessionType == SessionType.Lobby && !result.UPnPSuccess)
                         {
-                            Debug.LogWarning("[LobbyBrowserMenu] UPnP failed - players may not be able to connect unless port is manually forwarded");
+                            // Only log - NAT punch-through is the primary connection method now
+                            Debug.LogWarning($"[LobbyBrowserMenu] Network setup warning: {result.Message}");
+                            // Only show toast for truly problematic cases (no public IP at all)
+                            if (result.Message?.Contains("Could not determine public IP") == true)
+                            {
+                                ToastManager.ToastWarning("Could not determine public IP. Only local network players can connect.");
+                            }
                         }
                     }
                 }
@@ -1845,6 +1998,10 @@ namespace YARG.Menu.Multiplayer
                 }
                 ct.ThrowIfCancellationRequested();
 
+                // IMPORTANT: Set the server port BEFORE creating the lobby
+                // This ensures the NetworkService uses the correct port from the preset
+                NetworkService?.SetServerPort(port);
+
                 // Create the lobby first (this triggers OnLobbyCreated event, but we'll navigate manually)
                 var lobby = NetworkService?.CreateLobby(storedPreset.lobbyName, storedPreset.maxPlayers, storedPreset.PrivacyMode, storedPreset.SessionType, storedPreset.password ?? string.Empty);
                 
@@ -1853,6 +2010,10 @@ namespace YARG.Menu.Multiplayer
                 if (lobby != null)
                 {
                     lobby.LobbyCode = lobbyCode; // null for Server, valid code for Lobby
+                    
+                    // IMPORTANT: Start NAT punch keepalive NOW that the transport is running.
+                    // This sends UDP packets to the punch server to create NAT mapping so clients can connect.
+                    SessionLifecycleManager.Instance?.StartPunchKeepalive();
                 }
                 
                 // CRITICAL: Close the dialog AFTER creating the lobby but BEFORE navigating!
@@ -1872,11 +2033,7 @@ namespace YARG.Menu.Multiplayer
                     MenuManager.Instance.PushMenu(MenuManager.Menu.LobbyRoom);
                 }
                 
-                // Show success toast with code if available
-                if (!string.IsNullOrEmpty(lobbyCode))
-                {
-                    ToastManager.ToastInformation($"Lobby started! Code: {lobbyCode}");
-                }
+                // Lobby code is displayed in the LobbyRoom UI - no need for toast
             }
             catch (OperationCanceledException)
             {

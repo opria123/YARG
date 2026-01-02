@@ -42,21 +42,20 @@ namespace YARG.Menu.Multiplayer
         [SerializeField] private TextMeshProUGUI connectionInfoText;
         [SerializeField] private RectTransform hostAddressPanelParent;
         [SerializeField] private GameObject hostAddressPanel;
-        [SerializeField] private GameObject lobbyCodeRow;
-        [SerializeField] private TextMeshProUGUI lobbyCodeValueText;
-        [SerializeField] private Button lobbyCodeVisibilityToggleButton;
-        [SerializeField] private TextMeshProUGUI lobbyCodeVisibilityToggleLabel;
-        [SerializeField] private Button lobbyCodeCopyButton;
+        [Header("Share Info Row (Lobby Code / WAN Address)")]
+        [SerializeField] private GameObject shareInfoRow;
+        [SerializeField] private TextMeshProUGUI shareInfoLabelText;
+        [SerializeField] private TextMeshProUGUI shareInfoValueText;
+        [SerializeField] private Button shareInfoVisibilityToggleButton;
+        [SerializeField] private TextMeshProUGUI shareInfoVisibilityToggleLabel;
+        [SerializeField] private Button shareInfoCopyButton;
+        
+        [Header("LAN Address Row")]
         [SerializeField] private GameObject lanAddressRow;
         [SerializeField] private TextMeshProUGUI lanAddressValueText;
         [SerializeField] private Button lanVisibilityToggleButton;
         [SerializeField] private TextMeshProUGUI lanVisibilityToggleLabel;
         [SerializeField] private Button lanCopyButton;
-        [SerializeField] private GameObject wanAddressRow;
-        [SerializeField] private TextMeshProUGUI wanAddressValueText;
-        [SerializeField] private Button wanVisibilityToggleButton;
-        [SerializeField] private TextMeshProUGUI wanVisibilityToggleLabel;
-        [SerializeField] private Button wanCopyButton;
         [Header("Visibility Icons")]
         [SerializeField] private Sprite visibilityVisibleSprite;
         [SerializeField] private Sprite visibilityHiddenSprite;
@@ -82,12 +81,11 @@ namespace YARG.Menu.Multiplayer
         private HashSet<NetworkPlayerData> _instrumentChangeSubscriptions = new HashSet<NetworkPlayerData>();
         private string _defaultWaitingForHostText;
         private bool _hostPanelListenersBound;
-        private string _lobbyCode = string.Empty;
+        private string _shareInfoValue = string.Empty; // Either lobby code or WAN address
         private string _lanAddress = string.Empty;
-        private string _wanAddress = string.Empty;
-        private bool _lobbyCodeVisible;
+        private bool _shareInfoVisible;
         private bool _lanVisible;
-        private bool _wanVisible;
+        private bool _isLobbyMode; // True = lobby code, False = WAN address
         private bool _hostIsBrowsingSongs = false;
         private bool _navigationSchemePushed = false;
 
@@ -151,12 +149,11 @@ namespace YARG.Menu.Multiplayer
             
             // Reset cached address values for new session
             // This ensures stale values from previous sessions don't persist
-            _lobbyCode = string.Empty;
+            _shareInfoValue = string.Empty;
             _lanAddress = string.Empty;
-            _wanAddress = string.Empty;
-            _lobbyCodeVisible = false;
+            _shareInfoVisible = false;
             _lanVisible = false;
-            _wanVisible = false;
+            _isLobbyMode = false;
             
             var networkingService = NetworkingServiceFactory.Instance;
             if (networkingService != null)
@@ -327,14 +324,14 @@ namespace YARG.Menu.Multiplayer
                 }
             }
 
+            if (shareInfoVisibilityToggleButton != null)
+                shareInfoVisibilityToggleButton.onClick.RemoveListener(ToggleShareInfoVisibility);
+            if (shareInfoCopyButton != null)
+                shareInfoCopyButton.onClick.RemoveListener(CopyShareInfo);
             if (lanVisibilityToggleButton != null)
                 lanVisibilityToggleButton.onClick.RemoveListener(ToggleLanVisibility);
             if (lanCopyButton != null)
                 lanCopyButton.onClick.RemoveListener(CopyLanAddress);
-            if (wanVisibilityToggleButton != null)
-                wanVisibilityToggleButton.onClick.RemoveListener(ToggleWanVisibility);
-            if (wanCopyButton != null)
-                wanCopyButton.onClick.RemoveListener(CopyWanAddress);
         }
         
         private void OnApplicationQuit()
@@ -364,16 +361,15 @@ namespace YARG.Menu.Multiplayer
             
             var entries = new List<NavigationScheme.Entry>
             {
-                NavigationScheme.Entry.NavigateSelect,
                 NavigationScheme.Entry.NavigateUp,
-                NavigationScheme.Entry.NavigateDown,
-                new NavigationScheme.Entry(MenuAction.Red, "Leave Lobby", OnLeaveLobbyClicked)
+                NavigationScheme.Entry.NavigateDown
             };
             
             if (isHost)
             {
-                entries.Add(new NavigationScheme.Entry(MenuAction.Yellow, "Browse Songs", OnBrowseSongsClicked));
+                entries.Add(new NavigationScheme.Entry(MenuAction.Green, "Browse Songs", OnBrowseSongsClicked));
             }
+            entries.Add(new NavigationScheme.Entry(MenuAction.Red, "Leave Lobby", OnLeaveLobbyClicked));
             
             // Don't use PopCallback - back navigation should be disabled in lobby
             // User must use the explicit "Leave Lobby" (Red) button to exit
@@ -1088,15 +1084,15 @@ namespace YARG.Menu.Multiplayer
 
         private bool HasPrefabHostPanel()
         {
-            return hostAddressPanel != null &&
-                   lanAddressRow != null &&
-                   lanAddressValueText != null &&
-                   lanVisibilityToggleButton != null &&
-                   lanCopyButton != null &&
-                   wanAddressRow != null &&
-                   wanAddressValueText != null &&
-                   wanVisibilityToggleButton != null &&
-                   wanCopyButton != null;
+            // Only require the share info row components - hostAddressPanel is optional
+            bool hasRow = shareInfoRow != null;
+            bool hasValue = shareInfoValueText != null;
+            bool hasToggle = shareInfoVisibilityToggleButton != null;
+            bool hasCopy = shareInfoCopyButton != null;
+            
+            Debug.Log($"[LobbyRoomMenu] HasPrefabHostPanel check: row={hasRow}, value={hasValue}, toggle={hasToggle}, copy={hasCopy}");
+            
+            return hasRow && hasValue && hasToggle && hasCopy;
         }
 
         private void BindHostPanelButtons()
@@ -1104,18 +1100,14 @@ namespace YARG.Menu.Multiplayer
             if (_hostPanelListenersBound)
                 return;
 
-            if (lobbyCodeVisibilityToggleButton != null)
-                lobbyCodeVisibilityToggleButton.onClick.AddListener(ToggleLobbyCodeVisibility);
-            if (lobbyCodeCopyButton != null)
-                lobbyCodeCopyButton.onClick.AddListener(CopyLobbyCode);
+            if (shareInfoVisibilityToggleButton != null)
+                shareInfoVisibilityToggleButton.onClick.AddListener(ToggleShareInfoVisibility);
+            if (shareInfoCopyButton != null)
+                shareInfoCopyButton.onClick.AddListener(CopyShareInfo);
             if (lanVisibilityToggleButton != null)
                 lanVisibilityToggleButton.onClick.AddListener(ToggleLanVisibility);
             if (lanCopyButton != null)
                 lanCopyButton.onClick.AddListener(CopyLanAddress);
-            if (wanVisibilityToggleButton != null)
-                wanVisibilityToggleButton.onClick.AddListener(ToggleWanVisibility);
-            if (wanCopyButton != null)
-                wanCopyButton.onClick.AddListener(CopyWanAddress);
 
             _hostPanelListenersBound = true;
         }
@@ -1131,20 +1123,29 @@ namespace YARG.Menu.Multiplayer
                 return false;
             }
 
-            // Apply lobby code row first (most prominent for Lobby sessions)
-            bool hasLobbyCode = ApplyEndpointRow(ref _lobbyCode, lobbyCode, ref _lobbyCodeVisible, lobbyCodeRow, lobbyCodeValueText, lobbyCodeVisibilityToggleButton, lobbyCodeVisibilityToggleLabel, lobbyCodeCopyButton);
+            // Determine mode: Lobby (with code) or Server (WAN address)
+            bool hasLobbyCode = !string.IsNullOrEmpty(lobbyCode);
+            _isLobbyMode = hasLobbyCode;
             
-            // Hide LAN/WAN rows when we have a lobby code (cleaner UI)
+            // Update the label text based on mode
+            if (shareInfoLabelText != null)
+            {
+                shareInfoLabelText.text = hasLobbyCode ? "Lobby Code" : "WAN";
+            }
+            
+            // Apply the appropriate value to the share info row
+            string shareValue = hasLobbyCode ? lobbyCode : wanEndpoint;
+            ApplyEndpointRow(ref _shareInfoValue, shareValue, ref _shareInfoVisible, shareInfoRow, shareInfoValueText, shareInfoVisibilityToggleButton, shareInfoVisibilityToggleLabel, shareInfoCopyButton);
+            
+            // Show LAN row only in Server mode (when not using lobby code)
             if (hasLobbyCode)
             {
                 if (lanAddressRow != null) lanAddressRow.SetActive(false);
-                if (wanAddressRow != null) wanAddressRow.SetActive(false);
             }
             else
             {
-                // No lobby code - show LAN/WAN addresses for Server mode
+                // Server mode - also show LAN address
                 ApplyEndpointRow(ref _lanAddress, lanEndpoint, ref _lanVisible, lanAddressRow, lanAddressValueText, lanVisibilityToggleButton, lanVisibilityToggleLabel, lanCopyButton);
-                ApplyEndpointRow(ref _wanAddress, wanEndpoint, ref _wanVisible, wanAddressRow, wanAddressValueText, wanVisibilityToggleButton, wanVisibilityToggleLabel, wanCopyButton);
             }
 
             SetHostSidebarActive(true);
@@ -1153,14 +1154,23 @@ namespace YARG.Menu.Multiplayer
 
         private void SetHostSidebarActive(bool active)
         {
+            // Use hostAddressPanel if available, otherwise use shareInfoRow's parent
             if (hostAddressPanel != null)
+            {
                 hostAddressPanel.SetActive(active);
+            }
+            else if (shareInfoRow != null)
+            {
+                // If no explicit panel, just show/hide the row directly
+                shareInfoRow.SetActive(active);
+            }
 
+            // Also activate the parent container if specified
             var container = hostAddressPanelParent != null
                 ? hostAddressPanelParent.gameObject
-                : hostAddressPanel?.transform.parent?.gameObject;
+                : (hostAddressPanel != null ? hostAddressPanel.transform.parent?.gameObject : shareInfoRow?.transform.parent?.gameObject);
 
-            if (container != null && container != hostAddressPanel && active)
+            if (container != null && container != hostAddressPanel && container != shareInfoRow && active)
                 container.SetActive(true);
         }
 
@@ -1251,12 +1261,10 @@ namespace YARG.Menu.Multiplayer
             RefreshEndpointDisplay(endpoint, visibility, valueLabel, toggleLabel, toggleButton, true);
         }
 
-        private void ToggleLobbyCodeVisibility() => ToggleEndpointVisibility(ref _lobbyCodeVisible, _lobbyCode, lobbyCodeValueText, lobbyCodeVisibilityToggleLabel, lobbyCodeVisibilityToggleButton);
+        private void ToggleShareInfoVisibility() => ToggleEndpointVisibility(ref _shareInfoVisible, _shareInfoValue, shareInfoValueText, shareInfoVisibilityToggleLabel, shareInfoVisibilityToggleButton);
         private void ToggleLanVisibility() => ToggleEndpointVisibility(ref _lanVisible, _lanAddress, lanAddressValueText, lanVisibilityToggleLabel, lanVisibilityToggleButton);
-        private void ToggleWanVisibility() => ToggleEndpointVisibility(ref _wanVisible, _wanAddress, wanAddressValueText, wanVisibilityToggleLabel, wanVisibilityToggleButton);
-        private void CopyLobbyCode() => CopyEndpointToClipboard(_lobbyCode, "Lobby code");
-        private void CopyLanAddress() => CopyEndpointToClipboard(_lanAddress, "LAN");
-        private void CopyWanAddress() => CopyEndpointToClipboard(_wanAddress, "WAN");
+        private void CopyShareInfo() => CopyEndpointToClipboard(_shareInfoValue, _isLobbyMode ? "Lobby code" : "WAN address");
+        private void CopyLanAddress() => CopyEndpointToClipboard(_lanAddress, "LAN address");
 
         private void CopyEndpointToClipboard(string endpoint, string label)
         {

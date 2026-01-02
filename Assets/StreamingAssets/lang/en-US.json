@@ -313,7 +313,7 @@
             "EmptyMySessions": "You have not hosted any sessions yet",
             "EmptyMyLobbies": "You have not hosted any lobbies yet",
             "EmptyRecents": "No recent lobbies",
-            "EmptyDiscovered": "No LAN lobbies detected",
+            "EmptyDiscovered": "No lobbies detected",
             "Back": "Back",
             "PasswordRequired": "Password Required",
             "PasswordRequiredMessage": "The lobby '{0}' requires a password.\nPassword input dialog coming soon!",

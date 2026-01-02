@@ -210,6 +210,11 @@ namespace YARG.Networking.Abstraction
         public int DiscoveryPort => _discovery?.DiscoveryPort ?? _defaultPort;
         
         /// <summary>
+        /// Gets the local port the transport is bound to (for NAT punch registration).
+        /// </summary>
+        public int LocalTransportPort => _liteNetTransport?.LocalPort ?? 0;
+        
+        /// <summary>
         /// Whether any local player is the designated host.
         /// For dedicated servers, this is the player who can select songs.
         /// For regular lobbies, this is the same as IsHosting.
@@ -421,6 +426,12 @@ namespace YARG.Networking.Abstraction
         /// Parameter: ordered list of player IDs.
         /// </summary>
         public event Action<List<Guid>> OnTrackOrderReceived;
+        
+        /// <summary>
+        /// Fired when NAT punch succeeds on the transport.
+        /// Parameters: targetEndPoint, addressType, token
+        /// </summary>
+        public event Action<System.Net.IPEndPoint, LiteNetLib.NatAddressType, string> OnNatPunchSuccess;
 
         #endregion
 
@@ -757,6 +768,9 @@ namespace YARG.Networking.Abstraction
                 _liteNetTransport = new LiteNetLibTransport();
                 _transport = _liteNetTransport;
                 
+                // Subscribe to NAT punch events
+                SubscribeToNatPunchEvents();
+                
                 // Create discovery system
                 _discovery = new LiteNetDiscovery();
                 _discovery.SetDiscoveryPort(_defaultPort);
@@ -884,6 +898,9 @@ namespace YARG.Networking.Abstraction
                     _liteNetTransport.OnLatencyUpdate -= OnTransportLatencyUpdate;
                     _liteNetTransport.OnUnconnectedMessage -= HandleUnconnectedMessage;
                 }
+                
+                // Unsubscribe from NAT punch events
+                UnsubscribeFromNatPunchEvents();
                 
                 // Unsubscribe from manager events
                 if (_setlistManager != null)
@@ -3741,7 +3758,8 @@ namespace YARG.Networking.Abstraction
                     // This is a new remote player - create NetworkPlayerData for them
                     // Note: They might have the same NAME as one of our local players, but
                     // they have a different NetworkPlayerId, so they're a different person!
-                    var remotePlayer = CreateLiteNetPlayerData(playerName, isHost: false, isLocal: false, initialInstrument: -1, initialDifficulty: 0, connectionId: Guid.Empty);
+                    // Default to Expert (4) since Beginner (0) often doesn't exist in songs
+                    var remotePlayer = CreateLiteNetPlayerData(playerName, isHost: false, isLocal: false, initialInstrument: -1, initialDifficulty: 4, connectionId: Guid.Empty);
                     remotePlayer.NetworkPlayerId = playerId;
                     
                     if (newRemotePlayers == null)
@@ -3966,6 +3984,132 @@ namespace YARG.Networking.Abstraction
             _serverConnection.Send(data, ChannelType.ReliableOrdered);
             NetworkLogger.Verbose($"Client: Sent band name change request (band {bandId})");
         }
+        
+        #region NAT Punch
+        
+        /// <summary>
+        /// Sends a NAT introduction request to a punch server.
+        /// Use this to initiate NAT punch-through to a host.
+        /// </summary>
+        /// <param name="punchServerHost">The hostname or IP of the punch server</param>
+        /// <param name="punchServerPort">The UDP port of the punch server</param>
+        /// <param name="token">The punch token (identifying the session)</param>
+        public void SendNatIntroduceRequest(string punchServerHost, int punchServerPort, string token)
+        {
+            if (_liteNetTransport == null || !_liteNetTransport.IsRunning)
+            {
+                NetworkLogger.Warn("[LiteNetNetworkingAdapter] Cannot send NAT introduce request: transport not running");
+                return;
+            }
+            
+            NetworkLogger.Info($"[LiteNetNetworkingAdapter] Sending NAT introduce request to {punchServerHost}:{punchServerPort}");
+            _liteNetTransport.SendNatIntroduceRequest(punchServerHost, punchServerPort, token);
+        }
+        
+        /// <summary>
+        /// Subscribes to NAT punch success events on the transport.
+        /// Called when transport is initialized.
+        /// </summary>
+        private void SubscribeToNatPunchEvents()
+        {
+            if (_liteNetTransport != null)
+            {
+                _liteNetTransport.OnNatPunchSuccess += HandleNatPunchSuccess;
+            }
+        }
+        
+        /// <summary>
+        /// Unsubscribes from NAT punch success events on the transport.
+        /// </summary>
+        private void UnsubscribeFromNatPunchEvents()
+        {
+            if (_liteNetTransport != null)
+            {
+                _liteNetTransport.OnNatPunchSuccess -= HandleNatPunchSuccess;
+            }
+        }
+        
+        /// <summary>
+        /// Handles NAT punch success from transport.
+        /// </summary>
+        private void HandleNatPunchSuccess(System.Net.IPEndPoint targetEndPoint, LiteNetLib.NatAddressType type, string token)
+        {
+            NetworkLogger.Info($"[LiteNetNetworkingAdapter] NAT punch success: target={targetEndPoint}, type={type}, token={token}");
+            
+            // Forward to main thread and fire event
+            UnityMainThreadDispatcher.EnqueueAction(() =>
+            {
+                OnNatPunchSuccess?.Invoke(targetEndPoint, type, token);
+            });
+        }
+        
+        /// <summary>
+        /// Starts the transport layer without connecting to a server.
+        /// Used for NAT punch-through - the client needs an active socket to receive punch messages.
+        /// </summary>
+        /// <returns>True if transport started successfully, false otherwise.</returns>
+        public bool StartTransportForNatPunch()
+        {
+            if (_liteNetTransport != null && _liteNetTransport.IsRunning)
+            {
+                NetworkLogger.Info("[LiteNetNetworkingAdapter] Transport already running for NAT punch");
+                return true;
+            }
+            
+            try
+            {
+                // Create transport if not exists
+                if (_liteNetTransport == null)
+                {
+                    _liteNetTransport = new LiteNetLibTransport();
+                    _transport = _liteNetTransport;
+                    SubscribeToNatPunchEvents();
+                }
+                
+                // Start transport in "server" mode on port 0 (ephemeral port)
+                // This creates an active UDP socket that can receive NAT punch messages
+                // We're not actually hosting - just need the socket for NAT punch
+                var startOptions = new YARG.Net.Transport.TransportStartOptions
+                {
+                    IsServer = true, // Server mode to just start listening, not connect
+                    EnableNatPunchThrough = true,
+                    Port = 0, // Let OS assign an ephemeral port
+                    Address = "0.0.0.0"
+                };
+                
+                _liteNetTransport.Start(startOptions);
+                NetworkLogger.Info($"[LiteNetNetworkingAdapter] Transport started for NAT punch on port {_liteNetTransport.LocalPort}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                NetworkLogger.Error($"[LiteNetNetworkingAdapter] Failed to start transport for NAT punch: {ex.Message}");
+                return false;
+            }
+        }
+        
+        /// <summary>
+        /// Stops the transport layer if it was started for NAT punch but punch failed.
+        /// This allows JoinLobby to start fresh.
+        /// </summary>
+        public void StopTransport()
+        {
+            try
+            {
+                if (_liteNetTransport != null && _liteNetTransport.IsRunning)
+                {
+                    NetworkLogger.Info("[LiteNetNetworkingAdapter] Stopping transport (was started for NAT punch)");
+                    UnsubscribeFromNatPunchEvents();
+                    _liteNetTransport.Shutdown("NAT punch cleanup");
+                }
+            }
+            catch (Exception ex)
+            {
+                NetworkLogger.Error($"[LiteNetNetworkingAdapter] Error stopping transport: {ex.Message}");
+            }
+        }
+        
+        #endregion
         
         /// <summary>
         /// Event fired when band score update is received from network.
@@ -6025,7 +6169,8 @@ namespace YARG.Networking.Abstraction
                     
                     // Create a new NetworkPlayerData for this remote player
                     // Use "remote" key to track players from other clients
-                    targetPlayer = CreateLiteNetPlayerData(playerName, isHost: false, isLocal: false, initialInstrument: -1, initialDifficulty: 0, connectionId: Guid.Empty);
+                    // Default to Expert (4) since Beginner (0) often doesn't exist in songs
+                    targetPlayer = CreateLiteNetPlayerData(playerName, isHost: false, isLocal: false, initialInstrument: -1, initialDifficulty: 4, connectionId: Guid.Empty);
                     
                     // Try to find the NetworkPlayerId from our stored mapping (populated from band assignment)
                     foreach (var kvp in _remotePlayerIdToName)
@@ -7543,12 +7688,29 @@ namespace YARG.Networking.Abstraction
             }
         }
 
+        /// <summary>
+        /// Connection timeout in seconds for joining a lobby.
+        /// </summary>
+        private const int CONNECTION_TIMEOUT_SECONDS = 15;
+        
         private async Task ConnectToServerAsync(string address, int port)
         {
             try
             {
-                await _clientRuntime.ConnectAsync(address, port);
+                NetworkLogger.Info($"Attempting connection to {address}:{port} (timeout: {CONNECTION_TIMEOUT_SECONDS}s)");
+                
+                // Create a cancellation token with timeout
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CONNECTION_TIMEOUT_SECONDS));
+                
+                await _clientRuntime.ConnectAsync(address, port, cts.Token);
                 NetworkLogger.Info($"Successfully connected to {address}:{port}");
+            }
+            catch (OperationCanceledException)
+            {
+                // Connection timed out
+                NetworkLogger.Error($"[LiteNetNetworkingAdapter] Connection to {address}:{port} timed out after {CONNECTION_TIMEOUT_SECONDS} seconds");
+                _isJoinInProgress = false;
+                OnNetworkError?.Invoke($"Connection timed out. The host may be behind a firewall or the port may not be forwarded.");
             }
             catch (Exception ex)
             {
@@ -7607,11 +7769,11 @@ namespace YARG.Networking.Abstraction
                 try
                 {
                     peer.Send(message, LiteNetLib.DeliveryMethod.ReliableOrdered);
-                    NetworkLogger.Info($"Sent host disconnect notification to {peer.EndPoint}");
+                    NetworkLogger.Info($"Sent host disconnect notification to {peer}");
                 }
                 catch (Exception ex)
                 {
-                    NetworkLogger.Warn($"[LiteNetNetworkingAdapter] Failed to notify peer {peer.EndPoint}: {ex.Message}");
+                    NetworkLogger.Warn($"[LiteNetNetworkingAdapter] Failed to notify peer {peer}: {ex.Message}");
                 }
             }
             
@@ -7875,7 +8037,7 @@ namespace YARG.Networking.Abstraction
                     // Match by endpoint or use a stored mapping
                     // For now, we'll try to match by iterating
                     // This is a simplified approach - ideally we'd have a proper connection ID mapping
-                    NetworkLogger.Info($"Disconnecting peer {peer.EndPoint}");
+                    NetworkLogger.Info($"Disconnecting peer {peer}");
                     peer.Disconnect();
                     break; // In a simple 1-to-1 case, disconnect the first non-host peer
                 }

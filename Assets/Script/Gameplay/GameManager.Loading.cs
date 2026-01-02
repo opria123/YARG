@@ -564,6 +564,14 @@ namespace YARG.Gameplay
                     var chartHash = Chart?.GetHashCode() ?? -1;
                     YargLogger.LogInfo($"[GameManager] Creating player {player.Profile.Name}, Chart instance: {chartStatus}, GetHashCode: {chartHash}");
 
+                    // Validate that the player's difficulty exists in the chart
+                    // This is important for remote players who may have an invalid/default difficulty
+                    if (!ValidateAndFixPlayerDifficulty(player, Chart))
+                    {
+                        YargLogger.LogWarning($"[GameManager.CreatePlayers] Skipping player {player.Profile.Name} - no valid difficulty available for {player.Profile.CurrentInstrument}");
+                        continue;
+                    }
+
                     if (player.Profile.GameMode != GameMode.Vocals)
                     {
                         highwayIndex++;
@@ -875,6 +883,143 @@ namespace YARG.Gameplay
 
             // If we still didn't find a match, look for any entry that matches the expected locality
             return networkPlayers.FirstOrDefault(p => p != null && p.IsLocalUser == expectsLocalData);
+        }
+        
+        /// <summary>
+        /// Validates that the player's current difficulty exists in the chart for their instrument.
+        /// If the difficulty doesn't exist, attempts to find a fallback difficulty.
+        /// This is particularly important for remote multiplayer players who may have an invalid/default difficulty.
+        /// </summary>
+        /// <param name="player">The player to validate.</param>
+        /// <param name="chart">The song chart to check against.</param>
+        /// <returns>True if a valid difficulty was found (either existing or fallback), false if no valid difficulty exists.</returns>
+        private bool ValidateAndFixPlayerDifficulty(YargPlayer player, SongChart chart)
+        {
+            if (player == null || chart == null)
+            {
+                YargLogger.LogWarning("[GameManager] ValidateAndFixPlayerDifficulty: null player or chart");
+                return false;
+            }
+            
+            var instrument = player.Profile.CurrentInstrument;
+            var currentDifficulty = player.Profile.CurrentDifficulty;
+            var gameMode = player.Profile.GameMode;
+            
+            // For vocals, we don't need difficulty validation the same way
+            if (gameMode == GameMode.Vocals)
+            {
+                return true;
+            }
+            
+            // Try to check if the current difficulty exists for the instrument
+            bool difficultyExists = CheckDifficultyExistsForInstrument(chart, instrument, currentDifficulty);
+            
+            if (difficultyExists)
+            {
+                YargLogger.LogInfo($"[GameManager] ValidateAndFixPlayerDifficulty: {player.Profile.Name}'s difficulty {currentDifficulty} is valid for {instrument}");
+                return true;
+            }
+            
+            // Current difficulty doesn't exist - try to find a fallback
+            YargLogger.LogWarning($"[GameManager] ValidateAndFixPlayerDifficulty: {player.Profile.Name}'s difficulty {currentDifficulty} doesn't exist for {instrument}, searching for fallback...");
+            
+            // Try difficulties in order: Expert, Hard, Medium, Easy, ExpertPlus, Beginner
+            // Expert is the most common, so try it first
+            Difficulty[] fallbackOrder = new[]
+            {
+                Difficulty.Expert,
+                Difficulty.Hard,
+                Difficulty.Medium,
+                Difficulty.Easy,
+                Difficulty.ExpertPlus,
+                Difficulty.Beginner
+            };
+            
+            foreach (var fallbackDiff in fallbackOrder)
+            {
+                if (fallbackDiff == currentDifficulty)
+                {
+                    continue; // Already checked this one
+                }
+                
+                if (CheckDifficultyExistsForInstrument(chart, instrument, fallbackDiff))
+                {
+                    YargLogger.LogInfo($"[GameManager] ValidateAndFixPlayerDifficulty: Found fallback difficulty {fallbackDiff} for {player.Profile.Name}");
+                    player.Profile.CurrentDifficulty = fallbackDiff;
+                    return true;
+                }
+            }
+            
+            // No valid difficulty found for this instrument
+            YargLogger.LogError($"[GameManager] ValidateAndFixPlayerDifficulty: No valid difficulty found for {player.Profile.Name} on {instrument}");
+            return false;
+        }
+        
+        /// <summary>
+        /// Checks if a specific difficulty exists for an instrument in the chart.
+        /// </summary>
+        private bool CheckDifficultyExistsForInstrument(SongChart chart, Instrument instrument, Difficulty difficulty)
+        {
+            try
+            {
+                // Handle based on instrument type
+                switch (instrument)
+                {
+                    // Five Fret instruments
+                    case Instrument.FiveFretGuitar:
+                    case Instrument.FiveFretCoopGuitar:
+                    case Instrument.FiveFretRhythm:
+                    case Instrument.FiveFretBass:
+                    case Instrument.Keys:
+                        var fiveFretTrack = chart.GetFiveFretTrack(instrument);
+                        return fiveFretTrack.TryGetDifficulty(difficulty, out _);
+                    
+                    // Six Fret instruments
+                    case Instrument.SixFretGuitar:
+                    case Instrument.SixFretCoopGuitar:
+                    case Instrument.SixFretRhythm:
+                    case Instrument.SixFretBass:
+                        var sixFretTrack = chart.GetSixFretTrack(instrument);
+                        return sixFretTrack.TryGetDifficulty(difficulty, out _);
+                    
+                    // Drums
+                    case Instrument.FourLaneDrums:
+                    case Instrument.ProDrums:
+                    case Instrument.FiveLaneDrums:
+                        var drumsTrack = chart.GetDrumsTrack(instrument);
+                        return drumsTrack.TryGetDifficulty(difficulty, out _);
+                    
+                    // Elite Drums - uses its own track type
+                    case Instrument.EliteDrums:
+                        return chart.EliteDrums.TryGetDifficulty(difficulty, out _);
+                    
+                    // Pro Guitar
+                    case Instrument.ProGuitar_17Fret:
+                    case Instrument.ProGuitar_22Fret:
+                    case Instrument.ProBass_17Fret:
+                    case Instrument.ProBass_22Fret:
+                        var proGuitarTrack = chart.GetProGuitarTrack(instrument);
+                        return proGuitarTrack.TryGetDifficulty(difficulty, out _);
+                    
+                    // Pro Keys
+                    case Instrument.ProKeys:
+                        return chart.ProKeys.TryGetDifficulty(difficulty, out _);
+                    
+                    // Vocals don't have traditional difficulties the same way
+                    case Instrument.Vocals:
+                    case Instrument.Harmony:
+                        return true;
+                    
+                    default:
+                        YargLogger.LogWarning($"[GameManager] CheckDifficultyExistsForInstrument: Unhandled instrument {instrument}");
+                        return true; // Assume it exists for unknown instruments
+                }
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogError($"[GameManager] CheckDifficultyExistsForInstrument: Exception checking {instrument} at {difficulty}: {ex.Message}");
+                return false;
+            }
         }
         
         /// <summary>

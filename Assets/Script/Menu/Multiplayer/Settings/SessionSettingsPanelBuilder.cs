@@ -554,10 +554,6 @@ namespace YARG.Menu.Multiplayer.Settings
             _noFailRow = CreateToggleSetting(parent, "No Fail Mode", out _noFailToggle);
             Debug.Log($"[SessionSettingsPanelBuilder] Created No Fail row: {_noFailRow?.name}, toggle={_noFailToggle != null}");
 
-            // Shared Songs Only (Toggle)
-            _sharedSongsRow = CreateToggleSetting(parent, "Shared Songs Only", out _sharedSongsToggle);
-            Debug.Log($"[SessionSettingsPanelBuilder] Created Shared Songs row: {_sharedSongsRow?.name}, toggle={_sharedSongsToggle != null}");
-
             // Allow Modifiers (Toggle)
             _allowModifiersRow = CreateToggleSetting(parent, "Allow Modifiers", out _allowModifiersToggle);
             Debug.Log($"[SessionSettingsPanelBuilder] Created Allow Modifiers row: {_allowModifiersRow?.name}, toggle={_allowModifiersToggle != null}");
@@ -565,10 +561,14 @@ namespace YARG.Menu.Multiplayer.Settings
             // Allowed Instruments (Icon Buttons)
             _allowedInstrumentsRow = CreateInstrumentPickerSetting(parent, "Allowed Instruments");
             Debug.Log($"[SessionSettingsPanelBuilder] Created Allowed Instruments row: {_allowedInstrumentsRow?.name}");
+
+            // Songs Support All Instruments (Toggle) - placed after allowed instruments
+            _sharedSongsRow = CreateToggleSetting(parent, "Songs Support All Instruments", out _sharedSongsToggle);
+            Debug.Log($"[SessionSettingsPanelBuilder] Created Songs Support All Instruments row: {_sharedSongsRow?.name}, toggle={_sharedSongsToggle != null}");
             
             // Local Players First (Toggle)
-            _localPlayersFirstRow = CreateToggleSetting(parent, "Local Tracks First", out _localPlayersFirstToggle);
-            Debug.Log($"[SessionSettingsPanelBuilder] Created Local Players First row: {_localPlayersFirstRow?.name}, toggle={_localPlayersFirstToggle != null}");
+            _localPlayersFirstRow = CreateToggleSetting(parent, "Align Local Tracks Left", out _localPlayersFirstToggle);
+            Debug.Log($"[SessionSettingsPanelBuilder] Created Align Local Tracks Left row: {_localPlayersFirstRow?.name}, toggle={_localPlayersFirstToggle != null}");
             
             Debug.Log($"[SessionSettingsPanelBuilder] BuildGameplaySettings complete. Parent child count: {parent?.childCount}");
         }

@@ -34,6 +34,15 @@ namespace YARG.Menu.Settings.Visuals
 
         public void OnToggleChange()
         {
+            // Guard against null Setting - can happen if toggle is wired incorrectly
+            // or if this component is on a prefab that doesn't use the settings system
+            if (Setting == null)
+            {
+                Debug.LogWarning($"[ToggleSettingVisual] OnToggleChange called but Setting is null on {gameObject.name}. " +
+                    "This toggle may be incorrectly wired in the Inspector.");
+                return;
+            }
+            
             Setting.Value = _toggle.isOn;
             RefreshVisual();
         }

@@ -214,8 +214,8 @@ namespace YARG.Menu.Multiplayer.Settings
                 _gameplayCategory.AddSettingItem(noFailItem);
             }
 
-            // Shared Songs Only
-            var sharedSongsItem = CreateSettingItem(KEY_SHARED_SONGS, "Shared Songs Only", SessionSettingType.Toggle, _toggleSettingPrefab);
+            // Songs Support All Instruments
+            var sharedSongsItem = CreateSettingItem(KEY_SHARED_SONGS, "Songs Support All Instruments", SessionSettingType.Toggle, _toggleSettingPrefab);
             if (sharedSongsItem != null)
             {
                 _gameplayCategory.AddSettingItem(sharedSongsItem);

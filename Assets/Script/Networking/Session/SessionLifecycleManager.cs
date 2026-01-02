@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using LiteNetLib;
 using UnityEngine;
+using YARG.Core.Logging;
 using YARG.Networking.Settings;
 using YARG.Networking.UPnP;
+using YARG.Net.Directory;
 using YARG.Net.Introducer;
 using YARG.Net.Utilities;
 
@@ -21,12 +25,26 @@ namespace YARG.Networking.Session
 
         private UPnPPortForwarder? _upnpForwarder;
         private LobbyCodeClient? _lobbyCodeClient;
+        private NatPunchClient? _natPunchClient;
         private SessionPreset? _currentPreset;
         private string? _currentLobbyCode;
         private Guid _currentLobbyId;
         private CancellationTokenSource? _sessionCts;
         private CancellationTokenSource? _heartbeatCts;
         private bool _isSessionActive;
+        
+        // NAT punch endpoint info (for clients)
+        private IPEndPoint? _punchedEndpoint;
+        
+        // NAT punch server info (for hosts) - needs refreshing in heartbeat
+        private string? _natPunchIntroducerUrl;
+        private int _natPunchGamePort;
+        
+        /// <summary>
+        /// Gets the punched endpoint if NAT punch was successful.
+        /// Use this address to connect instead of the registered address.
+        /// </summary>
+        public IPEndPoint? PunchedEndpoint => _punchedEndpoint;
         
         // Heartbeat configuration - must be less than introducer TTL (30s)
         private const float HeartbeatIntervalSeconds = 15f;
@@ -64,7 +82,7 @@ namespace YARG.Networking.Session
         /// Gets the current lobby code (Lobby sessions only).
         /// </summary>
         public string? LobbyCode => _currentLobbyCode;
-
+        
         /// <summary>
         /// Gets whether UPnP port forwarding is active.
         /// </summary>
@@ -89,7 +107,7 @@ namespace YARG.Networking.Session
             if (_currentPreset != null)
             {
                 updateAction(_currentPreset);
-                Debug.Log($"[SessionManager] Updated preset setting. allowLateJoin={_currentPreset.allowLateJoin}");
+                YargLogger.LogInfo($"[SessionManager] Updated preset setting. allowLateJoin={_currentPreset.allowLateJoin}");
             }
         }
 
@@ -142,7 +160,7 @@ namespace YARG.Networking.Session
             // If a session is already active, stop it first
             if (_isSessionActive)
             {
-                Debug.Log("[SessionManager] Stopping existing session before starting new one");
+                YargLogger.LogInfo("[SessionManager] Stopping existing session before starting new one");
                 await StopAsync();
             }
 
@@ -150,7 +168,7 @@ namespace YARG.Networking.Session
             _currentPreset = preset;
             
             // Log preset details for debugging late join issues
-            Debug.Log($"[SessionManager] StartHostingAsync: preset.allowLateJoin={preset?.allowLateJoin}, " +
+            YargLogger.LogInfo($"[SessionManager] StartHostingAsync: preset.allowLateJoin={preset?.allowLateJoin}, " +
                 $"preset.sessionName={preset?.sessionName}, preset.id={preset?.id}");
             
             var ct = _sessionCts.Token;
@@ -177,7 +195,7 @@ namespace YARG.Networking.Session
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[SessionManager] Failed to start session: {ex}");
+                YargLogger.LogError($"[SessionManager] Failed to start session: {ex}");
                 OnSessionStateChanged?.Invoke(SessionState.Failed);
                 return SessionStartResult.Failure($"Failed to start session: {ex.Message}");
             }
@@ -209,14 +227,14 @@ namespace YARG.Networking.Session
             var settings = NetworkSettingsStore.Instance?.Settings;
             if (settings == null)
             {
-                Debug.LogError("[SessionManager] NetworkSettingsStore not initialized");
+                YargLogger.LogError("[SessionManager] NetworkSettingsStore not initialized");
                 return null;
             }
 
             var enabledIntroducers = settings.EnabledIntroducers;
             if (enabledIntroducers == null || enabledIntroducers.Count == 0)
             {
-                Debug.LogError("[SessionManager] No enabled introducers configured");
+                YargLogger.LogError("[SessionManager] No enabled introducers configured");
                 return null;
             }
 
@@ -227,20 +245,25 @@ namespace YARG.Networking.Session
             {
                 try
                 {
+                    YargLogger.LogInfo($"[SessionManager] Looking up code {code} on {introducer.displayName}...");
                     var result = await _lobbyCodeClient.LookupCodeAsync(introducer.url, code).AsUniTask();
                     if (result.IsSuccess)
                     {
-                        Debug.Log($"[SessionManager] Found lobby code {code} via {introducer.displayName}");
+                        YargLogger.LogInfo($"[SessionManager] Found lobby code {code} via {introducer.displayName}");
                         return result;
+                    }
+                    else
+                    {
+                        YargLogger.LogInfo($"[SessionManager] Code {code} not found on {introducer.displayName}: {result.Error}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[SessionManager] Error looking up code on {introducer.displayName}: {ex.Message}");
+                    YargLogger.LogWarning($"[SessionManager] Error looking up code on {introducer.displayName}: {ex.Message}");
                 }
             }
             
-            Debug.LogWarning($"[SessionManager] Lobby code {code} not found on any introducer");
+            YargLogger.LogWarning($"[SessionManager] Lobby code {code} not found on any introducer");
             return LobbyLookupResult.Failure("Invalid or expired code");
         }
 
@@ -266,13 +289,33 @@ namespace YARG.Networking.Session
                 {
                     // Get the external address for code dissemination
                     externalAddress = await _upnpForwarder.GetExternalIPAsync(ct);
+                    YargLogger.LogInfo($"[SessionManager] UPnP success! External address: {externalAddress ?? "null"}, port: {port}");
                 }
             }
 
             if (!upnpSuccess)
             {
-                Debug.LogWarning("[SessionManager] UPnP port forwarding failed. " +
-                    "Players may not be able to connect unless you manually forward the port.");
+                YargLogger.LogWarning("[SessionManager] UPnP port forwarding failed. Trying STUN to resolve public IP...");
+                
+                // Try STUN as a fallback to at least get the public IP
+                // Note: Without UPnP port forwarding, connections from outside the LAN won't work,
+                // but this allows the introducer to have the correct public IP for reference.
+                try
+                {
+                    externalAddress = await StunResolver.ResolvePublicAddressAsync(ct, 3000);
+                    if (!string.IsNullOrEmpty(externalAddress))
+                    {
+                        YargLogger.LogInfo($"[SessionManager] STUN resolved public IP: {externalAddress}");
+                    }
+                    else
+                    {
+                        YargLogger.LogWarning("[SessionManager] STUN failed to resolve public IP");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    YargLogger.LogWarning($"[SessionManager] STUN resolution failed: {ex.Message}");
+                }
             }
 
             // Step 2: Register with introducer(s)
@@ -294,20 +337,30 @@ namespace YARG.Networking.Session
             IntroducerEndpoint successfulIntroducer = null;
             var failedIntroducers = new List<(IntroducerEndpoint introducer, string error)>();
             
-            // Get address to register - prefer external (UPnP) address, fall back to LAN address
+            // Get address to register - prefer external (UPnP/STUN) address, fall back to LAN address
             // Never use 0.0.0.0 because the introducer would use its own view of our IP (e.g., Docker gateway)
             string lanAddress = NetworkAddressUtility.GetLocalLanAddress();
             string registerAddress = externalAddress ?? lanAddress ?? "0.0.0.0";
-            Debug.Log($"[SessionManager] Registering with address: {registerAddress} (external: {externalAddress ?? "null"}, lan: {lanAddress ?? "null"})");
+            
+            // Detect if we're registering with a LAN address - this will NOT work for external players!
+            bool isRegisteringWithLanAddress = string.IsNullOrEmpty(externalAddress) && !string.IsNullOrEmpty(lanAddress);
+            if (isRegisteringWithLanAddress)
+            {
+                YargLogger.LogWarning($"[SessionManager] WARNING: No public IP could be determined! " +
+                    $"Registering with LAN address {registerAddress} - external players will NOT be able to connect via lobby code. " +
+                    "Only players on the same local network can connect.");
+            }
+            
+            YargLogger.LogInfo($"[SessionManager] Registering with address: {registerAddress} (external: {externalAddress ?? "null"}, lan: {lanAddress ?? "null"}, port: {port})");
             
             foreach (var introducer in enabledIntroducers)
             {
-                Debug.Log($"[SessionManager] Trying introducer: {introducer.displayName} ({introducer.url})");
+                YargLogger.LogInfo($"[SessionManager] Trying introducer: {introducer.displayName} ({introducer.url})");
                 
                 try
                 {
                     // First, register the lobby with this introducer
-                    Debug.Log($"[SessionManager] Registering lobby with {introducer.displayName}...");
+                    YargLogger.LogInfo($"[SessionManager] Registering lobby with {introducer.displayName}...");
                     bool registered = await _lobbyCodeClient.RegisterLobbyAsync(
                         introducer.url,
                         lobbyId,
@@ -321,12 +374,12 @@ namespace YARG.Networking.Session
                     
                     if (!registered)
                     {
-                        Debug.LogWarning($"[SessionManager] Failed to register lobby with {introducer.displayName}");
+                        YargLogger.LogWarning($"[SessionManager] Failed to register lobby with {introducer.displayName}");
                         failedIntroducers.Add((introducer, "Failed to register lobby"));
                         continue;
                     }
                     
-                    Debug.Log($"[SessionManager] Lobby registered with {introducer.displayName}, generating code...");
+                    YargLogger.LogInfo($"[SessionManager] Lobby registered with {introducer.displayName}, generating code...");
                     
                     // Now generate the code
                     var codeResult = await _lobbyCodeClient.GenerateCodeAsync(introducer.url, lobbyId, ct).AsUniTask();
@@ -336,19 +389,19 @@ namespace YARG.Networking.Session
                         lobbyCode = codeResult.Code;
                         successfulIntroducer = introducer;
                         _registeredIntroducerUrls.Add(introducer.url);
-                        Debug.Log($"[SessionManager] Successfully generated lobby code '{lobbyCode}' from {introducer.displayName}");
+                        YargLogger.LogInfo($"[SessionManager] Successfully generated lobby code '{lobbyCode}' from {introducer.displayName}");
                         break;
                     }
                     else
                     {
                         var error = codeResult.Error ?? "Unknown error";
-                        Debug.LogWarning($"[SessionManager] Introducer {introducer.displayName} failed: {error}");
+                        YargLogger.LogWarning($"[SessionManager] Introducer {introducer.displayName} failed: {error}");
                         failedIntroducers.Add((introducer, error));
                     }
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[SessionManager] Introducer {introducer.displayName} threw exception: {ex.Message}");
+                    YargLogger.LogWarning($"[SessionManager] Introducer {introducer.displayName} threw exception: {ex.Message}");
                     failedIntroducers.Add((introducer, ex.Message));
                 }
             }
@@ -357,7 +410,7 @@ namespace YARG.Networking.Session
             if (string.IsNullOrEmpty(lobbyCode))
             {
                 var errorSummary = string.Join("; ", failedIntroducers.Select(f => $"{f.introducer.displayName}: {f.error}"));
-                Debug.LogError($"[SessionManager] All {enabledIntroducers.Count} introducers failed to generate lobby code: {errorSummary}");
+                YargLogger.LogError($"[SessionManager] All {enabledIntroducers.Count} introducers failed to generate lobby code: {errorSummary}");
                 return SessionStartResult.Failure($"All introducers failed. {errorSummary}");
             }
 
@@ -365,7 +418,7 @@ namespace YARG.Networking.Session
             _currentLobbyId = lobbyId;
             
             OnLobbyCodeGenerated?.Invoke(_currentLobbyCode);
-            Debug.Log($"[SessionManager] Lobby code generated: {_currentLobbyCode} (from {successfulIntroducer.displayName})");
+            YargLogger.LogInfo($"[SessionManager] Lobby code generated: {_currentLobbyCode} (from {successfulIntroducer.displayName})");
 
             // Step 4: Disseminate the code to all OTHER enabled introducers (ones we haven't registered with yet)
             var otherIntroducers = enabledIntroducers.Where(i => i.url != successfulIntroducer.url).ToList();
@@ -381,7 +434,7 @@ namespace YARG.Networking.Session
             }
             else if (otherIntroducers.Count > 0)
             {
-                Debug.LogWarning("[SessionManager] Could not get public address for code dissemination. " +
+                YargLogger.LogWarning("[SessionManager] Could not get public address for code dissemination. " +
                     "Code will only be registered with the successful introducer.");
             }
 
@@ -392,6 +445,10 @@ namespace YARG.Networking.Session
             _cachedHostPort = port;
             _cachedMaxPlayers = preset.maxPlayers;
             _cachedHasPassword = preset.HasPassword;
+            
+            // Step 5: Register with NAT punch server for hole punching coordination
+            // This allows clients to connect even without UPnP port forwarding
+            await RegisterWithNatPunchServerAsync(successfulIntroducer.url, lobbyId, port, ct);
             
             // Start heartbeat loop to keep lobby alive on introducers
             StartHeartbeatLoop();
@@ -405,12 +462,31 @@ namespace YARG.Networking.Session
                 ? $"Lobby code registered with all {totalCount} introducers"
                 : $"Lobby code registered with {registeredCount} of {totalCount} introducers";
 
+            // Build the result message based on the actual state
+            string resultMessage;
+            if (upnpSuccess)
+            {
+                resultMessage = $"Lobby created successfully. {registrationMessage}.";
+            }
+            else if (isRegisteringWithLanAddress)
+            {
+                // This is the worst case - no public IP at all
+                resultMessage = $"WARNING: Could not determine public IP! {registrationMessage}. " +
+                    $"External players will NOT be able to connect via lobby code. " +
+                    $"Only players on the same local network can join. " +
+                    $"Enable UPnP on your router or manually forward port {port}.";
+            }
+            else
+            {
+                // UPnP failed but STUN got the public IP - connections may still work with manual port forward
+                resultMessage = $"Lobby created, but UPnP port forwarding failed. {registrationMessage}. " +
+                    $"External players may not be able to connect unless port {port} is manually forwarded.";
+            }
+
             return SessionStartResult.Success(
                 upnpSuccess: upnpSuccess,
                 lobbyCode: _currentLobbyCode,
-                message: upnpSuccess
-                    ? $"Lobby created successfully. {registrationMessage}."
-                    : $"Lobby created, but UPnP failed. {registrationMessage}. Manual port forwarding may be required.");
+                message: resultMessage);
         }
         
         /// <summary>
@@ -439,11 +515,11 @@ namespace YARG.Networking.Session
                 if (success)
                 {
                     _registeredIntroducerUrls.Add(introducer.url);
-                    Debug.Log($"[SessionManager] Lobby code registered with {introducer.displayName}");
+                    YargLogger.LogInfo($"[SessionManager] Lobby code registered with {introducer.displayName}");
                 }
                 else
                 {
-                    Debug.LogWarning($"[SessionManager] Failed to register lobby code with {introducer.displayName}");
+                    YargLogger.LogWarning($"[SessionManager] Failed to register lobby code with {introducer.displayName}");
                 }
             }
         }
@@ -469,7 +545,7 @@ namespace YARG.Networking.Session
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[SessionManager] Error registering code with {introducer.displayName}: {ex.Message}");
+                YargLogger.LogWarning($"[SessionManager] Error registering code with {introducer.displayName}: {ex.Message}");
                 return (introducer, false);
             }
         }
@@ -483,7 +559,7 @@ namespace YARG.Networking.Session
         {
             // Server mode - no UPnP, no lobby code
             // User is expected to handle port forwarding manually
-            Debug.Log($"[SessionManager] Starting server session (privacy: {preset.PrivacyMode}, registerWithIntroducers: {preset.registerWithIntroducers})");
+            YargLogger.LogInfo($"[SessionManager] Starting server session (privacy: {preset.PrivacyMode}, registerWithIntroducers: {preset.registerWithIntroducers})");
 
             // For non-Unlisted servers that want to be discoverable, register with introducers
             // This allows the server to appear in the server browser without a lobby code
@@ -505,7 +581,7 @@ namespace YARG.Networking.Session
                     
                     // Get LAN address for registration (no UPnP external address for servers)
                     string lanAddress = NetworkAddressUtility.GetLocalLanAddress() ?? "0.0.0.0";
-                    Debug.Log($"[SessionManager] Registering server with introducers at {lanAddress}:{port}");
+                    YargLogger.LogInfo($"[SessionManager] Registering server with introducers at {lanAddress}:{port}");
                     
                     // Cache for heartbeats
                     _cachedLobbyName = preset.sessionName ?? "YARG Server";
@@ -534,16 +610,16 @@ namespace YARG.Networking.Session
                             if (registered)
                             {
                                 _registeredIntroducerUrls.Add(introducer.url);
-                                Debug.Log($"[SessionManager] Server registered with {introducer.displayName} for discovery");
+                                YargLogger.LogInfo($"[SessionManager] Server registered with {introducer.displayName} for discovery");
                             }
                             else
                             {
-                                Debug.LogWarning($"[SessionManager] Failed to register server with {introducer.displayName}");
+                                YargLogger.LogWarning($"[SessionManager] Failed to register server with {introducer.displayName}");
                             }
                         }
                         catch (Exception ex)
                         {
-                            Debug.LogWarning($"[SessionManager] Error registering server with {introducer.displayName}: {ex.Message}");
+                            YargLogger.LogWarning($"[SessionManager] Error registering server with {introducer.displayName}: {ex.Message}");
                         }
                     }
                     
@@ -555,12 +631,12 @@ namespace YARG.Networking.Session
                 }
                 else
                 {
-                    Debug.Log("[SessionManager] No introducers configured, server will only be discoverable on LAN");
+                    YargLogger.LogInfo("[SessionManager] No introducers configured, server will only be discoverable on LAN");
                 }
             }
             else
             {
-                Debug.Log("[SessionManager] Server is Unlisted or doesn't want introducer registration - skipping");
+                YargLogger.LogInfo("[SessionManager] Server is Unlisted or doesn't want introducer registration - skipping");
             }
 
             _isSessionActive = true;
@@ -581,6 +657,9 @@ namespace YARG.Networking.Session
             // Stop heartbeat loop first
             StopHeartbeatLoop();
             
+            // Cleanup NAT punch resources
+            CleanupNatPunch();
+            
             // Release lobby code from all registered introducers
             if (!string.IsNullOrEmpty(_currentLobbyCode) && _lobbyCodeClient != null)
             {
@@ -594,7 +673,7 @@ namespace YARG.Networking.Session
                 if (releaseTasks.Count > 0)
                 {
                     await UniTask.WhenAll(releaseTasks);
-                    Debug.Log($"[SessionManager] Released lobby code {_currentLobbyCode} from {releaseTasks.Count} introducer(s)");
+                    YargLogger.LogInfo($"[SessionManager] Released lobby code {_currentLobbyCode} from {releaseTasks.Count} introducer(s)");
                 }
                 
                 _registeredIntroducerUrls.Clear();
@@ -609,7 +688,7 @@ namespace YARG.Networking.Session
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[SessionManager] Failed to close UPnP port: {ex.Message}");
+                    YargLogger.LogWarning($"[SessionManager] Failed to close UPnP port: {ex.Message}");
                 }
 
                 _upnpForwarder.Dispose();
@@ -639,7 +718,7 @@ namespace YARG.Networking.Session
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[SessionManager] Failed to release lobby code from {introducerUrl}: {ex.Message}");
+                YargLogger.LogWarning($"[SessionManager] Failed to release lobby code from {introducerUrl}: {ex.Message}");
             }
         }
         
@@ -653,7 +732,7 @@ namespace YARG.Networking.Session
             _heartbeatCts = new CancellationTokenSource();
             HeartbeatLoopAsync(_heartbeatCts.Token).Forget();
             
-            Debug.Log($"[SessionManager] Started heartbeat loop (interval: {HeartbeatIntervalSeconds}s)");
+            YargLogger.LogInfo($"[SessionManager] Started heartbeat loop (interval: {HeartbeatIntervalSeconds}s)");
         }
         
         /// <summary>
@@ -666,7 +745,7 @@ namespace YARG.Networking.Session
                 _heartbeatCts.Cancel();
                 _heartbeatCts.Dispose();
                 _heartbeatCts = null;
-                Debug.Log("[SessionManager] Stopped heartbeat loop");
+                YargLogger.LogInfo("[SessionManager] Stopped heartbeat loop");
             }
         }
         
@@ -691,7 +770,7 @@ namespace YARG.Networking.Session
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[SessionManager] Heartbeat error: {ex.Message}");
+                    YargLogger.LogWarning($"[SessionManager] Heartbeat error: {ex.Message}");
                 }
                 
                 // Wait for next heartbeat interval
@@ -706,6 +785,501 @@ namespace YARG.Networking.Session
             }
         }
         
+        // ========== NAT PUNCH METHODS ==========
+        
+        // Cached punch server info for UDP keepalives
+        private string? _punchServerHost;
+        private int _punchServerPort;
+        private CancellationTokenSource? _punchKeepaliveCts;
+        
+        /// <summary>
+        /// Registers this host with the NAT punch server for hole punching coordination.
+        /// IMPORTANT: The game server transport must be running before calling this.
+        /// NAT punch messages are received by the game server's socket (not a separate client).
+        /// </summary>
+        private async UniTask RegisterWithNatPunchServerAsync(string introducerUrl, Guid lobbyId, int gamePort, CancellationToken ct)
+        {
+            try
+            {
+                // Subscribe to NAT punch events on the networking service's transport
+                var networkService = Abstraction.NetworkingServiceFactory.Instance;
+                if (networkService != null)
+                {
+                    networkService.OnNatPunchSuccess += OnNetworkServiceNatPunchSuccess;
+                }
+                
+                var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                
+                // First, get the punch server's UDP address
+                var punchInfoUri = new Uri(new Uri(introducerUrl), "/api/punch/info");
+                var punchInfoResponse = await httpClient.GetAsync(punchInfoUri, ct);
+                
+                if (!punchInfoResponse.IsSuccessStatusCode)
+                {
+                    YargLogger.LogWarning("[SessionManager] Failed to get NAT punch server info");
+                    httpClient.Dispose();
+                    return;
+                }
+                
+                var punchInfoJson = await punchInfoResponse.Content.ReadAsStringAsync();
+                var punchInfo = System.Text.Json.JsonSerializer.Deserialize<PunchInfoResponse>(punchInfoJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+                if (punchInfo == null || !punchInfo.Available || string.IsNullOrEmpty(punchInfo.Address))
+                {
+                    YargLogger.LogWarning("[SessionManager] NAT punch server not available");
+                    httpClient.Dispose();
+                    return;
+                }
+                
+                // Save punch server address for UDP keepalives
+                _punchServerHost = punchInfo.Address;
+                _punchServerPort = punchInfo.Port;
+                YargLogger.LogInfo($"[SessionManager] NAT punch server: {_punchServerHost}:{_punchServerPort}");
+                
+                // Register with punch server via HTTP - using the game server's port
+                // The punch server will send NAT introduce packets to this port
+                var localIp = NetworkAddressUtility.GetLocalLanAddress();
+                var localEndpoint = $"{localIp}:{gamePort}";
+                
+                var request = new PunchRegisterRequest(lobbyId, localEndpoint, gamePort);
+                var json = System.Text.Json.JsonSerializer.Serialize(request);
+                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                
+                var uri = new Uri(new Uri(introducerUrl), "/api/punch/register");
+                var response = await httpClient.PostAsync(uri, content, ct);
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    // Save for heartbeat refreshes
+                    _natPunchIntroducerUrl = introducerUrl;
+                    _natPunchGamePort = gamePort;
+                    YargLogger.LogInfo($"[SessionManager] Registered with NAT punch server (game port: {gamePort})");
+                    
+                    // NOTE: We do NOT start the keepalive loop here!
+                    // The transport must be running before we can send UDP packets.
+                    // Call StartPunchKeepalive() after NetworkService.CreateLobby() completes.
+                }
+                else
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    YargLogger.LogWarning($"[SessionManager] Failed to register with NAT punch server: {response.StatusCode} - {error}");
+                }
+                
+                httpClient.Dispose();
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogWarning($"[SessionManager] NAT punch registration failed: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Starts a loop that sends periodic UDP packets to the punch server to keep NAT mapping open.
+        /// </summary>
+        private void StartPunchKeepaliveLoop(Guid lobbyId)
+        {
+            StopPunchKeepaliveLoop();
+            
+            if (string.IsNullOrEmpty(_punchServerHost) || _punchServerPort == 0)
+            {
+                YargLogger.LogWarning("[SessionManager] Cannot start punch keepalive - no punch server configured");
+                return;
+            }
+            
+            _punchKeepaliveCts = new CancellationTokenSource();
+            PunchKeepaliveLoopAsync(lobbyId, _punchKeepaliveCts.Token).Forget();
+            YargLogger.LogInfo("[SessionManager] Started NAT punch keepalive loop");
+        }
+        
+        /// <summary>
+        /// Starts sending NAT punch keepalive packets to maintain NAT mapping.
+        /// IMPORTANT: Call this AFTER the transport is running (after CreateLobby()).
+        /// </summary>
+        public void StartPunchKeepalive()
+        {
+            if (!_isSessionActive)
+            {
+                YargLogger.LogWarning("[SessionManager] Cannot start punch keepalive - no active session");
+                return;
+            }
+            
+            if (_currentLobbyId == Guid.Empty)
+            {
+                YargLogger.LogWarning("[SessionManager] Cannot start punch keepalive - no lobby ID");
+                return;
+            }
+            
+            StartPunchKeepaliveLoop(_currentLobbyId);
+        }
+        
+        /// <summary>
+        /// Stops the punch keepalive loop.
+        /// </summary>
+        private void StopPunchKeepaliveLoop()
+        {
+            if (_punchKeepaliveCts != null)
+            {
+                _punchKeepaliveCts.Cancel();
+                _punchKeepaliveCts.Dispose();
+                _punchKeepaliveCts = null;
+                YargLogger.LogInfo("[SessionManager] Stopped NAT punch keepalive loop");
+            }
+        }
+        
+        /// <summary>
+        /// Periodically sends UDP packets to the punch server to keep NAT mapping open.
+        /// </summary>
+        private async UniTaskVoid PunchKeepaliveLoopAsync(Guid lobbyId, CancellationToken ct)
+        {
+            var networkService = Abstraction.NetworkingServiceFactory.Instance;
+            if (networkService == null)
+            {
+                YargLogger.LogWarning("[SessionManager] Cannot send punch keepalives - no networking service");
+                return;
+            }
+            
+            // Token format: "host:{lobbyId}" - this tells the server we're a host
+            var token = $"host:{lobbyId}";
+            
+            // Send initial keepalive immediately
+            networkService.SendNatIntroduceRequest(_punchServerHost!, _punchServerPort, token);
+            YargLogger.LogInfo($"[SessionManager] Sent initial punch keepalive to {_punchServerHost}:{_punchServerPort}");
+            
+            // Send keepalives every 5 seconds to keep NAT mapping alive
+            // Most NATs have timeouts of 30-60 seconds for UDP
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await UniTask.Delay(TimeSpan.FromSeconds(5), cancellationToken: ct);
+                    
+                    networkService.SendNatIntroduceRequest(_punchServerHost!, _punchServerPort, token);
+                    YargLogger.LogDebug($"[SessionManager] Sent punch keepalive to {_punchServerHost}:{_punchServerPort}");
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    YargLogger.LogWarning($"[SessionManager] Punch keepalive error: {ex.Message}");
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Called when a NAT punch succeeds on the networking service's transport.
+        /// </summary>
+        private void OnNetworkServiceNatPunchSuccess(IPEndPoint targetEndpoint, NatAddressType type, string token)
+        {
+            YargLogger.LogInfo($"[SessionManager] NAT punch success to {targetEndpoint} (type={type}, token={token})");
+            _punchedEndpoint = targetEndpoint;
+        }
+        
+        /// <summary>
+        /// Called when a NAT punch succeeds (legacy - keeping for compatibility during transition).
+        /// </summary>
+        private void OnNatPunchSuccess(IPEndPoint targetEndpoint, NatAddressType type, string token)
+        {
+            YargLogger.LogInfo($"[SessionManager] NAT punch success (legacy) to {targetEndpoint} (type={type}, token={token})");
+            _punchedEndpoint = targetEndpoint;
+        }
+        
+        /// <summary>
+        /// Initiates NAT punch-through to connect to a lobby.
+        /// Call this before attempting to connect via NetworkService.JoinLobby().
+        /// The networking service's transport will receive the punch messages.
+        /// </summary>
+        /// <param name="lobbyId">The lobby ID to connect to</param>
+        /// <param name="introducerUrl">The introducer URL to use for coordination</param>
+        /// <param name="timeoutMs">How long to wait for punch to complete</param>
+        /// <returns>The punched endpoint if successful, null if punch failed</returns>
+        public async UniTask<IPEndPoint?> InitiateNatPunchAsync(Guid lobbyId, string introducerUrl, int timeoutMs = 5000)
+        {
+            _punchedEndpoint = null;
+            bool startedTransportForPunch = false;
+            
+            try
+            {
+                var networkService = Abstraction.NetworkingServiceFactory.Instance;
+                if (networkService == null)
+                {
+                    YargLogger.LogWarning("[SessionManager] NAT punch failed: Networking service not available");
+                    return null;
+                }
+                
+                // Subscribe to NAT punch events
+                networkService.OnNatPunchSuccess += OnNetworkServiceNatPunchSuccess;
+                
+                // Start transport if not already running (needed to receive NAT punch messages)
+                var localPort = networkService.LocalTransportPort;
+                if (localPort == 0)
+                {
+                    YargLogger.LogInfo("[SessionManager] Starting transport for NAT punch...");
+                    if (!networkService.StartTransportForNatPunch())
+                    {
+                        YargLogger.LogWarning("[SessionManager] NAT punch failed: Could not start transport");
+                        networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                        return null;
+                    }
+                    startedTransportForPunch = true;
+                    localPort = networkService.LocalTransportPort;
+                    YargLogger.LogInfo($"[SessionManager] Transport started for NAT punch on port {localPort}");
+                }
+                
+                var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                
+                // First, get punch server info to know where to send UDP
+                var punchInfoUri = new Uri(new Uri(introducerUrl), "/api/punch/info");
+                var punchInfoResponse = await httpClient.GetAsync(punchInfoUri);
+                
+                if (!punchInfoResponse.IsSuccessStatusCode)
+                {
+                    YargLogger.LogWarning("[SessionManager] NAT punch failed: Could not get punch server info");
+                    httpClient.Dispose();
+                    if (startedTransportForPunch)
+                    {
+                        networkService.StopTransport();
+                    }
+                    networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                    return null;
+                }
+                
+                var punchInfoJson = await punchInfoResponse.Content.ReadAsStringAsync();
+                var punchInfo = System.Text.Json.JsonSerializer.Deserialize<PunchInfoResponse>(punchInfoJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+                if (punchInfo == null || !punchInfo.Available || string.IsNullOrEmpty(punchInfo.Address))
+                {
+                    YargLogger.LogWarning("[SessionManager] NAT punch server not available");
+                    httpClient.Dispose();
+                    if (startedTransportForPunch)
+                    {
+                        networkService.StopTransport();
+                    }
+                    networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                    return null;
+                }
+                
+                var punchServerHost = punchInfo.Address;
+                var punchServerPort = punchInfo.Port;
+                YargLogger.LogInfo($"[SessionManager] NAT punch server: {punchServerHost}:{punchServerPort}");
+                
+                // Client token for this punch request
+                var clientToken = Guid.NewGuid().ToString("N");
+                var token = $"client:{lobbyId}:{clientToken}";
+                
+                // CRITICAL: Send UDP packet to punch server BEFORE HTTP request
+                // This opens the NAT mapping so the server can send packets back to us
+                YargLogger.LogInfo($"[SessionManager] Sending UDP to punch server to open NAT mapping...");
+                networkService.SendNatIntroduceRequest(punchServerHost, punchServerPort, token);
+                
+                // Send a few packets to ensure the NAT mapping is established
+                for (int i = 0; i < 3; i++)
+                {
+                    await UniTask.Delay(100);
+                    networkService.SendNatIntroduceRequest(punchServerHost, punchServerPort, token);
+                }
+                
+                // Now request punch coordination via HTTP
+                var localIp = NetworkAddressUtility.GetLocalLanAddress();
+                var localEndpoint = $"{localIp}:{localPort}";
+                
+                var request = new PunchRequest(lobbyId, localEndpoint, localPort, clientToken);
+                var json = System.Text.Json.JsonSerializer.Serialize(request);
+                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                
+                var uri = new Uri(new Uri(introducerUrl), "/api/punch/request");
+                YargLogger.LogInfo($"[SessionManager] Requesting NAT punch via HTTP...");
+                var response = await httpClient.PostAsync(uri, content);
+                
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    YargLogger.LogWarning($"[SessionManager] NAT punch request failed: {response.StatusCode} - {error}");
+                    httpClient.Dispose();
+                    
+                    // Stop transport if we started it for punch
+                    if (startedTransportForPunch)
+                    {
+                        YargLogger.LogInfo("[SessionManager] Stopping transport started for failed NAT punch");
+                        networkService.StopTransport();
+                    }
+                    networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                    return null;
+                }
+                
+                var responseJson = await response.Content.ReadAsStringAsync();
+                var result = System.Text.Json.JsonSerializer.Deserialize<PunchResponseDto>(responseJson, 
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+                httpClient.Dispose();
+                
+                if (result == null || !result.Success)
+                {
+                    YargLogger.LogWarning($"[SessionManager] NAT punch initiation failed: {result?.Message ?? "Unknown error"}");
+                    
+                    // Stop transport if we started it for punch
+                    if (startedTransportForPunch)
+                    {
+                        YargLogger.LogInfo("[SessionManager] Stopping transport started for failed NAT punch");
+                        networkService.StopTransport();
+                    }
+                    networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                    return null;
+                }
+                
+                YargLogger.LogInfo($"[SessionManager] NAT punch initiated, waiting for success (timeout: {timeoutMs}ms)...");
+                
+                // Wait for punch success (with timeout)
+                // Keep sending UDP packets to maintain NAT mapping
+                var startTime = DateTime.UtcNow;
+                var lastSendTime = DateTime.UtcNow;
+                while (_punchedEndpoint == null && (DateTime.UtcNow - startTime).TotalMilliseconds < timeoutMs)
+                {
+                    await UniTask.Delay(50);
+                    
+                    // Send UDP keepalive every 500ms while waiting
+                    if ((DateTime.UtcNow - lastSendTime).TotalMilliseconds > 500)
+                    {
+                        networkService.SendNatIntroduceRequest(punchServerHost, punchServerPort, token);
+                        lastSendTime = DateTime.UtcNow;
+                    }
+                }
+                
+                // Unsubscribe from events
+                networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                
+                if (_punchedEndpoint != null)
+                {
+                    YargLogger.LogInfo($"[SessionManager] NAT punch succeeded! Endpoint: {_punchedEndpoint}");
+                    // Keep transport running - it will be used for the connection
+                    return _punchedEndpoint;
+                }
+                else
+                {
+                    YargLogger.LogWarning("[SessionManager] NAT punch timed out - falling back to direct connection");
+                    
+                    // Stop transport if we started it for punch
+                    if (startedTransportForPunch)
+                    {
+                        YargLogger.LogInfo("[SessionManager] Stopping transport started for failed NAT punch");
+                        networkService.StopTransport();
+                    }
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogWarning($"[SessionManager] NAT punch error: {ex.Message}");
+                
+                // Try to clean up transport if we started it
+                if (startedTransportForPunch)
+                {
+                    try
+                    {
+                        var networkService = Abstraction.NetworkingServiceFactory.Instance;
+                        if (networkService != null)
+                        {
+                            YargLogger.LogInfo("[SessionManager] Stopping transport after NAT punch error");
+                            networkService.StopTransport();
+                            networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+                        }
+                    }
+                    catch { /* ignore cleanup errors */ }
+                }
+                return null;
+            }
+        }
+        
+        // DTOs for HTTP punch communication (Unity-compatible classes instead of records)
+        [Serializable]
+        private class PunchRegisterRequest
+        {
+            public Guid LobbyId { get; set; }
+            public string InternalEndpoint { get; set; }
+            public int ExternalPort { get; set; }
+            
+            public PunchRegisterRequest(Guid lobbyId, string internalEndpoint, int externalPort)
+            {
+                LobbyId = lobbyId;
+                InternalEndpoint = internalEndpoint;
+                ExternalPort = externalPort;
+            }
+        }
+        
+        [Serializable]
+        private class PunchRequest
+        {
+            public Guid LobbyId { get; set; }
+            public string ClientInternalEndpoint { get; set; }
+            public int ClientPort { get; set; }
+            public string ClientToken { get; set; }
+            
+            public PunchRequest(Guid lobbyId, string clientInternalEndpoint, int clientPort, string clientToken = null)
+            {
+                LobbyId = lobbyId;
+                ClientInternalEndpoint = clientInternalEndpoint;
+                ClientPort = clientPort;
+                ClientToken = clientToken;
+            }
+        }
+        
+        [Serializable]
+        private class PunchResponseDto
+        {
+            public bool Success { get; set; }
+            public string PunchToken { get; set; }
+            public string Message { get; set; }
+        }
+        
+        [Serializable]
+        private class PunchInfoResponse
+        {
+            public bool Available { get; set; }
+            public string Address { get; set; }
+            public int Port { get; set; }
+            public string Message { get; set; }
+        }
+        
+        /// <summary>
+        /// Cleans up NAT punch resources.
+        /// </summary>
+        private void CleanupNatPunch()
+        {
+            // Stop punch keepalive loop
+            StopPunchKeepaliveLoop();
+            
+            // Clear punch server info
+            _punchServerHost = null;
+            _punchServerPort = 0;
+            
+            // Unsubscribe from networking service's NAT punch events
+            var networkService = Abstraction.NetworkingServiceFactory.Instance;
+            if (networkService != null)
+            {
+                networkService.OnNatPunchSuccess -= OnNetworkServiceNatPunchSuccess;
+            }
+            
+            // Clean up legacy NatPunchClient if still present
+            if (_natPunchClient != null)
+            {
+                _natPunchClient.OnPunchSuccess -= OnNatPunchSuccess;
+                
+                if (_currentLobbyId != Guid.Empty)
+                {
+                    // Fire and forget unregistration
+                    _ = _natPunchClient.UnregisterAsHostAsync(_currentLobbyId);
+                }
+                
+                _natPunchClient.Dispose();
+                _natPunchClient = null;
+            }
+            
+            _punchedEndpoint = null;
+        }
+
         /// <summary>
         /// Sends heartbeat (re-register) to all registered introducers.
         /// </summary>
@@ -721,7 +1295,48 @@ namespace YARG.Networking.Session
                 tasks.Add(SendHeartbeatToIntroducerAsync(introducerUrl, ct));
             }
             
+            // Also refresh NAT punch registration (has 60s TTL on server)
+            if (!string.IsNullOrEmpty(_natPunchIntroducerUrl))
+            {
+                tasks.Add(RefreshNatPunchRegistrationAsync(ct));
+            }
+            
             await UniTask.WhenAll(tasks);
+        }
+        
+        /// <summary>
+        /// Refreshes the NAT punch registration to keep it alive.
+        /// </summary>
+        private async UniTask RefreshNatPunchRegistrationAsync(CancellationToken ct)
+        {
+            if (string.IsNullOrEmpty(_natPunchIntroducerUrl) || _currentLobbyId == Guid.Empty)
+                return;
+                
+            try
+            {
+                var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                var localIp = NetworkAddressUtility.GetLocalLanAddress();
+                var localEndpoint = $"{localIp}:{_natPunchGamePort}";
+                
+                var request = new PunchRegisterRequest(_currentLobbyId, localEndpoint, _natPunchGamePort);
+                var json = System.Text.Json.JsonSerializer.Serialize(request);
+                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                
+                var uri = new Uri(new Uri(_natPunchIntroducerUrl), "/api/punch/register");
+                var response = await httpClient.PostAsync(uri, content, ct);
+                
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    YargLogger.LogWarning($"[SessionManager] NAT punch heartbeat failed: {response.StatusCode} - {error}");
+                }
+                
+                httpClient.Dispose();
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogWarning($"[SessionManager] NAT punch heartbeat error: {ex.Message}");
+            }
         }
         
         /// <summary>
@@ -744,12 +1359,12 @@ namespace YARG.Networking.Session
                     
                 if (!success)
                 {
-                    Debug.LogWarning($"[SessionManager] Heartbeat failed for {introducerUrl}");
+                    YargLogger.LogWarning($"[SessionManager] Heartbeat failed for {introducerUrl}");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[SessionManager] Heartbeat error for {introducerUrl}: {ex.Message}");
+                YargLogger.LogWarning($"[SessionManager] Heartbeat error for {introducerUrl}: {ex.Message}");
             }
         }
     }
